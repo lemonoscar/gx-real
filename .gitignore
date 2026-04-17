@@ -1,2 +1,4 @@
 doc/
 policies/
+__pycache__/
+*.pyc
