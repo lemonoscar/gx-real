@@ -1,4 +1,19 @@
 #!/usr/bin/env bash
+
+_gx_real_is_sourced() {
+  [[ "${BASH_SOURCE[0]}" != "$0" ]]
+}
+
+_gx_real_die() {
+  local code="$1"
+  if _gx_real_is_sourced; then
+    return "${code}"
+  else
+    exit "${code}"
+  fi
+}
+
+_GX_REAL_OLD_SHELLOPTS="$(set +o)"
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -36,19 +51,24 @@ source_maybe "${GX_REAL_ROOT}/real-wbc/ros2/install/setup.bash"
 
 if [[ ! -f "${GX_REAL_POLICY_PATH}" ]]; then
   echo "[gx-real] missing policy: ${GX_REAL_POLICY_PATH}" >&2
-  return 1 2>/dev/null || exit 1
+  eval "${_GX_REAL_OLD_SHELLOPTS}"
+  _gx_real_die 1
 fi
 
 if [[ ! -f "${GX_REAL_ROOT}/unitree_sdk2/python/crc_module.so" ]]; then
   echo "[gx-real] missing crc_module.so under unitree_sdk2/python" >&2
-  return 1 2>/dev/null || exit 1
+  eval "${_GX_REAL_OLD_SHELLOPTS}"
+  _gx_real_die 1
 fi
 
 if [[ ! -f "${GX_REAL_ROOT}/arx5-sdk/models/X5_umi.urdf" ]]; then
   echo "[gx-real] missing X5_umi.urdf under arx5-sdk/models" >&2
-  return 1 2>/dev/null || exit 1
+  eval "${_GX_REAL_OLD_SHELLOPTS}"
+  _gx_real_die 1
 fi
 
 echo "[gx-real] environment ready"
 echo "[gx-real] root=${GX_REAL_ROOT}"
 echo "[gx-real] policy=${GX_REAL_POLICY_PATH}"
+eval "${_GX_REAL_OLD_SHELLOPTS}"
+unset _GX_REAL_OLD_SHELLOPTS
