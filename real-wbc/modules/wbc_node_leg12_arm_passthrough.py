@@ -115,11 +115,14 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.umi_cup_action[12:] = 0.0
         self.init_action[:] = self.umi_cup_action[:]
         self.policy_path = policy_path
+        self.default_arm_hold_pose = np.array(
+            [0.0, 1.57, 1.57, 0.0, 0.0, 0.0], dtype=np.float64
+        )
         self.arm_passthrough_pose_user_set = arm_pose is not None
         self.arm_passthrough_pose = (
             np.array(arm_pose, dtype=np.float64)
             if arm_pose is not None
-            else np.zeros(6, dtype=np.float64)
+            else self.default_arm_hold_pose.copy()
         )
         self.fixed_commands = np.array([cmd_vx, cmd_vy, cmd_yaw], dtype=np.float64)
         self.fixed_gripper_cmd = float(gripper_cmd)
@@ -330,8 +333,6 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.init_leg_pos = reorder(self.quadruped_q).copy()
         lowstate = self.get_arm_joint_state()
         self.init_arm_pos = lowstate.pos().copy()
-        if not self.arm_passthrough_pose_user_set:
-            self.arm_passthrough_pose = self.init_arm_pos.copy()
         self.start_time = time.monotonic()
 
     def get_arm_joint_state(self):
@@ -607,7 +608,12 @@ class WBCNodeLeg12ArmPassthrough(Node):
                     self.pre_getup_leg_pos * (1.0 - getup_ratio)
                     + self.leg_action_offset * getup_ratio
                 )
-            wbc_action[12:] = self.init_arm_pos.copy()
+            total_getup_time = pre_getup_time + stand_up_time
+            arm_ratio = max(min(elapsed / total_getup_time, 1.0), 0.0)
+            wbc_action[12:] = (
+                self.init_arm_pos * (1.0 - arm_ratio)
+                + self.arm_passthrough_pose * arm_ratio
+            )
             gripper_pos = 0.0
             # send leg action
             self.set_motor_position(wbc_action, gripper_pos)
