@@ -267,7 +267,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
             self.arx5_gain.kd()[:3] /= 10
 
         self.arx5_gain.gripper_kp = 15.0
-        self.arx5_gain.gripper_kd = self.arx5_config.default_gripper_kd
+        self.arx5_gain.gripper_kd = self.arx5_controller_config.default_gripper_kd
         self.arx5_joint_controller.reset_to_home()
         self.arx5_joint_controller.set_gain(self.arx5_gain)
         self.arx5_cmd = arx5.JointState()
