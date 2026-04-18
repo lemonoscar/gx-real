@@ -756,7 +756,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         # init p_gains, d_gains, torque_limits, default_dof_pos_all
         self.policy_kp = np.zeros(18)
         self.policy_kd = np.zeros(18)
-        self.policy_kp[:12] = 20.0
+        self.policy_kp[:12] = 40.0
         self.policy_kd[:12] = 1.0
         self.policy_kp[12:] = 20.0
         self.policy_kd[12:] = 0.5
