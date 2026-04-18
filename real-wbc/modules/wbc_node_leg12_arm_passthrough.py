@@ -544,8 +544,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
     def policy_timer_callback(self):
         # stand up first
         stand_kp = np.ones(12) * 25.0
-        stand_kd = np.ones(12) * 0.3
-        stand_up_time = 8.0
+        stand_kd = np.ones(12) * 0.5
+        stand_up_time = 4.0
         stand_up_buffer_time = 0.0
 
         if self.start_time == -1.0:
@@ -580,7 +580,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
             wbc_action[:12] = self.map_leg_action_to_targets(leg_action)
             wbc_action[12:] = self.arm_passthrough_pose.copy()
             self.prev_action[:12] = leg_action
-            self.prev_action[12:] = self.arm_passthrough_pose.copy()
+            self.prev_action[12:] = 0.0
             self.set_motor_position(wbc_action, self.gripper_pos_cmd)
             self.motor_timer_callback()
             self.prev_policy_time = time.monotonic()
@@ -625,10 +625,10 @@ class WBCNodeLeg12ArmPassthrough(Node):
         )
         self.obs_dof_pos_offset = self.default_dof_pos.copy()
         self.obs_dof_vel_scale = 0.05
-        self.clip_actions_lower = np.full(12, -4.0, dtype=np.float64)
-        self.clip_actions_upper = np.full(12, 4.0, dtype=np.float64)
+        self.clip_actions_lower = np.full(12, -100.0, dtype=np.float64)
+        self.clip_actions_upper = np.full(12, 100.0, dtype=np.float64)
         self.leg_action_scale = np.array(
-            [0.0625, 0.125, 0.125, 0.0625, 0.125, 0.125, 0.0625, 0.125, 0.125, 0.0625, 0.125, 0.125],
+            [0.125, 0.25, 0.25, 0.125, 0.25, 0.25, 0.125, 0.25, 0.25, 0.125, 0.25, 0.25],
             dtype=np.float64,
         )
         self.leg_action_offset = np.array(
@@ -657,10 +657,10 @@ class WBCNodeLeg12ArmPassthrough(Node):
         # init p_gains, d_gains, torque_limits, default_dof_pos_all
         self.policy_kp = np.zeros(18)
         self.policy_kd = np.zeros(18)
-        self.policy_kp[:12] = 18.0
-        self.policy_kd[:12] = 0.35
-        self.policy_kp[12:] = 25.0
-        self.policy_kd[12:] = 1.5
+        self.policy_kp[:12] = 25.0
+        self.policy_kd[:12] = 0.5
+        self.policy_kp[12:] = 20.0
+        self.policy_kd[12:] = 0.5
 
         init_pose = self.leg_action_offset.copy()
         for i in range(LEG_DOF):
