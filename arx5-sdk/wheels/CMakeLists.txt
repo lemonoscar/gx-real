@@ -26,14 +26,16 @@ find_package(Python3 COMPONENTS Interpreter Development)
 add_compile_definitions(SDK_ROOT="${CMAKE_BINARY_DIR}/..")
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+set(ARX5_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/..)
+
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm.*|arm|aarch64")
-    set(LIB_DIR ${CMAKE_CURRENT_SOURCE_DIR}/arx5_interface/lib/aarch64)
+    set(LIB_DIR ${ARX5_ROOT}/lib/aarch64)
 
 elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "(x86_64)|(AMD64)|(^i686)")
-    set(LIB_DIR ${CMAKE_CURRENT_SOURCE_DIR}/arx5_interface/lib/x86_64)
+    set(LIB_DIR ${ARX5_ROOT}/lib/x86_64)
 endif()
 
-include_directories(${CMAKE_SOURCE_DIR}/include)
+include_directories(${ARX5_ROOT}/include)
 include_directories(${EIGEN3_INCLUDE_DIRS})
 include_directories(
     $ENV{CONDA_PREFIX}/include/
@@ -41,15 +43,15 @@ include_directories(
 )
 
 pybind11_add_module(arx5_interface
-    ${CMAKE_CURRENT_SOURCE_DIR}/arx5_interface/python/arx5_pybind.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/arx5_interface/src/app/joint_controller.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/arx5_interface/src/app/cartesian_controller.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/arx5_interface/src/app/controller_base.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/arx5_interface/src/utils.cpp
+    ${ARX5_ROOT}/python/arx5_pybind.cpp
+    ${ARX5_ROOT}/src/app/joint_controller.cpp
+    ${ARX5_ROOT}/src/app/cartesian_controller.cpp
+    ${ARX5_ROOT}/src/app/controller_base.cpp
+    ${ARX5_ROOT}/src/utils.cpp
 )
 
-include_directories(${CMAKE_CURRENT_SOURCE_DIR}/arx5_interface/include)
-include_directories(${CMAKE_CURRENT_SOURCE_DIR}/arx5_interface/include/libcan)
+include_directories(${ARX5_ROOT}/include)
+include_directories(${ARX5_ROOT}/include/libcan)
 add_compile_options(-pthread)
 
 target_link_libraries(arx5_interface PRIVATE
@@ -68,7 +70,7 @@ target_link_libraries(arx5_interface PRIVATE
 target_include_directories(arx5_interface PUBLIC ${EIGEN3_INCLUDE_DIRS})
 
 set_target_properties(arx5_interface PROPERTIES 
-    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/arx5_interface/python"
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
 )
 
 # Add this to ensure the wheel is built with the correct ABI flags
