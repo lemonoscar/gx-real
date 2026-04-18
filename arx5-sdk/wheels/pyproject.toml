@@ -4,6 +4,7 @@ requires = [
     "wheel",
     "cmake>=3.10",
     "cibuildwheel",
+    "pybind11",
 ]
 build-backend = "setuptools.build_meta"
 
@@ -21,12 +22,3 @@ classifiers = [
 
 [project.urls]
 Homepage = "https://github.com/yihuai-gao/arx5-sdk"
-
-[tool.setuptools]
-packages = ["arx5_interface"]
-package-data = { arx5_interface = [
-    "python/*.pyi",
-    "python/*.so",
-    "lib/**/*.so",
-    "models/*",
-] }
