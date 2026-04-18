@@ -89,6 +89,30 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.fix_at_init_pose = True
         self.init_action = np.zeros(18, dtype=np.float64)
         self.latest_tick = -1
+        self.umi_cup_action = np.array(
+            [
+                -0.6732,
+                1.4633,
+                1.0376,
+                0.8649,
+                1.6390,
+                1.2028,
+                0.1966,
+                3.2722,
+                -3.4770,
+                0.5734,
+                3.0701,
+                -3.2379,
+                0.2190,
+                6.0063,
+                0.4964,
+                2.2911,
+                -0.0708,
+                0.8192,
+            ],
+            dtype=np.float64,
+        )
+        self.init_action[:] = self.umi_cup_action[:]
         self.policy_path = policy_path
         self.arm_passthrough_pose_user_set = arm_pose is not None
         self.arm_passthrough_pose = (
