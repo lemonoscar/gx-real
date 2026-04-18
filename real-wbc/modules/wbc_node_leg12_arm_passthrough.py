@@ -522,6 +522,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         gripper_pos: float,
     ):
         assert len(q) == 18
+        leg_q = reorder(q[:12])
         # prepare arm action
         self.arx5_cmd = arx5.JointState(self.arx5_robot_config.joint_dof)
         self.arx5_cmd.gripper_pos = gripper_pos
@@ -529,7 +530,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         # send arm action
         self.arx5_joint_controller.set_joint_cmd(self.arx5_cmd)
         for i in range(LEG_DOF):
-            self.motor_cmd[i].q = float(q[i])
+            self.motor_cmd[i].q = float(leg_q[i])
         self.cmd_msg.motor_cmd = self.motor_cmd.copy()
 
     def emergency_stop(self):
@@ -662,7 +663,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.policy_kp[12:] = 20.0
         self.policy_kd[12:] = 0.5
 
-        init_pose = self.leg_action_offset.copy()
+        init_pose = reorder(self.leg_action_offset.copy())
         for i in range(LEG_DOF):
             self.motor_cmd[i].q = init_pose[i]
             self.motor_cmd[i].dq = 0.0
