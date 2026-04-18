@@ -274,8 +274,15 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.arx5_cmd.gripper_pos = 0.0
         self.arx5_joint_controller.set_joint_cmd(self.arx5_cmd)
         self.start_time = -1.0
-        self.arx5_solver = arx5.Arx5Solver(os.path.join(ARX5_MODELS_DIR, "X5_umi.urdf"))
-        print("Arx5Solver initialized")
+        self.arx5_solver = None
+        if self.pose_estimator in ["iphone", "mocap", "mocap_gripper"]:
+            self.arx5_solver = arx5.Arx5Solver(
+                os.path.join(ARX5_MODELS_DIR, "X5_umi.urdf"),
+                self.arx5_robot_config.joint_dof,
+                np.zeros(self.arx5_robot_config.joint_dof, dtype=np.float64),
+                np.zeros(self.arx5_robot_config.joint_dof, dtype=np.float64),
+            )
+            print("Arx5Solver initialized")
         # Reaching variables
         self.init_pos_err_tolerance = init_pos_err_tolerance
         self.init_orn_err_tolerance = init_orn_err_tolerance
@@ -695,6 +702,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
         """
         In the iphone pose frame
         """
+        if self.arx5_solver is None:
+            raise RuntimeError("ARX5 solver is unavailable when pose estimator is disabled")
         arx5_ee_pose = self.arx5_solver.forward_kinematics(arm_dof_pos)
         ee2arm = affines.compose(
             T=arx5_ee_pose[:3], R=euler.euler2mat(*arx5_ee_pose[3:]), Z=np.ones(3)
