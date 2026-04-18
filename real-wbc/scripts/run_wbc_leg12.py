@@ -37,7 +37,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     wbc_node = WBCNodeLeg12ArmPassthrough(**vars(args))
     logging.info("Deploy node ready")
-    lowstate = wbc_node.arx5_joint_controller.get_state()
+    lowstate = wbc_node.get_arm_joint_state()
     if (lowstate.pos() == 0.0).all() and (lowstate.vel() == 0.0).all():
         logging.error("Arm is not connected!")
         exit(1)

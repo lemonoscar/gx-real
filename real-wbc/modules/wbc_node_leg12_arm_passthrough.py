@@ -290,11 +290,16 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.target_input_mode = "passthrough"
 
     def start(self):
-        lowstate = self.arx5_joint_controller.get_state()
+        lowstate = self.get_arm_joint_state()
         self.init_arm_pos = lowstate.pos().copy()
         if not self.arm_passthrough_pose_user_set:
             self.arm_passthrough_pose = self.init_arm_pos.copy()
         self.start_time = time.monotonic()
+
+    def get_arm_joint_state(self):
+        if hasattr(self.arx5_joint_controller, "get_joint_state"):
+            return self.arx5_joint_controller.get_joint_state()
+        return self.arx5_joint_controller.get_state()
 
     # obs history getters and setters
     @property
@@ -425,7 +430,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         )
         self.estimated_linear_velocity = self.linear_velocity_estimator.estimated_velocity
 
-        lowstate = self.arx5_joint_controller.get_state()
+        lowstate = self.get_arm_joint_state()
         arm_dof_pos = lowstate.pos().copy()
         arm_dof_vel = lowstate.vel().copy()
         full_dof_pos = np.concatenate((reorder(self.quadruped_q), arm_dof_pos), axis=0)
@@ -713,7 +718,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
     def get_obs_link_pose(self) -> np.ndarray:
         if self.pose_estimator in ["iphone", "mocap"]:
             return self.get_tcp_pose(
-                arm_dof_pos=self.arx5_joint_controller.get_state().pos().copy()
+                arm_dof_pos=self.get_arm_joint_state().pos().copy()
             )
         elif self.pose_estimator == "mocap_gripper":
             return self.gripper_pose
