@@ -155,6 +155,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
             ],
             dtype=np.float64,
         )
+        self.policy_handover_leg_start = self.stand_target_leg_pos.copy()
+        self.policy_handover_duration = 0.5
         self.stand_target_leg_pos = np.array(
             [
                 0.00, 0.80, -1.50,
@@ -448,6 +450,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         if msg.keys == 32:  # L2: start policy
             if self.ready_to_start_policy:
                 logging.info("Start policy")
+                self.policy_handover_leg_start = reorder(self.quadruped_q).copy()
                 self.start_policy = True
                 self.start_policy_time = time.monotonic()
                 self.policy_ctrl_iter = 0
@@ -655,7 +658,13 @@ class WBCNodeLeg12ArmPassthrough(Node):
             time.monotonic() - self.start_policy_time
             > self.policy_dt * self.policy_ctrl_iter - self.policy_dt_slack
         ):
-            self.set_gains(kp=self.policy_kp[:12], kd=self.policy_kd[:12])
+            policy_elapsed = time.monotonic() - self.start_policy_time
+            handover_ratio = max(
+                min(policy_elapsed / self.policy_handover_duration, 1.0), 0.0
+            )
+            blended_kp = getup_kp * (1.0 - handover_ratio) + self.policy_kp[:12] * handover_ratio
+            blended_kd = getup_kd * (1.0 - handover_ratio) + self.policy_kd[:12] * handover_ratio
+            self.set_gains(kp=blended_kp, kd=blended_kd)
             raw_action = self.run_policy(self.obs)
             leg_action = np.clip(
                 raw_action,
@@ -663,7 +672,11 @@ class WBCNodeLeg12ArmPassthrough(Node):
                 self.clip_actions_upper,
             )
             wbc_action = np.zeros(18, dtype=np.float64)
-            wbc_action[:12] = self.map_leg_action_to_targets(leg_action)
+            target_leg_q = self.map_leg_action_to_targets(leg_action)
+            wbc_action[:12] = (
+                self.policy_handover_leg_start * (1.0 - handover_ratio)
+                + target_leg_q * handover_ratio
+            )
             wbc_action[12:] = self.arm_passthrough_pose.copy()
             self.prev_action[:12] = leg_action
             self.prev_action[12:] = 0.0
@@ -714,7 +727,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.clip_actions_lower = np.full(12, -100.0, dtype=np.float64)
         self.clip_actions_upper = np.full(12, 100.0, dtype=np.float64)
         self.leg_action_scale = np.array(
-            [0.125, 0.25, 0.25, 0.125, 0.25, 0.25, 0.125, 0.25, 0.25, 0.125, 0.25, 0.25],
+            [0.10, 0.20, 0.20, 0.10, 0.20, 0.20, 0.10, 0.20, 0.20, 0.10, 0.20, 0.20],
             dtype=np.float64,
         )
         self.leg_action_offset = np.array(
@@ -743,8 +756,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
         # init p_gains, d_gains, torque_limits, default_dof_pos_all
         self.policy_kp = np.zeros(18)
         self.policy_kd = np.zeros(18)
-        self.policy_kp[:12] = 25.0
-        self.policy_kd[:12] = 0.5
+        self.policy_kp[:12] = 20.0
+        self.policy_kd[:12] = 1.0
         self.policy_kp[12:] = 20.0
         self.policy_kd[12:] = 0.5
 
