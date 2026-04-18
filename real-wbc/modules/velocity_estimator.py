@@ -5,23 +5,11 @@ from typing import List
 import numpy as np
 from filterpy.kalman import KalmanFilter
 from scipy.spatial.transform import Rotation as R
-import numba as nb
-from numba.experimental import jitclass
 import collections
 
 
 """Moving window filter to smooth out sensor readings. From https://github.com/erwincoumans/motion_imitation"""
 
-spec = [
-    ("_window_size", nb.int64),
-    ("_data_dim", nb.int64),
-    ("_value_deque", nb.types.Array(nb.float64, 2, "C")),
-    ("_sum", nb.float64[:]),
-    ("_correction", nb.float64[:]),
-]
-
-
-@jitclass(spec=spec)  # type: ignore
 class MovingWindowFilter(object):
     """A stable O(1) moving filter for incoming data streams.
     We implement the Neumaier's algorithm to calculate the moving window average,
@@ -92,7 +80,6 @@ class MovingWindowFilter(object):
         return (self._sum + self._correction) / self._window_size
 
 
-@nb.jit(nopython=True, cache=True, parallel=True)
 def analytical_leg_jacobian(
     leg_angles,
     leg_id: int,
@@ -159,7 +146,6 @@ def analytical_leg_jacobian(
     return J
 
 
-@nb.jit(nopython=True, cache=True, parallel=True)
 def inv_with_jit(M):
     return np.linalg.inv(M)
 
