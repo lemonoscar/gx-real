@@ -23,6 +23,7 @@ export GX_REAL_ROOT
 export GX_REAL_POLICY_PATH="${GX_REAL_POLICY_PATH:-${GX_REAL_ROOT}/policies/policy.onnx}"
 export GX_REAL_PYTHON_BIN="${GX_REAL_PYTHON_BIN:-/usr/bin/python3}"
 GX_REAL_BAD_UNITREE_PY_PATH="${GX_REAL_ROOT}/unitree_sdk2/python"
+GX_REAL_LOCAL_UNITREE_INSTALL="${GX_REAL_ROOT}/unitree_ros2/cyclonedds_ws/install"
 
 if [[ -d "${GX_REAL_ROOT}/arx5-sdk/lib/aarch64" ]] && [[ "$(uname -m)" == "aarch64" ]]; then
   export LD_LIBRARY_PATH="${GX_REAL_ROOT}/arx5-sdk/lib/aarch64:${LD_LIBRARY_PATH:-}"
@@ -59,6 +60,14 @@ _gx_real_filter_pythonpath() {
 _gx_real_filter_pythonpath "${GX_REAL_BAD_UNITREE_PY_PATH}"
 export PYTHONPATH="${GX_REAL_ROOT}/real-wbc:${GX_REAL_ROOT}/real-wbc/modules:${GX_REAL_ROOT}/arx5-sdk/python:${PYTHONPATH:-}"
 
+_gx_real_prepend_pythonpath_if_exists() {
+  local add_path="$1"
+  if [[ -d "${add_path}" ]]; then
+    _gx_real_filter_pythonpath "${add_path}"
+    export PYTHONPATH="${add_path}:${PYTHONPATH:-}"
+  fi
+}
+
 source_maybe() {
   local setup_file="$1"
   if [[ -f "${setup_file}" ]]; then
@@ -75,8 +84,11 @@ elif [[ -f /opt/ros/humble/setup.bash ]]; then
   source_maybe /opt/ros/humble/setup.bash
 fi
 
-source_maybe "${GX_REAL_ROOT}/unitree_ros2/cyclonedds_ws/install/setup.bash"
 source_maybe "${GX_REAL_ROOT}/real-wbc/ros2/install/setup.bash"
+
+_gx_real_prepend_pythonpath_if_exists "${GX_REAL_LOCAL_UNITREE_INSTALL}/unitree_hg/lib/python3.8/site-packages"
+_gx_real_prepend_pythonpath_if_exists "${GX_REAL_LOCAL_UNITREE_INSTALL}/unitree_go/lib/python3.8/site-packages"
+_gx_real_prepend_pythonpath_if_exists "${GX_REAL_LOCAL_UNITREE_INSTALL}/unitree_api/lib/python3.8/site-packages"
 
 if [[ ! -f "${GX_REAL_POLICY_PATH}" ]]; then
   echo "[gx-real] missing policy: ${GX_REAL_POLICY_PATH}" >&2
