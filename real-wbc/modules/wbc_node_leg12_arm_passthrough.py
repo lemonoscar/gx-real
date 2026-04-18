@@ -230,7 +230,20 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.key_is_pressed = False  # for key press event
 
         # Set up Arm
-        self.arx5_joint_controller = arx5.Arx5JointController("X5", "can0")
+        self.arx5_robot_config = arx5.RobotConfigFactory.get_instance().get_config(
+            "X5_umi"
+        )
+        self.arx5_robot_config.urdf_path = os.path.join(ARX5_MODELS_DIR, "X5_umi.urdf")
+        self.arx5_controller_config = (
+            arx5.ControllerConfigFactory.get_instance().get_config(
+                "joint_controller", self.arx5_robot_config.joint_dof
+            )
+        )
+        self.arx5_joint_controller = arx5.Arx5JointController(
+            self.arx5_robot_config,
+            self.arx5_controller_config,
+            "can0",
+        )
 
         self.arx5_joint_controller.enable_background_send_recv()
         self.arx5_gain = arx5.Gain()
