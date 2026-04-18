@@ -3,7 +3,6 @@ import time
 from typing import List
 
 import numpy as np
-import numpy.typing as npt
 from filterpy.kalman import KalmanFilter
 from scipy.spatial.transform import Rotation as R
 import numba as nb
@@ -47,7 +46,7 @@ class MovingWindowFilter(object):
         # calculation.
         self._correction = np.zeros((self._data_dim,), dtype=np.float64)
 
-    def _neumaier_sum(self, value: npt.NDArray[np.float64]):
+    def _neumaier_sum(self, value):
         """Update the moving window sum using Neumaier's algorithm.
 
         For more details please refer to:
@@ -69,8 +68,8 @@ class MovingWindowFilter(object):
         self._sum = new_sum
 
     def calculate_average(
-        self, new_value: npt.NDArray[np.float64]
-    ) -> npt.NDArray[np.float64]:
+        self, new_value
+    ):
         """Computes the moving window average in O(1) time.
 
         Args:
@@ -95,7 +94,7 @@ class MovingWindowFilter(object):
 
 @nb.jit(nopython=True, cache=True, parallel=True)
 def analytical_leg_jacobian(
-    leg_angles: npt.NDArray[np.float64],
+    leg_angles,
     leg_id: int,
     hip_length: float,
     thigh_length: float,
@@ -161,7 +160,7 @@ def analytical_leg_jacobian(
 
 
 @nb.jit(nopython=True, cache=True, parallel=True)
-def inv_with_jit(M: npt.NDArray[np.float64]):
+def inv_with_jit(M):
     return np.linalg.inv(M)
 
 
@@ -256,11 +255,11 @@ class VelocityEstimator:
     def update(
         self,
         new_timestamp_s: float,
-        acceleration: npt.NDArray[np.float64],
-        foot_contact: npt.NDArray[np.float64],
-        quaternion: npt.NDArray[np.float64],
-        joint_velocity: npt.NDArray[np.float64],
-        joint_position: npt.NDArray[np.float64],
+        acceleration,
+        foot_contact,
+        quaternion,
+        joint_velocity,
+        joint_position,
     ):
         """Propagate current state estimate with new accelerometer reading."""
         assert acceleration.shape == (3,)
