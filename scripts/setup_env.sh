@@ -21,6 +21,7 @@ GX_REAL_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 export GX_REAL_ROOT
 export GX_REAL_POLICY_PATH="${GX_REAL_POLICY_PATH:-${GX_REAL_ROOT}/policies/policy.onnx}"
+export GX_REAL_PYTHON_BIN="${GX_REAL_PYTHON_BIN:-/usr/bin/python3}"
 
 if [[ -d "${GX_REAL_ROOT}/arx5-sdk/lib/aarch64" ]] && [[ "$(uname -m)" == "aarch64" ]]; then
   export LD_LIBRARY_PATH="${GX_REAL_ROOT}/arx5-sdk/lib/aarch64:${LD_LIBRARY_PATH:-}"
@@ -52,23 +53,24 @@ source_maybe "${GX_REAL_ROOT}/real-wbc/ros2/install/setup.bash"
 if [[ ! -f "${GX_REAL_POLICY_PATH}" ]]; then
   echo "[gx-real] missing policy: ${GX_REAL_POLICY_PATH}" >&2
   eval "${_GX_REAL_OLD_SHELLOPTS}"
-  _gx_real_die 1
+  return 1 2>/dev/null || exit 1
 fi
 
 if [[ ! -f "${GX_REAL_ROOT}/unitree_sdk2/python/crc_module.so" ]]; then
   echo "[gx-real] missing crc_module.so under unitree_sdk2/python" >&2
   eval "${_GX_REAL_OLD_SHELLOPTS}"
-  _gx_real_die 1
+  return 1 2>/dev/null || exit 1
 fi
 
 if [[ ! -f "${GX_REAL_ROOT}/arx5-sdk/models/X5_umi.urdf" ]]; then
   echo "[gx-real] missing X5_umi.urdf under arx5-sdk/models" >&2
   eval "${_GX_REAL_OLD_SHELLOPTS}"
-  _gx_real_die 1
+  return 1 2>/dev/null || exit 1
 fi
 
 echo "[gx-real] environment ready"
 echo "[gx-real] root=${GX_REAL_ROOT}"
 echo "[gx-real] policy=${GX_REAL_POLICY_PATH}"
+echo "[gx-real] python=${GX_REAL_PYTHON_BIN}"
 eval "${_GX_REAL_OLD_SHELLOPTS}"
 unset _GX_REAL_OLD_SHELLOPTS
