@@ -29,7 +29,7 @@ elif [[ -d "${GX_REAL_ROOT}/arx5-sdk/lib/x86_64" ]]; then
   export LD_LIBRARY_PATH="${GX_REAL_ROOT}/arx5-sdk/lib/x86_64:${LD_LIBRARY_PATH:-}"
 fi
 
-export PYTHONPATH="${GX_REAL_ROOT}/real-wbc/modules:${GX_REAL_ROOT}/unitree_sdk2/python:${GX_REAL_ROOT}/arx5-sdk/python:${PYTHONPATH:-}"
+export PYTHONPATH="${GX_REAL_ROOT}/real-wbc:${GX_REAL_ROOT}/real-wbc/modules:${GX_REAL_ROOT}/unitree_sdk2/python:${GX_REAL_ROOT}/arx5-sdk/python:${PYTHONPATH:-}"
 
 source_maybe() {
   local setup_file="$1"
