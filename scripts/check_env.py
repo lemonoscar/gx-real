@@ -25,6 +25,15 @@ def main() -> int:
         crc_module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(crc_module)  # type: ignore[union-attr]
         import arx5_interface  # noqa: F401
+        import unitree_go
+        unitree_go_file = os.path.abspath(unitree_go.__file__)
+        bad_prefix = os.path.abspath(
+            os.path.join(os.environ["GX_REAL_ROOT"], "unitree_sdk2", "python")
+        )
+        if unitree_go_file.startswith(bad_prefix):
+            raise ImportError(
+                f"unitree_go imported from wrong path: {unitree_go_file}"
+            )
         from unitree_go.msg import LowCmd, LowState, WirelessController  # noqa: F401
     except Exception as exc:
         print(f"[gx-real] import check failed: {exc}", file=sys.stderr)

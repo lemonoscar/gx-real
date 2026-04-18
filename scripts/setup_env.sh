@@ -22,6 +22,7 @@ GX_REAL_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 export GX_REAL_ROOT
 export GX_REAL_POLICY_PATH="${GX_REAL_POLICY_PATH:-${GX_REAL_ROOT}/policies/policy.onnx}"
 export GX_REAL_PYTHON_BIN="${GX_REAL_PYTHON_BIN:-/usr/bin/python3}"
+GX_REAL_BAD_UNITREE_PY_PATH="${GX_REAL_ROOT}/unitree_sdk2/python"
 
 if [[ -d "${GX_REAL_ROOT}/arx5-sdk/lib/aarch64" ]] && [[ "$(uname -m)" == "aarch64" ]]; then
   export LD_LIBRARY_PATH="${GX_REAL_ROOT}/arx5-sdk/lib/aarch64:${LD_LIBRARY_PATH:-}"
@@ -30,6 +31,32 @@ elif [[ -d "${GX_REAL_ROOT}/arx5-sdk/lib/x86_64" ]]; then
 fi
 
 export GX_REAL_CRC_MODULE_PATH="${GX_REAL_ROOT}/unitree_sdk2/python/crc_module.so"
+_gx_real_filter_pythonpath() {
+  local remove_path="$1"
+  local old_path="${PYTHONPATH:-}"
+  local new_parts=()
+  local part=""
+  local old_ifs="${IFS}"
+  IFS=':'
+  for part in ${old_path}; do
+    if [[ -n "${part}" && "${part}" != "${remove_path}" ]]; then
+      new_parts+=("${part}")
+    fi
+  done
+  IFS="${old_ifs}"
+  local joined=""
+  local item=""
+  for item in "${new_parts[@]}"; do
+    if [[ -z "${joined}" ]]; then
+      joined="${item}"
+    else
+      joined="${joined}:${item}"
+    fi
+  done
+  PYTHONPATH="${joined}"
+}
+
+_gx_real_filter_pythonpath "${GX_REAL_BAD_UNITREE_PY_PATH}"
 export PYTHONPATH="${GX_REAL_ROOT}/real-wbc:${GX_REAL_ROOT}/real-wbc/modules:${GX_REAL_ROOT}/arx5-sdk/python:${PYTHONPATH:-}"
 
 source_maybe() {
