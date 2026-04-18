@@ -112,6 +112,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
             ],
             dtype=np.float64,
         )
+        self.umi_cup_action[12:] = 0.0
         self.init_action[:] = self.umi_cup_action[:]
         self.policy_path = policy_path
         self.arm_passthrough_pose_user_set = arm_pose is not None
