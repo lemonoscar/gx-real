@@ -125,6 +125,16 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.fixed_gripper_cmd = float(gripper_cmd)
         
         self.prev_action = self.init_action.copy()
+        self.init_leg_pos = np.zeros(12, dtype=np.float64)
+        self.pre_getup_leg_pos = np.array(
+            [
+                0.00, 1.36, -2.65,
+                0.00, 1.36, -2.65,
+                0.00, 1.36, -2.65,
+                0.00, 1.36, -2.65,
+            ],
+            dtype=np.float64,
+        )
 
         self.arm2base = affines.compose(
             T=np.array([0.085, 0.0, 0.094]),
@@ -317,6 +327,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.target_input_mode = "passthrough"
 
     def start(self):
+        self.init_leg_pos = reorder(self.quadruped_q).copy()
         lowstate = self.get_arm_joint_state()
         self.init_arm_pos = lowstate.pos().copy()
         if not self.arm_passthrough_pose_user_set:
@@ -571,25 +582,33 @@ class WBCNodeLeg12ArmPassthrough(Node):
     ##############################
     def policy_timer_callback(self):
         # stand up first
-        stand_kp = np.ones(12) * 40.0
-        stand_kd = np.ones(12) * 0.5
-        stand_up_time = 5.0
+        stand_kp = np.ones(12) * 80.0
+        stand_kd = np.ones(12) * 3.0
+        pre_getup_time = 1.0
+        stand_up_time = 2.0
         stand_up_buffer_time = 0.0
 
         if self.start_time == -1.0:
             return
 
         if not self.start_policy:
-            time_ratio = (
-                time.monotonic() - self.start_time - stand_up_buffer_time
-            ) / stand_up_time
-            time_ratio = max(min(1.0, time_ratio), 0.0)
-            self.set_gains(kp=time_ratio * stand_kp, kd=time_ratio * stand_kd)
-            leg_action = self.prev_action[:12] * time_ratio + (1 - time_ratio) * np.zeros(12)
+            elapsed = time.monotonic() - self.start_time - stand_up_buffer_time
+            pre_ratio = max(min(elapsed / pre_getup_time, 1.0), 0.0)
+            getup_ratio = max(min((elapsed - pre_getup_time) / stand_up_time, 1.0), 0.0)
+            self.set_gains(kp=stand_kp, kd=stand_kd)
             wbc_action = np.zeros(18, dtype=np.float64)
-            wbc_action[:12] = self.map_leg_action_to_targets(leg_action)
-            wbc_action[12:] = self.arm_passthrough_pose * time_ratio + self.init_arm_pos * (1 - time_ratio)
-            gripper_pos = self.gripper_pos_cmd * time_ratio + (1 - time_ratio) * 0.0
+            if elapsed <= pre_getup_time:
+                wbc_action[:12] = (
+                    self.init_leg_pos * (1.0 - pre_ratio)
+                    + self.pre_getup_leg_pos * pre_ratio
+                )
+            else:
+                wbc_action[:12] = (
+                    self.pre_getup_leg_pos * (1.0 - getup_ratio)
+                    + self.leg_action_offset * getup_ratio
+                )
+            wbc_action[12:] = self.init_arm_pos.copy()
+            gripper_pos = 0.0
             # send leg action
             self.set_motor_position(wbc_action, gripper_pos)
             self.motor_timer_callback()
