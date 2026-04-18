@@ -34,13 +34,15 @@ if __name__ == "__main__":
     parser.add_argument("--cmd-yaw", type=float, default=0.0)
     parser.add_argument("--gripper-cmd", type=float, default=0.0)
     parser.add_argument("--pose_estimator", type=str, default="none")
+    parser.add_argument("--disable-arm", action="store_true")
     args = parser.parse_args()
     wbc_node = WBCNodeLeg12ArmPassthrough(**vars(args))
     logging.info("Deploy node ready")
-    lowstate = wbc_node.get_arm_joint_state()
-    if (lowstate.pos() == 0.0).all() and (lowstate.vel() == 0.0).all():
-        logging.error("Arm is not connected!")
-        exit(1)
+    if not args.disable_arm:
+        lowstate = wbc_node.get_arm_joint_state()
+        if (lowstate.pos() == 0.0).all() and (lowstate.vel() == 0.0).all():
+            logging.error("Arm is not connected!")
+            exit(1)
     try:
         rclpy.spin(wbc_node)
     finally:
