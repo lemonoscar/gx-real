@@ -544,9 +544,9 @@ class WBCNodeLeg12ArmPassthrough(Node):
     ##############################
     def policy_timer_callback(self):
         # stand up first
-        stand_kp = np.ones(12) * 25.0
+        stand_kp = np.ones(12) * 40.0
         stand_kd = np.ones(12) * 0.5
-        stand_up_time = 4.0
+        stand_up_time = 5.0
         stand_up_buffer_time = 0.0
 
         if self.start_time == -1.0:
