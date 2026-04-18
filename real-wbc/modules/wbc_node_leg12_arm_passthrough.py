@@ -293,10 +293,12 @@ class WBCNodeLeg12ArmPassthrough(Node):
 
         self.arx5_gain.gripper_kp = 15.0
         self.arx5_gain.gripper_kd = self.arx5_controller_config.default_gripper_kd
-        self.arx5_joint_controller.reset_to_home()
         self.arx5_joint_controller.set_gain(self.arx5_gain)
+        arm_state = self.get_arm_joint_state()
+        arm_hold_pos = arm_state.pos().copy()
         self.arx5_cmd = arx5.JointState(self.arx5_robot_config.joint_dof)
         self.arx5_cmd.gripper_pos = 0.0
+        self.arx5_cmd.pos()[:] = arm_hold_pos
         self.arx5_joint_controller.set_joint_cmd(self.arx5_cmd)
         self.start_time = -1.0
         self.arx5_solver = None
