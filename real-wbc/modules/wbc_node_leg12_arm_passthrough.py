@@ -155,6 +155,15 @@ class WBCNodeLeg12ArmPassthrough(Node):
             ],
             dtype=np.float64,
         )
+        self.stand_target_leg_pos = np.array(
+            [
+                0.00, 0.80, -1.50,
+                0.00, 0.80, -1.50,
+                0.00, 0.65, -1.25,
+                0.00, 0.65, -1.25,
+            ],
+            dtype=np.float64,
+        )
 
         self.arm2base = affines.compose(
             T=np.array([0.085, 0.0, 0.094]),
@@ -630,7 +639,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
             else:
                 wbc_action[:12] = (
                     self.pre_getup_leg_pos * (1.0 - getup_ratio)
-                    + self.leg_action_offset * getup_ratio
+                    + self.stand_target_leg_pos * getup_ratio
                 )
             total_getup_time = pre_getup_time + stand_up_time
             arm_ratio = max(min(elapsed / total_getup_time, 1.0), 0.0)
