@@ -1,4 +1,7 @@
 cmake_minimum_required(VERSION 3.16.3)
+project(arx5_interface)
+
+add_compile_definitions(SDK_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/..")
 
 find_package(pybind11 REQUIRED)
 find_package(Threads REQUIRED)
