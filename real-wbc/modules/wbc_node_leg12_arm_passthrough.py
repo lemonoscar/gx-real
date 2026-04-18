@@ -245,7 +245,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
             "can0",
         )
 
-        self.arx5_joint_controller.enable_background_send_recv()
+        if hasattr(self.arx5_joint_controller, "enable_background_send_recv"):
+            self.arx5_joint_controller.enable_background_send_recv()
         self.arx5_gain = arx5.Gain()
         self.gripper_pos_cmd = self.fixed_gripper_cmd
         
