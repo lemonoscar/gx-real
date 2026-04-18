@@ -48,7 +48,5 @@ target_include_directories(arx5_interface PUBLIC ${EIGEN3_INCLUDE_DIRS})
 # Hack for py310
 target_include_directories(arx5_interface PUBLIC $ENV{CONDA_PREFIX}/include/kdl_parser $ENV{CONDA_PREFIX}/include/urdfdom_headers)
 
-# # Optional: set the output directory for the built module
-set_target_properties(arx5_interface PROPERTIES LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
 set_target_properties(arx5_interface PROPERTIES PREFIX "")
 set_target_properties(arx5_interface PROPERTIES OUTPUT_NAME "arx5_interface")
