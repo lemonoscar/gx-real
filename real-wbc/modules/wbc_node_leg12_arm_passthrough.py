@@ -3,6 +3,7 @@ import pytz
 import numpy as np
 import os
 import sys
+import importlib.util
 from typing import Dict, List, Optional
 import logging
 
@@ -22,12 +23,21 @@ GX_REAL_ROOT = os.path.dirname(REAL_WBC_DIR)
 UNITREE_SDK2_PYTHON_DIR = os.path.join(GX_REAL_ROOT, "unitree_sdk2", "python")
 ARX5_SDK_PYTHON_DIR = os.path.join(GX_REAL_ROOT, "arx5-sdk", "python")
 ARX5_MODELS_DIR = os.path.join(GX_REAL_ROOT, "arx5-sdk", "models")
+CRC_MODULE_PATH = os.environ.get(
+    "GX_REAL_CRC_MODULE_PATH",
+    os.path.join(UNITREE_SDK2_PYTHON_DIR, "crc_module.so"),
+)
 
-for extra_path in [MODULE_DIR, UNITREE_SDK2_PYTHON_DIR, ARX5_SDK_PYTHON_DIR]:
+for extra_path in [MODULE_DIR, ARX5_SDK_PYTHON_DIR]:
     if extra_path not in sys.path:
         sys.path.append(extra_path)
 
-from crc_module import get_crc
+_crc_spec = importlib.util.spec_from_file_location("crc_module", CRC_MODULE_PATH)
+if _crc_spec is None or _crc_spec.loader is None:
+    raise ImportError(f"unable to load crc_module from {CRC_MODULE_PATH}")
+_crc_module = importlib.util.module_from_spec(_crc_spec)
+_crc_spec.loader.exec_module(_crc_module)  # type: ignore[union-attr]
+get_crc = _crc_module.get_crc
 from modules.velocity_estimator import MovingWindowFilter, VelocityEstimator
 import numpy as np
 import onnxruntime as ort

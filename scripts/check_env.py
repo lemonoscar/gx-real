@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 import os
 import sys
+import importlib.util
 
 
 def main() -> int:
     policy_path = os.environ.get("GX_REAL_POLICY_PATH", "")
+    crc_module_path = os.environ.get("GX_REAL_CRC_MODULE_PATH", "")
     required_files = [
         policy_path,
-        os.path.join(os.environ["GX_REAL_ROOT"], "unitree_sdk2", "python", "crc_module.so"),
+        crc_module_path,
         os.path.join(os.environ["GX_REAL_ROOT"], "arx5-sdk", "models", "X5_umi.urdf"),
     ]
     for file_path in required_files:
@@ -17,7 +19,11 @@ def main() -> int:
 
     try:
         import onnxruntime  # noqa: F401
-        import crc_module  # noqa: F401
+        spec = importlib.util.spec_from_file_location("crc_module", crc_module_path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"unable to load crc_module from {crc_module_path}")
+        crc_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(crc_module)  # type: ignore[union-attr]
         import arx5_interface  # noqa: F401
         from unitree_go.msg import LowCmd, LowState, WirelessController  # noqa: F401
     except Exception as exc:

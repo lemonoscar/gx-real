@@ -29,7 +29,8 @@ elif [[ -d "${GX_REAL_ROOT}/arx5-sdk/lib/x86_64" ]]; then
   export LD_LIBRARY_PATH="${GX_REAL_ROOT}/arx5-sdk/lib/x86_64:${LD_LIBRARY_PATH:-}"
 fi
 
-export PYTHONPATH="${GX_REAL_ROOT}/real-wbc:${GX_REAL_ROOT}/real-wbc/modules:${GX_REAL_ROOT}/unitree_sdk2/python:${GX_REAL_ROOT}/arx5-sdk/python:${PYTHONPATH:-}"
+export GX_REAL_CRC_MODULE_PATH="${GX_REAL_ROOT}/unitree_sdk2/python/crc_module.so"
+export PYTHONPATH="${GX_REAL_ROOT}/real-wbc:${GX_REAL_ROOT}/real-wbc/modules:${GX_REAL_ROOT}/arx5-sdk/python:${PYTHONPATH:-}"
 
 source_maybe() {
   local setup_file="$1"
@@ -72,5 +73,6 @@ echo "[gx-real] environment ready"
 echo "[gx-real] root=${GX_REAL_ROOT}"
 echo "[gx-real] policy=${GX_REAL_POLICY_PATH}"
 echo "[gx-real] python=${GX_REAL_PYTHON_BIN}"
+echo "[gx-real] crc_module=${GX_REAL_CRC_MODULE_PATH}"
 eval "${_GX_REAL_OLD_SHELLOPTS}"
 unset _GX_REAL_OLD_SHELLOPTS
