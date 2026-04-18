@@ -35,6 +35,9 @@ def main() -> int:
                 f"unitree_go imported from wrong path: {unitree_go_file}"
             )
         from unitree_go.msg import LowCmd, LowState, WirelessController  # noqa: F401
+        LowCmd.__class__.__import_type_support__()
+        LowState.__class__.__import_type_support__()
+        WirelessController.__class__.__import_type_support__()
     except Exception as exc:
         print(f"[gx-real] import check failed: {exc}", file=sys.stderr)
         return 1

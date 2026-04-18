@@ -3,8 +3,6 @@ import time
 from typing import List
 
 import numpy as np
-from filterpy.kalman import KalmanFilter
-from scipy.spatial.transform import Rotation as R
 import collections
 
 
@@ -174,29 +172,14 @@ class VelocityEstimator:
         moving_window_filter_size=120,
         default_control_dt=0.002,
     ):
-        """Initiates the velocity estimator.
+        """Compatibility estimator for Jetson deployment.
 
-        See filterpy documentation in the link below for more details.
-        https://filterpy.readthedocs.io/en/latest/kalman/KalmanFilter.html
-
-        Args:
-          accelerometer_variance: noise estimation for accelerometer reading.
-          sensor_variance: noise estimation for motor velocity reading.
-          initial_covariance: covariance estimation of initial state.
+        The original UMI estimator depends on filterpy/scipy, which is fragile on
+        the robot's system Python stack. For deployment bootstrap we keep the same
+        interface but output a conservative zero body linear velocity estimate.
         """
 
-        self.filter = KalmanFilter(dim_x=3, dim_z=3, dim_u=3)
-        self.filter.x = np.zeros(3)
         self._initial_variance = initial_variance
-        self.filter.P = np.eye(3) * self._initial_variance  # State covariance
-        self.filter.Q = np.eye(3) * accelerometer_variance
-        self.filter.R = np.eye(3) * sensor_variance
-
-        self.filter.H = np.eye(3)  # measurement function (y=H*x)
-        self.filter.F = np.eye(3)  # state transition matrix
-        self.filter.B = np.eye(3)  # type: ignore
-        self.filter.inv = inv_with_jit  # type: ignore     To accelerate inverse calculation (~3x faster)
-
         self._window_size = moving_window_filter_size
         self.moving_window_filter = MovingWindowFilter(
             window_size=self._window_size, data_dim=3
@@ -208,25 +191,11 @@ class VelocityEstimator:
         self.thigh_length = thigh_length
         self.calf_length = calf_length
 
-        # Precompile all jit functions:
-        start_precompile_time = time.monotonic()
-        analytical_leg_jacobian(
-            leg_angles=np.array([0.0, 0.0, 0.0], dtype=np.float64),
-            leg_id=0,
-            hip_length=self.hip_length,
-            thigh_length=self.thigh_length,
-            calf_length=self.calf_length,
-        )
-        self.filter.inv(np.eye(3))
-        print(f"Precompile time spent {time.monotonic() - start_precompile_time:.5f}")
-
     def reset(self):
-        self.filter.x = np.zeros(3)
-        self.filter.P = np.eye(3) * self._initial_variance
+        self._estimated_velocity = np.zeros(3)
         self.moving_window_filter = MovingWindowFilter(
             window_size=self._window_size, data_dim=3
         )
-
         self._last_timestamp_s = 0.0
 
     def _compute_delta_time(self, new_timestamp_s: float):
@@ -247,44 +216,15 @@ class VelocityEstimator:
         joint_velocity,
         joint_position,
     ):
-        """Propagate current state estimate with new accelerometer reading."""
+        """Keep interface-compatible updates with conservative zero velocity."""
         assert acceleration.shape == (3,)
         assert foot_contact.shape == (4,)
-        # foot_contact should be either 0.0 or 1.0 (however checking this value takes a long time)
-        # assert np.all(np.logical_or(foot_contact == 0.0, foot_contact == 1.0))
         assert quaternion.shape == (4,)
         assert joint_velocity.shape == (12,)
 
-        delta_time_s = self._compute_delta_time(new_timestamp_s)
-        # Get rotation matrix from quaternion
-        rot_mat = R.from_quat(quaternion).as_matrix()
-        rot_mat = np.array(rot_mat).reshape((3, 3))
-        calibrated_acc = rot_mat.dot(acceleration) + np.array([0.0, 0.0, -9.81])
-        self.filter.predict(u=calibrated_acc * delta_time_s)
-
-        # Correct estimation using contact legs
-        observed_velocities = []
-        for leg_id in range(4):
-            if foot_contact[leg_id]:
-                jacobian = analytical_leg_jacobian(
-                    leg_angles=joint_position[leg_id * 3 : (leg_id + 1) * 3],
-                    leg_id=leg_id,
-                    hip_length=self.hip_length,
-                    thigh_length=self.thigh_length,
-                    calf_length=self.calf_length,
-                )  # TODO: Find out range mapping
-                # Only pick the jacobian related to joint motors
-                joint_velocities = joint_velocity[leg_id * 3 : (leg_id + 1) * 3]
-                leg_velocity_in_base_frame = jacobian.dot(joint_velocities)
-                base_velocity_in_base_frame = -leg_velocity_in_base_frame[:3]
-                observed_velocities.append(rot_mat.dot(base_velocity_in_base_frame))
-
-        if observed_velocities:
-            observed_velocities = np.mean(observed_velocities, axis=0)
-            self.filter.update(observed_velocities)
-
+        self._compute_delta_time(new_timestamp_s)
         self._estimated_velocity = self.moving_window_filter.calculate_average(
-            self.filter.x
+            np.zeros(3, dtype=np.float64)
         )
 
     @property
