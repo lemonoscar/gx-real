@@ -618,8 +618,6 @@ class WBCNodeLeg12ArmPassthrough(Node):
         # stand up first
         getup_kp = np.ones(12) * 80.0
         getup_kd = np.ones(12) * 3.0
-        stand_hold_kp = np.ones(12) * 55.0
-        stand_hold_kd = np.ones(12) * 4.0
         pre_getup_time = 1.0
         stand_up_time = 2.0
         stand_up_buffer_time = 0.0
@@ -632,10 +630,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
             pre_ratio = max(min(elapsed / pre_getup_time, 1.0), 0.0)
             getup_ratio = max(min((elapsed - pre_getup_time) / stand_up_time, 1.0), 0.0)
             total_getup_time = pre_getup_time + stand_up_time
-            if elapsed < total_getup_time:
-                self.set_gains(kp=getup_kp, kd=getup_kd)
-            else:
-                self.set_gains(kp=stand_hold_kp, kd=stand_hold_kd)
+            self.set_gains(kp=getup_kp, kd=getup_kd)
             wbc_action = np.zeros(18, dtype=np.float64)
             if elapsed <= pre_getup_time:
                 wbc_action[:12] = (
