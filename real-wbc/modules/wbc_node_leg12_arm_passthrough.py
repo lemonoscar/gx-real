@@ -616,8 +616,10 @@ class WBCNodeLeg12ArmPassthrough(Node):
     ##############################
     def policy_timer_callback(self):
         # stand up first
-        stand_kp = np.ones(12) * 80.0
-        stand_kd = np.ones(12) * 3.0
+        getup_kp = np.ones(12) * 80.0
+        getup_kd = np.ones(12) * 3.0
+        stand_hold_kp = np.ones(12) * 55.0
+        stand_hold_kd = np.ones(12) * 4.0
         pre_getup_time = 1.0
         stand_up_time = 2.0
         stand_up_buffer_time = 0.0
@@ -629,7 +631,11 @@ class WBCNodeLeg12ArmPassthrough(Node):
             elapsed = time.monotonic() - self.start_time - stand_up_buffer_time
             pre_ratio = max(min(elapsed / pre_getup_time, 1.0), 0.0)
             getup_ratio = max(min((elapsed - pre_getup_time) / stand_up_time, 1.0), 0.0)
-            self.set_gains(kp=stand_kp, kd=stand_kd)
+            total_getup_time = pre_getup_time + stand_up_time
+            if elapsed < total_getup_time:
+                self.set_gains(kp=getup_kp, kd=getup_kd)
+            else:
+                self.set_gains(kp=stand_hold_kp, kd=stand_hold_kd)
             wbc_action = np.zeros(18, dtype=np.float64)
             if elapsed <= pre_getup_time:
                 wbc_action[:12] = (
@@ -641,7 +647,6 @@ class WBCNodeLeg12ArmPassthrough(Node):
                     self.pre_getup_leg_pos * (1.0 - getup_ratio)
                     + self.stand_target_leg_pos * getup_ratio
                 )
-            total_getup_time = pre_getup_time + stand_up_time
             arm_ratio = max(min(elapsed / total_getup_time, 1.0), 0.0)
             wbc_action[12:] = (
                 self.init_arm_pos * (1.0 - arm_ratio)
