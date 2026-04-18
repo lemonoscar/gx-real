@@ -620,9 +620,9 @@ class WBCNodeLeg12ArmPassthrough(Node):
         getup_kd = np.ones(12) * 3.0
         stand_hold_kp = np.ones(12) * 55.0
         stand_hold_kd = np.ones(12) * 4.0
-        pre_getup_time = 2.0
-        stand_up_time = 4.0
-        hold_gain_switch_delay = 2.0
+        pre_getup_time = 1.0
+        stand_up_time = 2.0
+        hold_gain_switch_delay = 3.0
         stand_up_buffer_time = 0.0
 
         if self.start_time == -1.0:
