@@ -5,7 +5,7 @@ import os
 import re
 import sys
 import importlib.util
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 import logging
 import yaml
 
@@ -217,7 +217,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.last_policy_diag_log_time = -1.0
         self.align_to_policy_active = False
         self.align_to_policy_start_time = -1.0
-        self.align_to_policy_timeout = 6.0
+        self.align_to_policy_duration = 1.5
+        self.align_to_policy_hold_time = 0.4
         self.align_to_policy_kp = np.array(
             [60.0, 75.0, 70.0, 60.0, 75.0, 70.0, 60.0, 90.0, 75.0, 60.0, 90.0, 75.0],
             dtype=np.float64,
@@ -226,8 +227,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
             [2.5, 3.5, 3.0, 2.5, 3.5, 3.0, 2.5, 4.0, 3.2, 2.5, 4.0, 3.2],
             dtype=np.float64,
         )
-        self.align_to_policy_leg_tol = 0.08
-        self.align_to_policy_rear_thigh_tol = 0.06
+        self.align_to_policy_leg_start = np.zeros(12, dtype=np.float64)
+        self.align_to_policy_arm_start = np.zeros(6, dtype=np.float64)
         self.manual_takeover_kp = np.array(
             [55.0, 70.0, 65.0, 55.0, 70.0, 65.0, 55.0, 85.0, 70.0, 55.0, 85.0, 70.0],
             dtype=np.float64,
@@ -236,6 +237,15 @@ class WBCNodeLeg12ArmPassthrough(Node):
             [2.0, 3.0, 2.8, 2.0, 3.0, 2.8, 2.0, 3.5, 3.0, 2.0, 3.5, 3.0],
             dtype=np.float64,
         )
+        self.sim2sim_action_delay_range = (0, 0)
+        self.sim2sim_action_delay_steps = 0
+        self.sim2sim_action_hold_prob = 0.0
+        self.sim2sim_action_noise_std = 0.0
+        self.sim2sim_obs_delay_steps = 0
+        self.sim2sim_action_buffer = np.zeros((1, LEG_DOF), dtype=np.float64)
+        self.sim2sim_action_buffer_idx = 0
+        self.sim2sim_last_action = np.zeros(LEG_DOF, dtype=np.float64)
+        self.sim2sim_rng = np.random.default_rng()
         
         self.prev_action = self.init_action.copy()
         self.init_leg_pos = np.zeros(12, dtype=np.float64)
@@ -668,12 +678,16 @@ class WBCNodeLeg12ArmPassthrough(Node):
             return
         self.align_to_policy_active = True
         self.align_to_policy_start_time = time.monotonic()
+        self.align_to_policy_leg_start = reorder(self.quadruped_q).copy()
+        lowstate = self.get_arm_joint_state()
+        self.align_to_policy_arm_start = lowstate.pos().copy()
         self.arm_passthrough_pose = self.default_dof_pos[12:].copy()
         self.fixed_commands[:] = self.policy_takeover_commands
         self.policy_motion_started = False
         self.prev_action[:] = 0.0
+        self.reset_sim2sim_action_state()
         self.last_policy_diag_log_time = -1.0
-        logging.info("Aligning to policy stand before rollout")
+        logging.info("Starting dog-only startup before rollout")
 
     def get_arm_joint_state(self):
         if not self.arm_enabled or self.arx5_joint_controller is None:
@@ -681,6 +695,45 @@ class WBCNodeLeg12ArmPassthrough(Node):
         if hasattr(self.arx5_joint_controller, "get_joint_state"):
             return self.arx5_joint_controller.get_joint_state()
         return self.arx5_joint_controller.get_state()
+
+    def sample_sim2sim_action_delay(self):
+        low, high = self.sim2sim_action_delay_range
+        low = max(0, int(low))
+        high = max(low, int(high))
+        if low == high:
+            self.sim2sim_action_delay_steps = low
+            return
+        self.sim2sim_action_delay_steps = int(self.sim2sim_rng.integers(low, high + 1))
+
+    def reset_sim2sim_action_state(self):
+        max_delay = max(0, int(max(self.sim2sim_action_delay_range)))
+        self.sim2sim_action_buffer = np.zeros((max_delay + 1, LEG_DOF), dtype=np.float64)
+        self.sim2sim_action_buffer_idx = 0
+        self.sim2sim_last_action = np.zeros(LEG_DOF, dtype=np.float64)
+        self.sample_sim2sim_action_delay()
+
+    def apply_sim2sim_action_timing(
+        self, clipped_action: np.ndarray
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        action_to_buffer = clipped_action.copy()
+        if (
+            self.sim2sim_action_hold_prob > 0.0
+            and float(self.sim2sim_rng.random()) < self.sim2sim_action_hold_prob
+        ):
+            action_to_buffer = self.sim2sim_last_action.copy()
+        if self.sim2sim_action_noise_std > 0.0:
+            action_to_buffer = action_to_buffer + self.sim2sim_rng.normal(
+                0.0,
+                self.sim2sim_action_noise_std,
+                size=action_to_buffer.shape,
+            )
+        write_idx = self.sim2sim_action_buffer_idx
+        self.sim2sim_action_buffer[write_idx] = action_to_buffer
+        read_idx = (write_idx - self.sim2sim_action_delay_steps) % self.sim2sim_action_buffer.shape[0]
+        delayed_action = self.sim2sim_action_buffer[read_idx].copy()
+        self.sim2sim_action_buffer_idx = (write_idx + 1) % self.sim2sim_action_buffer.shape[0]
+        self.sim2sim_last_action = action_to_buffer.copy()
+        return action_to_buffer, delayed_action
 
     # obs history getters and setters
     @property
@@ -1012,15 +1065,25 @@ class WBCNodeLeg12ArmPassthrough(Node):
             leg_q_error = self.leg_action_offset - current_leg_q
             max_leg_error = float(np.max(np.abs(leg_q_error)))
             rear_thigh_error = float(np.max(np.abs(leg_q_error[[7, 10]])))
+            startup_ratio = _smoothstep(
+                float(
+                    np.clip(
+                        align_elapsed / max(self.align_to_policy_duration, 1e-6),
+                        0.0,
+                        1.0,
+                    )
+                )
+            )
             if (
                 self.last_policy_diag_log_time < 0.0
                 or (time.monotonic() - self.last_policy_diag_log_time)
                 >= self.policy_diag_log_interval
             ):
                 logging.info(
-                    "Align diag | elapsed=%.2f current_leg_q=%s target_leg_q=%s leg_q_error=%s max_leg_error=%.3f rear_thigh_error=%.3f current_leg_dq=%s foot_force=%s"
+                    "Startup diag | elapsed=%.2f ratio=%.3f current_leg_q=%s target_leg_q=%s leg_q_error=%s max_leg_error=%.3f rear_thigh_error=%.3f current_leg_dq=%s foot_force=%s"
                     % (
                         align_elapsed,
+                        startup_ratio,
                         np.array2string(current_leg_q, precision=3, floatmode="fixed"),
                         np.array2string(self.leg_action_offset, precision=3, floatmode="fixed"),
                         np.array2string(leg_q_error, precision=3, floatmode="fixed"),
@@ -1032,16 +1095,24 @@ class WBCNodeLeg12ArmPassthrough(Node):
                 )
                 self.last_policy_diag_log_time = time.monotonic()
             wbc_action = np.zeros(18, dtype=np.float64)
-            wbc_action[:12] = self.leg_action_offset.copy()
-            wbc_action[12:] = self.arm_passthrough_pose.copy()
+            wbc_action[:12] = _blend_arrays(
+                self.align_to_policy_leg_start,
+                self.leg_action_offset,
+                startup_ratio,
+            )
+            wbc_action[12:] = _blend_arrays(
+                self.align_to_policy_arm_start,
+                self.arm_passthrough_pose,
+                startup_ratio,
+            )
             self.set_gains(kp=self.align_to_policy_kp, kd=self.align_to_policy_kd)
             self.set_motor_position(wbc_action, self.gripper_pos_cmd)
             self.motor_timer_callback()
-            if (
-                max_leg_error <= self.align_to_policy_leg_tol
-                and rear_thigh_error <= self.align_to_policy_rear_thigh_tol
-            ):
-                logging.info("Policy stand alignment completed; starting rollout")
+            if align_elapsed >= (self.align_to_policy_duration + self.align_to_policy_hold_time):
+                logging.info(
+                    "Dog-only startup completed; starting rollout with residual errors max=%.3f rear_thigh=%.3f"
+                    % (max_leg_error, rear_thigh_error)
+                )
                 self.align_to_policy_active = False
                 self.policy_handover_leg_start = reorder(self.quadruped_q).copy()
                 self.fixed_commands[:] = self.policy_move_commands
@@ -1051,11 +1122,6 @@ class WBCNodeLeg12ArmPassthrough(Node):
                 self.start_policy = True
                 self.start_policy_time = time.monotonic()
                 self.policy_ctrl_iter = 0
-            elif align_elapsed >= self.align_to_policy_timeout:
-                logging.warning(
-                    "Policy stand alignment is still not finished; max_leg_error=%.3f rear_thigh_error=%.3f"
-                    % (max_leg_error, rear_thigh_error)
-                )
             return
 
         if not self.start_policy:
@@ -1126,11 +1192,12 @@ class WBCNodeLeg12ArmPassthrough(Node):
             blended_kd = _blend_arrays(base_kd, self.policy_kd[:12], handover_ratio)
             self.set_gains(kp=blended_kp, kd=blended_kd)
             raw_action = self.run_policy(self.obs)
-            leg_action = np.clip(
+            clipped_action = np.clip(
                 raw_action,
                 self.clip_actions_lower,
                 self.clip_actions_upper,
             )
+            timed_action, leg_action = self.apply_sim2sim_action_timing(clipped_action)
             wbc_action = np.zeros(18, dtype=np.float64)
             target_leg_q = self.map_leg_action_to_targets(leg_action)
             commanded_leg_q = (
@@ -1148,7 +1215,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
                 >= self.policy_diag_log_interval
             ):
                 logging.info(
-                    "Policy diag | handover=%.3f est_lin_vel=%s commands=%s raw_action=%s clipped_action=%s target_leg_q=%s commanded_leg_q=%s current_leg_q=%s leg_q_error=%s current_leg_dq=%s lowcmd_leg_q_policy=%s lowcmd_leg_q_hw=%s lowcmd_kp=%s lowcmd_kd=%s foot_force=%s"
+                    "Policy diag | handover=%.3f est_lin_vel=%s commands=%s raw_action=%s clipped_action=%s timed_action=%s applied_action=%s target_leg_q=%s commanded_leg_q=%s current_leg_q=%s leg_q_error=%s current_leg_dq=%s lowcmd_leg_q_policy=%s lowcmd_leg_q_hw=%s lowcmd_kp=%s lowcmd_kd=%s sim2sim_delay=%d hold_prob=%.3f foot_force=%s"
                     % (
                         handover_ratio,
                         np.array2string(
@@ -1163,6 +1230,16 @@ class WBCNodeLeg12ArmPassthrough(Node):
                         ),
                         np.array2string(
                             raw_action,
+                            precision=3,
+                            floatmode="fixed",
+                        ),
+                        np.array2string(
+                            clipped_action,
+                            precision=3,
+                            floatmode="fixed",
+                        ),
+                        np.array2string(
+                            timed_action,
                             precision=3,
                             floatmode="fixed",
                         ),
@@ -1216,6 +1293,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
                             precision=3,
                             floatmode="fixed",
                         ),
+                        self.sim2sim_action_delay_steps,
+                        self.sim2sim_action_hold_prob,
                         np.array2string(
                             self.latest_foot_force,
                             precision=3,
@@ -1237,7 +1316,9 @@ class WBCNodeLeg12ArmPassthrough(Node):
                 action_dict = {
                     "policy_input": self.obs.reshape(1, -1).copy(),
                     "raw_action": raw_action.copy(),
-                    "clipped_action": leg_action.copy(),
+                    "clipped_action": clipped_action.copy(),
+                    "timed_action": timed_action.copy(),
+                    "applied_action": leg_action.copy(),
                     "reordered_wbc_action": wbc_action,
                 }
                 self.action_history_log.append(action_dict)
@@ -1297,6 +1378,19 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.leg_action_offset = self.default_dof_pos[:LEG_DOF].copy()
         self.policy_kp = _build_joint_gain_array(joint_names, actuator_cfg, "stiffness")
         self.policy_kd = _build_joint_gain_array(joint_names, actuator_cfg, "damping")
+        delay_cfg = config.get("sim2sim_action_delay_range", (0, 0))
+        self.sim2sim_action_delay_range = (
+            int(delay_cfg[0]),
+            int(delay_cfg[1]),
+        )
+        self.sim2sim_action_hold_prob = float(
+            config.get("sim2sim_action_hold_prob", 0.0)
+        )
+        self.sim2sim_action_noise_std = float(
+            config.get("sim2sim_action_noise_std", 0.0)
+        )
+        self.sim2sim_obs_delay_steps = int(config.get("sim2sim_obs_delay_steps", 0))
+        self.reset_sim2sim_action_state()
 
         self.ort_session = ort.InferenceSession(
             policy_path,
@@ -1353,6 +1447,10 @@ class WBCNodeLeg12ArmPassthrough(Node):
             + f" obs_dof_vel_scale: {self.obs_dof_vel_scale}, "
             + f"leg_action_offset: {self.leg_action_offset},"
             + f" leg_action_scale: {self.leg_action_scale},"
+            + f" sim2sim_action_delay_range: {self.sim2sim_action_delay_range},"
+            + f" sim2sim_action_hold_prob: {self.sim2sim_action_hold_prob},"
+            + f" sim2sim_action_noise_std: {self.sim2sim_action_noise_std},"
+            + f" sim2sim_obs_delay_steps: {self.sim2sim_obs_delay_steps},"
             + f" policy_freq: {self.policy_freq},"
             + f" config_path: {config_path},"
             + f" fixed_commands: {self.fixed_commands},"
