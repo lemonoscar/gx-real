@@ -188,7 +188,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         logging_dir: str = "logs",
         pose_estimator: str = "iphone",
         disable_arm: bool = False,
-        standup_mode: str = "unitree_auto",
+        standup_mode: str = "manual",
     ):
         super().__init__("deploy_node")  # type: ignore
         self.replay_speed = replay_speed
@@ -203,6 +203,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.default_arm_hold_pose = np.array(
             [0.0, 0.3, 0.5, 0.0, 0.0, 0.0], dtype=np.float64
         )
+        self.policy_takeover_commands = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+        self.policy_move_commands = np.array([0.5, 0.0, 0.0], dtype=np.float64)
         self.arm_passthrough_pose_user_set = arm_pose is not None
         self.arm_passthrough_pose = (
             np.array(arm_pose, dtype=np.float64)
@@ -416,11 +418,15 @@ class WBCNodeLeg12ArmPassthrough(Node):
         # Joystick Callback variables
         self.start_policy = False
         self.start_policy_time = time.monotonic()
+        self.policy_motion_started = False
         if self.uses_unitree_standup:
             logging.info(f"Press R1 to trigger Unitree {self.standup_mode}")
             logging.info("Wait for the robot to finish the built-in recovery motion before pressing L2")
-        else:
+        elif self.uses_internal_standup:
             logging.info("Press R1 to start internal stand-up")
+        else:
+            logging.info("Stand the robot up with the controller first, then press L2 to start policy")
+            logging.info("Press L2 again after takeover to command forward motion")
         logging.info("Press L2 to start policy after stand-up completes")
         logging.info("Press L1 for emergency stop")
         self.key_is_pressed = False  # for key press event
@@ -496,6 +502,10 @@ class WBCNodeLeg12ArmPassthrough(Node):
         return self.standup_mode in {"unitree_auto", "unitree_standup", "unitree_recoverystand"}
 
     @property
+    def uses_internal_standup(self) -> bool:
+        return self.standup_mode == "internal"
+
+    @property
     def getup_total_time(self) -> float:
         return (
             self.getup_settle_time
@@ -512,6 +522,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
             return "RecoveryStand"
         if self.standup_mode == "unitree_standup":
             return "StandUp"
+        if self.standup_mode == "manual":
+            return "manual stand-up"
         return "internal stand-up"
 
     def sport_state_cb(self, msg: SportModeState):
@@ -665,31 +677,52 @@ class WBCNodeLeg12ArmPassthrough(Node):
     def ready_to_start_policy(self) -> bool:
         if self.uses_unitree_standup:
             return self.unitree_stand_ready and self.latest_tick != -1
-        if self.start_time == -1.0 or self.latest_tick == -1:
-            return False
-        return (time.monotonic() - self.start_time) >= self.getup_total_time
+        if self.uses_internal_standup:
+            if self.start_time == -1.0 or self.latest_tick == -1:
+                return False
+            return (time.monotonic() - self.start_time) >= self.getup_total_time
+        return self.latest_tick != -1
 
     def joy_stick_cb(self, msg):
         if msg.keys == 1:  # R1: start pipeline
             if not self.key_is_pressed:
-                logging.info("standing up")
                 if self.uses_unitree_standup:
+                    logging.info("standing up")
                     self.start_unitree_standup()
-                else:
+                elif self.uses_internal_standup:
+                    logging.info("standing up")
                     self.start()
+                else:
+                    logging.info("Manual stand-up mode: use the controller to stand the robot up, then press L2")
             self.key_is_pressed = True
 
         if msg.keys == 16:  # R2: stop policy
             if not self.key_is_pressed:
                 logging.info("Stop policy")
                 self.start_policy = False
+                self.policy_motion_started = False
+                self.fixed_commands[:] = self.policy_takeover_commands
         if msg.keys == 2:  # L1: emergency stop
             logging.info("Emergency stop")
             self.emergency_stop()
         if msg.keys == 32:  # L2: start policy
-            if self.ready_to_start_policy:
+            if self.start_policy:
+                if not self.policy_motion_started:
+                    self.fixed_commands[:] = self.policy_move_commands
+                    self.policy_motion_started = True
+                    logging.info(
+                        f"Policy command updated to {self.fixed_commands.tolist()}"
+                    )
+                else:
+                    logging.info(
+                        f"Policy command is already {self.fixed_commands.tolist()}"
+                    )
+            elif self.ready_to_start_policy:
                 logging.info("Start policy")
                 self.policy_handover_leg_start = reorder(self.quadruped_q).copy()
+                self.arm_passthrough_pose = self.default_dof_pos[12:].copy()
+                self.fixed_commands[:] = self.policy_takeover_commands
+                self.policy_motion_started = False
                 self.prev_action[:] = 0.0
                 self.start_policy = True
                 self.start_policy_time = time.monotonic()
@@ -706,11 +739,13 @@ class WBCNodeLeg12ArmPassthrough(Node):
                 logging.warning(
                     f"Unitree {self.standup_label} has not completed yet; wait until the robot returns to a stable stand"
                 )
-            elif self.start_time == -1.0:
+            elif self.uses_internal_standup and self.start_time == -1.0:
                 logging.warning("Press R1 first to start the stand-up sequence")
-            else:
+            elif self.uses_internal_standup:
                 remaining = max(self.getup_total_time - (time.monotonic() - self.start_time), 0.0)
                 logging.warning(f"Stand-up is not finished yet; wait {remaining:.1f}s before pressing L2")
+            else:
+                logging.warning("Low-state is not ready yet; wait for robot state before pressing L2")
         # if msg.keys == int(2**15):  # Left # NOTE must map to another key, left already used in pose latency
         #     # pass
 
@@ -902,7 +937,10 @@ class WBCNodeLeg12ArmPassthrough(Node):
             if not self.start_policy:
                 return
 
-        if not self.uses_unitree_standup and self.start_time == -1.0:
+        if self.uses_internal_standup and self.start_time == -1.0 and not self.start_policy:
+            return
+
+        if not self.uses_unitree_standup and not self.uses_internal_standup and not self.start_policy:
             return
 
         if not self.start_policy:
