@@ -260,6 +260,16 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.policy_takeover_commands = np.array([0.0, 0.0, 0.0], dtype=np.float64)
         self.policy_move_commands = np.array([0.2, 0.0, 0.0], dtype=np.float64)
         self.policy_command_ramp_duration = 1.5
+        self.startup_kick_duration = 0.8
+        self.startup_kick_leg_delta = np.array(
+            [
+                0.020, -0.080, 0.120,
+               -0.020, -0.080, 0.120,
+                0.020,  0.100, -0.140,
+               -0.020,  0.100, -0.140,
+            ],
+            dtype=np.float64,
+        )
         self.arm_passthrough_pose_user_set = arm_pose is not None
         self.arm_passthrough_pose = (
             np.array(arm_pose, dtype=np.float64)
@@ -856,6 +866,23 @@ class WBCNodeLeg12ArmPassthrough(Node):
             _smoothstep(ramp_ratio),
         )
 
+    def get_startup_kick_leg_delta(self) -> np.ndarray:
+        if not self.start_policy:
+            return np.zeros(LEG_DOF, dtype=np.float64)
+        elapsed = max(time.monotonic() - self.start_policy_time, 0.0)
+        if elapsed >= self.startup_kick_duration:
+            return np.zeros(LEG_DOF, dtype=np.float64)
+        decay_ratio = 1.0 - _smoothstep(
+            float(
+                np.clip(
+                    elapsed / max(self.startup_kick_duration, 1e-6),
+                    0.0,
+                    1.0,
+                )
+            )
+        )
+        return self.startup_kick_leg_delta * decay_ratio
+
     def get_arm_joint_state(self):
         if not self.arm_enabled or self.arx5_joint_controller is None:
             return _ZeroArmState()
@@ -1446,6 +1473,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
             timed_action, leg_action = self.apply_sim2sim_action_timing(clipped_action)
             wbc_action = np.zeros(18, dtype=np.float64)
             target_leg_q = self.map_leg_action_to_targets(leg_action)
+            startup_kick_leg_delta = self.get_startup_kick_leg_delta()
+            target_leg_q = target_leg_q + startup_kick_leg_delta
             commanded_leg_q = (
                 self.policy_handover_leg_start * (1.0 - handover_ratio)
                 + target_leg_q * handover_ratio
@@ -1461,7 +1490,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
                 >= self.policy_diag_log_interval
             ):
                 logging.info(
-                    "Policy diag | handover=%.3f est_lin_vel=%s commands=%s raw_action=%s clipped_action=%s timed_action=%s applied_action=%s target_leg_q=%s commanded_leg_q=%s current_leg_q=%s leg_q_error=%s current_leg_dq=%s lowcmd_leg_q_policy=%s lowcmd_leg_q_hw=%s lowcmd_kp=%s lowcmd_kd=%s sim2sim_delay=%d hold_prob=%.3f foot_force=%s"
+                    "Policy diag | handover=%.3f est_lin_vel=%s commands=%s raw_action=%s clipped_action=%s timed_action=%s applied_action=%s startup_kick=%s target_leg_q=%s commanded_leg_q=%s current_leg_q=%s leg_q_error=%s current_leg_dq=%s lowcmd_leg_q_policy=%s lowcmd_leg_q_hw=%s lowcmd_kp=%s lowcmd_kd=%s sim2sim_delay=%d hold_prob=%.3f foot_force=%s"
                     % (
                         handover_ratio,
                         np.array2string(
@@ -1491,6 +1520,11 @@ class WBCNodeLeg12ArmPassthrough(Node):
                         ),
                         np.array2string(
                             leg_action,
+                            precision=3,
+                            floatmode="fixed",
+                        ),
+                        np.array2string(
+                            startup_kick_leg_delta,
                             precision=3,
                             floatmode="fixed",
                         ),
