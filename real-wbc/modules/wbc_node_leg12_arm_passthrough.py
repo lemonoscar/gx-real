@@ -706,46 +706,48 @@ class WBCNodeLeg12ArmPassthrough(Node):
             logging.info("Emergency stop")
             self.emergency_stop()
         if msg.keys == 32:  # L2: start policy
-            if self.start_policy:
-                if not self.policy_motion_started:
-                    self.fixed_commands[:] = self.policy_move_commands
-                    self.policy_motion_started = True
-                    logging.info(
-                        f"Policy command updated to {self.fixed_commands.tolist()}"
+            if not self.key_is_pressed:
+                if self.start_policy:
+                    if not self.policy_motion_started:
+                        self.fixed_commands[:] = self.policy_move_commands
+                        self.policy_motion_started = True
+                        logging.info(
+                            f"Policy command updated to {self.fixed_commands.tolist()}"
+                        )
+                    else:
+                        logging.info(
+                            f"Policy command is already {self.fixed_commands.tolist()}"
+                        )
+                elif self.ready_to_start_policy:
+                    logging.info("Start policy")
+                    self.policy_handover_leg_start = reorder(self.quadruped_q).copy()
+                    self.arm_passthrough_pose = self.default_dof_pos[12:].copy()
+                    self.fixed_commands[:] = self.policy_takeover_commands
+                    self.policy_motion_started = False
+                    self.prev_action[:] = 0.0
+                    self.start_policy = True
+                    self.start_policy_time = time.monotonic()
+                    self.policy_ctrl_iter = 0
+                elif self.uses_unitree_standup and self.awaiting_unitree_stand:
+                    elapsed = time.monotonic() - self.unitree_stand_request_time
+                    remaining = max(self.unitree_stand_min_wait - elapsed, 0.0)
+                    logging.warning(
+                        f"Unitree {self.standup_label} is still running; wait {remaining:.1f}s and try L2 again"
                     )
+                elif self.uses_unitree_standup and self.unitree_stand_request_time == -1.0:
+                    logging.warning(f"Press R1 first to trigger Unitree {self.standup_label}")
+                elif self.uses_unitree_standup:
+                    logging.warning(
+                        f"Unitree {self.standup_label} has not completed yet; wait until the robot returns to a stable stand"
+                    )
+                elif self.uses_internal_standup and self.start_time == -1.0:
+                    logging.warning("Press R1 first to start the stand-up sequence")
+                elif self.uses_internal_standup:
+                    remaining = max(self.getup_total_time - (time.monotonic() - self.start_time), 0.0)
+                    logging.warning(f"Stand-up is not finished yet; wait {remaining:.1f}s before pressing L2")
                 else:
-                    logging.info(
-                        f"Policy command is already {self.fixed_commands.tolist()}"
-                    )
-            elif self.ready_to_start_policy:
-                logging.info("Start policy")
-                self.policy_handover_leg_start = reorder(self.quadruped_q).copy()
-                self.arm_passthrough_pose = self.default_dof_pos[12:].copy()
-                self.fixed_commands[:] = self.policy_takeover_commands
-                self.policy_motion_started = False
-                self.prev_action[:] = 0.0
-                self.start_policy = True
-                self.start_policy_time = time.monotonic()
-                self.policy_ctrl_iter = 0
-            elif self.uses_unitree_standup and self.awaiting_unitree_stand:
-                elapsed = time.monotonic() - self.unitree_stand_request_time
-                remaining = max(self.unitree_stand_min_wait - elapsed, 0.0)
-                logging.warning(
-                    f"Unitree {self.standup_label} is still running; wait {remaining:.1f}s and try L2 again"
-                )
-            elif self.uses_unitree_standup and self.unitree_stand_request_time == -1.0:
-                logging.warning(f"Press R1 first to trigger Unitree {self.standup_label}")
-            elif self.uses_unitree_standup:
-                logging.warning(
-                    f"Unitree {self.standup_label} has not completed yet; wait until the robot returns to a stable stand"
-                )
-            elif self.uses_internal_standup and self.start_time == -1.0:
-                logging.warning("Press R1 first to start the stand-up sequence")
-            elif self.uses_internal_standup:
-                remaining = max(self.getup_total_time - (time.monotonic() - self.start_time), 0.0)
-                logging.warning(f"Stand-up is not finished yet; wait {remaining:.1f}s before pressing L2")
-            else:
-                logging.warning("Low-state is not ready yet; wait for robot state before pressing L2")
+                    logging.warning("Low-state is not ready yet; wait for robot state before pressing L2")
+            self.key_is_pressed = True
         # if msg.keys == int(2**15):  # Left # NOTE must map to another key, left already used in pose latency
         #     # pass
 
