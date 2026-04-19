@@ -258,18 +258,10 @@ class WBCNodeLeg12ArmPassthrough(Node):
             [0.0, 0.3, 0.5, 0.0, 0.0, 0.0], dtype=np.float64
         )
         self.policy_takeover_commands = np.array([0.0, 0.0, 0.0], dtype=np.float64)
-        self.policy_move_commands = np.array([0.2, 0.0, 0.0], dtype=np.float64)
-        self.policy_command_ramp_duration = 1.5
-        self.startup_kick_duration = 0.8
-        self.startup_kick_leg_delta = np.array(
-            [
-                0.020, -0.080, 0.120,
-               -0.020, -0.080, 0.120,
-                0.020,  0.100, -0.140,
-               -0.020,  0.100, -0.140,
-            ],
-            dtype=np.float64,
-        )
+        self.policy_move_commands = np.array([0.5, 0.0, 0.0], dtype=np.float64)
+        self.policy_command_ramp_duration = 1e-6
+        self.startup_kick_duration = 0.0
+        self.startup_kick_leg_delta = np.zeros(LEG_DOF, dtype=np.float64)
         self.arm_passthrough_pose_user_set = arm_pose is not None
         self.arm_passthrough_pose = (
             np.array(arm_pose, dtype=np.float64)
@@ -294,22 +286,10 @@ class WBCNodeLeg12ArmPassthrough(Node):
         )
         self.align_to_policy_leg_start = np.zeros(12, dtype=np.float64)
         self.align_to_policy_arm_start = np.zeros(6, dtype=np.float64)
-        self.manual_takeover_kp = np.array(
-            [78.0, 100.0, 92.0, 78.0, 100.0, 92.0, 80.0, 112.0, 98.0, 80.0, 112.0, 98.0],
-            dtype=np.float64,
-        )
-        self.manual_takeover_kd = np.array(
-            [3.0, 4.5, 3.9, 3.0, 4.5, 3.9, 3.1, 4.9, 4.2, 3.1, 4.9, 4.2],
-            dtype=np.float64,
-        )
-        self.deploy_policy_kp = np.array(
-            [82.0, 108.0, 96.0, 82.0, 108.0, 96.0, 85.0, 122.0, 102.0, 85.0, 122.0, 102.0],
-            dtype=np.float64,
-        )
-        self.deploy_policy_kd = np.array(
-            [3.2, 5.0, 4.2, 3.2, 5.0, 4.2, 3.3, 5.5, 4.5, 3.3, 5.5, 4.5],
-            dtype=np.float64,
-        )
+        self.manual_takeover_kp = np.zeros(LEG_DOF, dtype=np.float64)
+        self.manual_takeover_kd = np.zeros(LEG_DOF, dtype=np.float64)
+        self.deploy_policy_kp = np.zeros(LEG_DOF, dtype=np.float64)
+        self.deploy_policy_kd = np.zeros(LEG_DOF, dtype=np.float64)
         self.pose_test_active = False
         self.pose_test_start_time = -1.0
         self.pose_test_duration = 1.0
@@ -362,7 +342,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
             dtype=np.float64,
         )
         self.policy_handover_leg_start = np.zeros(12, dtype=np.float64)
-        self.policy_handover_duration = 0.25
+        self.policy_handover_duration = 1.2
         self.stand_target_leg_pos = np.array(
             [
                 0.00571868, 0.608813, -1.21763,
@@ -1664,16 +1644,20 @@ class WBCNodeLeg12ArmPassthrough(Node):
             _expand_pattern_values(leg_joint_names, action_scale_cfg, 1.0),
             dtype=np.float64,
         )
-        self.leg_action_scale = np.full(LEG_DOF, 0.4, dtype=np.float64)
+        self.leg_action_scale = train_leg_action_scale.copy()
         self.leg_action_offset = self.default_dof_pos[:LEG_DOF].copy()
         self.policy_kp = _build_joint_gain_array(joint_names, actuator_cfg, "stiffness")
         self.policy_kd = _build_joint_gain_array(joint_names, actuator_cfg, "damping")
+        self.manual_takeover_kp = self.policy_kp[:LEG_DOF].copy()
+        self.manual_takeover_kd = self.policy_kd[:LEG_DOF].copy()
+        self.deploy_policy_kp = self.policy_kp[:LEG_DOF].copy()
+        self.deploy_policy_kd = self.policy_kd[:LEG_DOF].copy()
         delay_cfg = config.get("sim2sim_action_delay_range", (0, 0))
         self.train_sim2sim_action_delay_range = (
             int(delay_cfg[0]),
             int(delay_cfg[1]),
         )
-        self.sim2sim_action_delay_range = (0, 0)
+        self.sim2sim_action_delay_range = self.train_sim2sim_action_delay_range
         self.sim2sim_action_hold_prob = float(
             config.get("sim2sim_action_hold_prob", 0.0)
         )
