@@ -35,6 +35,12 @@ if __name__ == "__main__":
     parser.add_argument("--gripper-cmd", type=float, default=0.0)
     parser.add_argument("--pose_estimator", type=str, default="none")
     parser.add_argument("--disable-arm", action="store_true")
+    parser.add_argument(
+        "--standup-mode",
+        type=str,
+        default="unitree_recoverystand",
+        choices=["unitree_recoverystand", "unitree_standup", "internal"],
+    )
     args = parser.parse_args()
     wbc_node = WBCNodeLeg12ArmPassthrough(**vars(args))
     logging.info("Deploy node ready")

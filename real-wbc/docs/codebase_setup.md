@@ -104,16 +104,17 @@ scripts/check_env.sh
 ```sh
 scripts/run_leg12_real.sh --pose_estimator none
 ```
-Use `--pose_estimator iphone` or `--pose_estimator mocap` only when that sensor pipeline is already running and verified. Use `--disable-arm` if you want to test the quadruped body without the arm.
+Use `--pose_estimator iphone` or `--pose_estimator mocap` only when that sensor pipeline is already running and verified. Use `--disable-arm` if you want to test the quadruped body without the arm. The default `--standup-mode unitree_recoverystand` asks the robot to use Unitree's built-in recovery stand before low-level policy takeover. You can switch to `unitree_standup` or the old `internal` stand-up logic explicitly if needed.
 
 Joystick key mapping:
 - L1: Emergency stop. Treat this as the primary safety action.
-- R1: Start the stand-up sequence. The controller will first settle, then crouch, then stand, and finally hold a stable standing posture.
-- L2: Start the RL policy. Only press this after the stand-up sequence finishes and the robot looks stable.
+- R1: Trigger Unitree's built-in stand-up or recovery-stand action.
+- L2: Start the RL policy. Only press this after the robot has fully finished the built-in stand-up action and returned to a stable stand.
 - R2: Stop the RL policy and hold the last commanded posture.
 
 Practical stand-up guidance:
-- Do not press L2 immediately after R1. Wait until the robot has fully finished the stand-up motion and is no longer shifting its weight.
+- The recommended default is `unitree_recoverystand`, because it is more robust than the custom low-level stand-up sequence when the initial pose is imperfect.
+- Do not press L2 immediately after R1. Wait until the robot has fully finished the built-in stand-up motion and is no longer shifting its weight.
 - If the robot is not receiving low-state data yet, pressing R1 will be ignored. Fix the state pipeline first instead of retrying the stand-up.
 - If the arm is enabled, keep the arm workspace clear during stand-up and policy handover.
 - If the robot looks unstable after standing, stop with L1, reset the robot posture manually, and restart from R1.

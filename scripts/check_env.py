@@ -30,6 +30,7 @@ def main() -> int:
         spec.loader.exec_module(crc_module)  # type: ignore[union-attr]
         import arx5_interface  # noqa: F401
         import unitree_go
+        import unitree_api  # noqa: F401
         unitree_go_file = os.path.abspath(unitree_go.__file__)
         bad_prefix = os.path.abspath(
             os.path.join(os.environ["GX_REAL_ROOT"], "unitree_sdk2", "python")

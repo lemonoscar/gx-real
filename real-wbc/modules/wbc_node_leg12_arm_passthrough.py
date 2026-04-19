@@ -51,6 +51,7 @@ from unitree_go.msg import (
     LowState,
     LowCmd,
     MotorCmd,
+    SportModeState,
 )
 import time
 from geometry_msgs.msg import PoseStamped
@@ -65,6 +66,21 @@ def quat_rotate_inv(q: np.ndarray, v: np.ndarray):
 
 
 import arx5_interface as arx5
+
+try:
+    from unitree_api.msg import Request as UnitreeRequest
+except ImportError:
+    UnitreeRequest = None
+
+
+SPORT_REQUEST_TOPIC = "/api/sport/request"
+SPORT_STATE_TOPIC = "lf/sportmodestate"
+SPORT_API_ID_DAMP = 1001
+SPORT_API_ID_STANDUP = 1004
+SPORT_API_ID_RECOVERYSTAND = 1006
+SPORT_MODE_IDLE = 0
+SPORT_MODE_BALANCE_STAND = 1
+SPORT_MODE_RECOVERY_STAND = 8
 
 
 class _PolicyConfigLoader(yaml.SafeLoader):
@@ -172,6 +188,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         logging_dir: str = "logs",
         pose_estimator: str = "iphone",
         disable_arm: bool = False,
+        standup_mode: str = "unitree_recoverystand",
     ):
         super().__init__("deploy_node")  # type: ignore
         self.replay_speed = replay_speed
@@ -182,6 +199,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.latest_tick = -1
         self.policy_path = policy_path
         self.arm_enabled = not disable_arm
+        self.standup_mode = standup_mode
         self.default_arm_hold_pose = np.array(
             [0.0, 0.3, 0.5, 0.0, 0.0, 0.0], dtype=np.float64
         )
@@ -227,6 +245,10 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.getup_crouch_kd = np.ones(12, dtype=np.float64) * 2.0
         self.getup_stand_kp = np.ones(12, dtype=np.float64) * 72.0
         self.getup_stand_kd = np.ones(12, dtype=np.float64) * 2.8
+        self.unitree_takeover_kp = np.ones(12, dtype=np.float64) * 40.0
+        self.unitree_takeover_kd = np.ones(12, dtype=np.float64) * 1.0
+        self.unitree_stand_min_wait = 2.5
+        self.unitree_stand_timeout = 10.0
 
         self.arm2base = affines.compose(
             T=np.array([0.085, 0.0, 0.094]),
@@ -293,6 +315,30 @@ class WBCNodeLeg12ArmPassthrough(Node):
             self.gripper_pose_cb,
             low_state_history_depth,
         )
+        self.sport_mode = -1
+        self.sport_progress = 0.0
+        self.awaiting_unitree_stand = False
+        self.unitree_stand_ready = False
+        self.unitree_stand_request_time = -1.0
+        self.unitree_stand_completed_time = -1.0
+        self._sport_request_id = 0
+        self.sport_state_sub = self.create_subscription(
+            SportModeState,
+            SPORT_STATE_TOPIC,
+            self.sport_state_cb,
+            low_state_history_depth,
+        )
+        self.sport_request_pub = None
+        if self.uses_unitree_standup:
+            if UnitreeRequest is None:
+                raise ImportError(
+                    "standup_mode uses Unitree sport control, but unitree_api.msg.Request is unavailable"
+                )
+            self.sport_request_pub = self.create_publisher(
+                UnitreeRequest,
+                SPORT_REQUEST_TOPIC,
+                low_state_history_depth,
+            )
         # init publishers
         self.motor_pub = self.create_publisher(
             LowCmd, "lowcmd", low_state_history_depth
@@ -365,7 +411,11 @@ class WBCNodeLeg12ArmPassthrough(Node):
         # Joystick Callback variables
         self.start_policy = False
         self.start_policy_time = time.monotonic()
-        logging.info("Press R1 to start stand-up")
+        if self.uses_unitree_standup:
+            logging.info(f"Press R1 to trigger Unitree {self.standup_mode}")
+            logging.info("Wait for the robot to finish the built-in recovery motion before pressing L2")
+        else:
+            logging.info("Press R1 to start internal stand-up")
         logging.info("Press L2 to start policy after stand-up completes")
         logging.info("Press L1 for emergency stop")
         self.key_is_pressed = False  # for key press event
@@ -437,6 +487,10 @@ class WBCNodeLeg12ArmPassthrough(Node):
         return crouch_pose
 
     @property
+    def uses_unitree_standup(self) -> bool:
+        return self.standup_mode in {"unitree_standup", "unitree_recoverystand"}
+
+    @property
     def getup_total_time(self) -> float:
         return (
             self.getup_settle_time
@@ -444,6 +498,65 @@ class WBCNodeLeg12ArmPassthrough(Node):
             + self.getup_stand_time
             + self.getup_hold_time
         )
+
+    @property
+    def standup_label(self) -> str:
+        if self.standup_mode == "unitree_recoverystand":
+            return "RecoveryStand"
+        if self.standup_mode == "unitree_standup":
+            return "StandUp"
+        return "internal stand-up"
+
+    def sport_state_cb(self, msg: SportModeState):
+        self.sport_mode = int(msg.mode)
+        self.sport_progress = float(msg.progress)
+        if not self.awaiting_unitree_stand:
+            return
+        elapsed = time.monotonic() - self.unitree_stand_request_time
+        if elapsed < self.unitree_stand_min_wait:
+            return
+        if self.sport_mode in {SPORT_MODE_IDLE, SPORT_MODE_BALANCE_STAND}:
+            self.awaiting_unitree_stand = False
+            self.unitree_stand_ready = True
+            self.unitree_stand_completed_time = time.monotonic()
+            logging.info(f"Unitree {self.standup_label} completed; low-level policy can take over")
+
+    def publish_sport_request(self, api_id: int):
+        if self.sport_request_pub is None or UnitreeRequest is None:
+            raise RuntimeError("sport request publisher is unavailable")
+        req = UnitreeRequest()
+        self._sport_request_id += 1
+        req.header.identity.id = self._sport_request_id
+        req.header.identity.api_id = api_id
+        req.header.lease.id = self._sport_request_id
+        req.header.policy.priority = 0
+        req.header.policy.noreply = True
+        self.sport_request_pub.publish(req)
+
+    def start_unitree_standup(self):
+        if self.latest_tick == -1:
+            logging.warning("Low-state is not ready yet; wait for robot state before pressing R1")
+            return
+        if self.start_policy:
+            logging.warning("Policy is running; stop it with R2 before requesting Unitree stand-up")
+            return
+        if self.awaiting_unitree_stand:
+            logging.warning(f"Unitree {self.standup_label} is already running")
+            return
+
+        api_id = (
+            SPORT_API_ID_RECOVERYSTAND
+            if self.standup_mode == "unitree_recoverystand"
+            else SPORT_API_ID_STANDUP
+        )
+        self.unitree_stand_ready = False
+        self.awaiting_unitree_stand = True
+        self.unitree_stand_request_time = time.monotonic()
+        self.unitree_stand_completed_time = -1.0
+        self.start_time = -1.0
+        self.prev_action[:] = 0.0
+        self.publish_sport_request(api_id)
+        logging.info(f"Requested Unitree {self.standup_label}")
 
     def start(self):
         if self.latest_tick == -1:
@@ -521,6 +634,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
 
     @property
     def ready_to_start_policy(self) -> bool:
+        if self.uses_unitree_standup:
+            return self.unitree_stand_ready and self.latest_tick != -1
         if self.start_time == -1.0 or self.latest_tick == -1:
             return False
         return (time.monotonic() - self.start_time) >= self.getup_total_time
@@ -529,7 +644,10 @@ class WBCNodeLeg12ArmPassthrough(Node):
         if msg.keys == 1:  # R1: start pipeline
             if not self.key_is_pressed:
                 logging.info("standing up")
-                self.start()
+                if self.uses_unitree_standup:
+                    self.start_unitree_standup()
+                else:
+                    self.start()
             self.key_is_pressed = True
 
         if msg.keys == 16:  # R2: stop policy
@@ -547,6 +665,18 @@ class WBCNodeLeg12ArmPassthrough(Node):
                 self.start_policy = True
                 self.start_policy_time = time.monotonic()
                 self.policy_ctrl_iter = 0
+            elif self.uses_unitree_standup and self.awaiting_unitree_stand:
+                elapsed = time.monotonic() - self.unitree_stand_request_time
+                remaining = max(self.unitree_stand_min_wait - elapsed, 0.0)
+                logging.warning(
+                    f"Unitree {self.standup_label} is still running; wait {remaining:.1f}s and try L2 again"
+                )
+            elif self.uses_unitree_standup and self.unitree_stand_request_time == -1.0:
+                logging.warning(f"Press R1 first to trigger Unitree {self.standup_label}")
+            elif self.uses_unitree_standup:
+                logging.warning(
+                    f"Unitree {self.standup_label} has not completed yet; wait until the robot returns to a stable stand"
+                )
             elif self.start_time == -1.0:
                 logging.warning("Press R1 first to start the stand-up sequence")
             else:
@@ -716,7 +846,18 @@ class WBCNodeLeg12ArmPassthrough(Node):
     # policy inference
     ##############################
     def policy_timer_callback(self):
-        if self.start_time == -1.0:
+        if self.uses_unitree_standup:
+            if self.awaiting_unitree_stand:
+                elapsed = time.monotonic() - self.unitree_stand_request_time
+                if elapsed > self.unitree_stand_timeout:
+                    self.awaiting_unitree_stand = False
+                    logging.warning(
+                        f"Timed out waiting for Unitree {self.standup_label}; press R1 to retry"
+                    )
+            if not self.start_policy:
+                return
+
+        if not self.uses_unitree_standup and self.start_time == -1.0:
             return
 
         if not self.start_policy:
@@ -796,16 +937,10 @@ class WBCNodeLeg12ArmPassthrough(Node):
             handover_ratio = max(
                 min(policy_elapsed / self.policy_handover_duration, 1.0), 0.0
             )
-            blended_kp = _blend_arrays(
-                self.getup_stand_kp,
-                self.policy_kp[:12],
-                handover_ratio,
-            )
-            blended_kd = _blend_arrays(
-                self.getup_stand_kd,
-                self.policy_kd[:12],
-                handover_ratio,
-            )
+            base_kp = self.unitree_takeover_kp if self.uses_unitree_standup else self.getup_stand_kp
+            base_kd = self.unitree_takeover_kd if self.uses_unitree_standup else self.getup_stand_kd
+            blended_kp = _blend_arrays(base_kp, self.policy_kp[:12], handover_ratio)
+            blended_kd = _blend_arrays(base_kd, self.policy_kd[:12], handover_ratio)
             self.set_gains(kp=blended_kp, kd=blended_kd)
             raw_action = self.run_policy(self.obs)
             leg_action = np.clip(
