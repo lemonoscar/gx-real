@@ -291,6 +291,13 @@ class WBCNodeLeg12ArmPassthrough(Node):
             [2.0, 3.0, 2.8, 2.0, 3.0, 2.8, 2.0, 3.5, 3.0, 2.0, 3.5, 3.0],
             dtype=np.float64,
         )
+        self.pose_test_active = False
+        self.pose_test_start_time = -1.0
+        self.pose_test_duration = 1.0
+        self.pose_test_leg_start = np.zeros(12, dtype=np.float64)
+        self.pose_test_arm_start = np.zeros(6, dtype=np.float64)
+        self.pose_test_kp = np.ones(12, dtype=np.float64) * 80.0
+        self.pose_test_kd = np.ones(12, dtype=np.float64) * 3.0
         self.sim2sim_action_delay_range = (0, 0)
         self.sim2sim_action_delay_steps = 0
         self.sim2sim_action_hold_prob = 0.0
@@ -518,9 +525,14 @@ class WBCNodeLeg12ArmPassthrough(Node):
             logging.info("Wait for the robot to finish the built-in recovery motion before pressing L2")
         elif self.uses_internal_standup:
             logging.info("Press R1 to start unitree_mujoco get-up")
+        elif self.uses_pose_test:
+            logging.info("Stand the robot up with the controller first, then press L2 to start pose test")
         else:
             logging.info("Stand the robot up with the controller first, then press L2 to start policy")
-        logging.info("Press L2 to start policy after stand-up completes")
+        if self.uses_pose_test:
+            logging.info("Press L2 to start pose test and hold the policy stand target")
+        else:
+            logging.info("Press L2 to start policy after stand-up completes")
         logging.info("Press L1 for emergency stop")
         self.key_is_pressed = False  # for key press event
 
@@ -617,6 +629,10 @@ class WBCNodeLeg12ArmPassthrough(Node):
         return self.standup_mode == "internal"
 
     @property
+    def uses_pose_test(self) -> bool:
+        return self.standup_mode == "pose_test"
+
+    @property
     def getup_total_time(self) -> float:
         return (
             self.getup_settle_time
@@ -635,6 +651,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
             return "StandUp"
         if self.standup_mode == "manual":
             return "manual stand-up"
+        if self.standup_mode == "pose_test":
+            return "pose test"
         return "unitree_mujoco get-up"
 
     def sport_state_cb(self, msg: SportModeState):
@@ -722,6 +740,25 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.init_arm_pos = lowstate.pos().copy()
         self.prev_action[:] = 0.0
         self.start_time = time.monotonic()
+
+    def start_pose_test(self):
+        if self.latest_tick == -1:
+            logging.warning("Low-state is not ready yet; wait for robot state before pressing L2")
+            return
+        if self.pose_test_active:
+            logging.info("Pose test is already running")
+            return
+        if self.start_policy:
+            logging.warning("Policy is running; stop it with R2 before starting pose test")
+            return
+        self.pose_test_active = True
+        self.pose_test_start_time = time.monotonic()
+        self.pose_test_leg_start = self.interface_to_policy_leg_order(self.quadruped_q).copy()
+        lowstate = self.get_arm_joint_state()
+        self.pose_test_arm_start = lowstate.pos().copy()
+        self.arm_passthrough_pose = self.default_dof_pos[12:].copy()
+        self.last_policy_diag_log_time = -1.0
+        logging.info("Starting pose test toward policy stand target")
 
     def start_policy_alignment(self):
         if self.latest_tick == -1:
@@ -886,6 +923,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
                 logging.info("Stop policy")
                 self.start_policy = False
                 self.align_to_policy_active = False
+                self.pose_test_active = False
                 self.policy_motion_started = False
                 self.fixed_commands[:] = self.policy_takeover_commands
                 self.last_policy_diag_log_time = -1.0
@@ -898,8 +936,12 @@ class WBCNodeLeg12ArmPassthrough(Node):
                     logging.info(
                         f"Policy command is already {self.fixed_commands.tolist()}"
                     )
+                elif self.pose_test_active:
+                    logging.info("Pose test is already running")
                 elif self.align_to_policy_active:
                     logging.info("Policy stand alignment is already running")
+                elif self.uses_pose_test:
+                    self.start_pose_test()
                 elif self.ready_to_start_policy:
                     self.start_policy_alignment()
                 elif self.uses_unitree_standup and self.awaiting_unitree_stand:
@@ -1127,9 +1169,60 @@ class WBCNodeLeg12ArmPassthrough(Node):
         if (
             not self.uses_unitree_standup
             and not self.uses_internal_standup
+            and not self.uses_pose_test
             and not self.start_policy
             and not self.align_to_policy_active
+            and not self.pose_test_active
         ):
+            return
+
+        if self.pose_test_active and not self.start_policy:
+            pose_elapsed = max(time.monotonic() - self.pose_test_start_time, 0.0)
+            pose_ratio = _smoothstep(
+                float(
+                    np.clip(
+                        pose_elapsed / max(self.pose_test_duration, 1e-6),
+                        0.0,
+                        1.0,
+                    )
+                )
+            )
+            current_leg_q = self.interface_to_policy_leg_order(self.quadruped_q).copy()
+            current_leg_dq = self.interface_to_policy_leg_order(self.quadruped_dq).copy()
+            target_leg_q = self.leg_action_offset.copy()
+            leg_q_error = target_leg_q - current_leg_q
+            if (
+                self.last_policy_diag_log_time < 0.0
+                or (time.monotonic() - self.last_policy_diag_log_time)
+                >= self.policy_diag_log_interval
+            ):
+                logging.info(
+                    "Pose test diag | elapsed=%.2f ratio=%.3f target_leg_q=%s current_leg_q=%s leg_q_error=%s current_leg_dq=%s foot_force=%s"
+                    % (
+                        pose_elapsed,
+                        pose_ratio,
+                        np.array2string(target_leg_q, precision=3, floatmode="fixed"),
+                        np.array2string(current_leg_q, precision=3, floatmode="fixed"),
+                        np.array2string(leg_q_error, precision=3, floatmode="fixed"),
+                        np.array2string(current_leg_dq, precision=3, floatmode="fixed"),
+                        np.array2string(self.latest_foot_force, precision=3, floatmode="fixed"),
+                    )
+                )
+                self.last_policy_diag_log_time = time.monotonic()
+            wbc_action = np.zeros(18, dtype=np.float64)
+            wbc_action[:12] = _blend_arrays(
+                self.pose_test_leg_start,
+                target_leg_q,
+                pose_ratio,
+            )
+            wbc_action[12:] = _blend_arrays(
+                self.pose_test_arm_start,
+                self.arm_passthrough_pose,
+                pose_ratio,
+            )
+            self.set_gains(kp=self.pose_test_kp, kd=self.pose_test_kd)
+            self.set_motor_position(wbc_action, self.gripper_pos_cmd)
+            self.motor_timer_callback()
             return
 
         if self.align_to_policy_active and not self.start_policy:
