@@ -1574,7 +1574,6 @@ class WBCNodeLeg12ArmPassthrough(Node):
         )
         self.obs_dof_pos_scale = float(policy_obs_cfg["joint_pos"]["scale"])
         self.obs_dof_pos_offset = self.default_dof_pos.copy()
-        self.obs_dof_pos_offset[:LEG_DOF] = self.real_deploy_leg_offset.copy()
         self.obs_dof_vel_scale = float(policy_obs_cfg["joint_vel"]["scale"])
         leg_clip = np.asarray(
             _expand_pattern_values(leg_joint_names, clip_cfg, [-100.0, 100.0]),
@@ -1586,7 +1585,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
             _expand_pattern_values(leg_joint_names, action_scale_cfg, 1.0),
             dtype=np.float64,
         )
-        self.leg_action_offset = self.real_deploy_leg_offset.copy()
+        self.leg_action_offset = self.default_dof_pos[:LEG_DOF].copy()
         self.policy_kp = _build_joint_gain_array(joint_names, actuator_cfg, "stiffness")
         self.policy_kd = _build_joint_gain_array(joint_names, actuator_cfg, "damping")
         delay_cfg = config.get("sim2sim_action_delay_range", (0, 0))
@@ -1667,6 +1666,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
             + f" manual_takeover_kd: {self.manual_takeover_kd},"
             + f" obs_dof_pos_scale: {self.obs_dof_pos_scale}, "
             + f"train_leg_default_offset: {self.default_dof_pos[:LEG_DOF]},"
+            + f" real_deploy_leg_offset: {self.real_deploy_leg_offset},"
             + f"obs_dof_pos_offset: {self.obs_dof_pos_offset},"
             + f" obs_dof_vel_scale: {self.obs_dof_vel_scale}, "
             + f"leg_action_offset: {self.leg_action_offset},"
