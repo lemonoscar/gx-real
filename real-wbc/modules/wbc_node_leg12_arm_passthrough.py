@@ -1626,10 +1626,11 @@ class WBCNodeLeg12ArmPassthrough(Node):
         )
         self.clip_actions_lower = leg_clip[:, 0].copy()
         self.clip_actions_upper = leg_clip[:, 1].copy()
-        self.leg_action_scale = np.asarray(
+        train_leg_action_scale = np.asarray(
             _expand_pattern_values(leg_joint_names, action_scale_cfg, 1.0),
             dtype=np.float64,
         )
+        self.leg_action_scale = np.full(LEG_DOF, 0.4, dtype=np.float64)
         self.leg_action_offset = self.default_dof_pos[:LEG_DOF].copy()
         self.policy_kp = _build_joint_gain_array(joint_names, actuator_cfg, "stiffness")
         self.policy_kd = _build_joint_gain_array(joint_names, actuator_cfg, "damping")
@@ -1716,6 +1717,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
             + f"obs_dof_pos_offset: {self.obs_dof_pos_offset},"
             + f" obs_dof_vel_scale: {self.obs_dof_vel_scale}, "
             + f"leg_action_offset: {self.leg_action_offset},"
+            + f" train_leg_action_scale: {train_leg_action_scale},"
             + f" leg_action_scale: {self.leg_action_scale},"
             + f" train_sim2sim_action_delay_range: {self.train_sim2sim_action_delay_range},"
             + f" deploy_sim2sim_action_delay_range: {self.sim2sim_action_delay_range},"
