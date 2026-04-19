@@ -38,8 +38,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--standup-mode",
         type=str,
-        default="unitree_recoverystand",
-        choices=["unitree_recoverystand", "unitree_standup", "internal"],
+        default="unitree_auto",
+        choices=["unitree_auto", "unitree_recoverystand", "unitree_standup", "internal"],
     )
     args = parser.parse_args()
     wbc_node = WBCNodeLeg12ArmPassthrough(**vars(args))

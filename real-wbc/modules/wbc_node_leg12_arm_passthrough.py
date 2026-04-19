@@ -188,7 +188,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         logging_dir: str = "logs",
         pose_estimator: str = "iphone",
         disable_arm: bool = False,
-        standup_mode: str = "unitree_recoverystand",
+        standup_mode: str = "unitree_auto",
     ):
         super().__init__("deploy_node")  # type: ignore
         self.replay_speed = replay_speed
@@ -249,6 +249,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.unitree_takeover_kd = np.ones(12, dtype=np.float64) * 1.0
         self.unitree_stand_min_wait = 2.5
         self.unitree_stand_timeout = 10.0
+        self.unitree_motion_detect_timeout = 1.5
 
         self.arm2base = affines.compose(
             T=np.array([0.085, 0.0, 0.094]),
@@ -321,6 +322,10 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.unitree_stand_ready = False
         self.unitree_stand_request_time = -1.0
         self.unitree_stand_completed_time = -1.0
+        self.unitree_stand_initial_mode = -1
+        self.unitree_stand_requested_api_id = -1
+        self.unitree_stand_motion_observed = False
+        self.unitree_stand_fallback_sent = False
         self._sport_request_id = 0
         self.sport_state_sub = self.create_subscription(
             SportModeState,
@@ -488,7 +493,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
 
     @property
     def uses_unitree_standup(self) -> bool:
-        return self.standup_mode in {"unitree_standup", "unitree_recoverystand"}
+        return self.standup_mode in {"unitree_auto", "unitree_standup", "unitree_recoverystand"}
 
     @property
     def getup_total_time(self) -> float:
@@ -501,6 +506,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
 
     @property
     def standup_label(self) -> str:
+        if self.standup_mode == "unitree_auto":
+            return "StandUp/RecoveryStand"
         if self.standup_mode == "unitree_recoverystand":
             return "RecoveryStand"
         if self.standup_mode == "unitree_standup":
@@ -513,13 +520,27 @@ class WBCNodeLeg12ArmPassthrough(Node):
         if not self.awaiting_unitree_stand:
             return
         elapsed = time.monotonic() - self.unitree_stand_request_time
+        if (
+            self.sport_mode == SPORT_MODE_RECOVERY_STAND
+            or self.sport_progress > 0.0
+            or (
+                self.unitree_stand_initial_mode != -1
+                and self.sport_mode != self.unitree_stand_initial_mode
+            )
+        ):
+            self.unitree_stand_motion_observed = True
         if elapsed < self.unitree_stand_min_wait:
             return
-        if self.sport_mode in {SPORT_MODE_IDLE, SPORT_MODE_BALANCE_STAND}:
+        if (
+            self.unitree_stand_motion_observed
+            and self.sport_mode in {SPORT_MODE_IDLE, SPORT_MODE_BALANCE_STAND}
+        ):
             self.awaiting_unitree_stand = False
             self.unitree_stand_ready = True
             self.unitree_stand_completed_time = time.monotonic()
-            logging.info(f"Unitree {self.standup_label} completed; low-level policy can take over")
+            logging.info(
+                f"Unitree {self.standup_label} completed; low-level policy can take over"
+            )
 
     def publish_sport_request(self, api_id: int):
         if self.sport_request_pub is None or UnitreeRequest is None:
@@ -533,7 +554,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         req.header.policy.noreply = True
         self.sport_request_pub.publish(req)
 
-    def start_unitree_standup(self):
+    def start_unitree_standup(self, api_id: Optional[int] = None):
         if self.latest_tick == -1:
             logging.warning("Low-state is not ready yet; wait for robot state before pressing R1")
             return
@@ -544,19 +565,27 @@ class WBCNodeLeg12ArmPassthrough(Node):
             logging.warning(f"Unitree {self.standup_label} is already running")
             return
 
-        api_id = (
-            SPORT_API_ID_RECOVERYSTAND
-            if self.standup_mode == "unitree_recoverystand"
-            else SPORT_API_ID_STANDUP
-        )
+        if api_id is None:
+            api_id = (
+                SPORT_API_ID_RECOVERYSTAND
+                if self.standup_mode == "unitree_recoverystand"
+                else SPORT_API_ID_STANDUP
+            )
         self.unitree_stand_ready = False
         self.awaiting_unitree_stand = True
         self.unitree_stand_request_time = time.monotonic()
         self.unitree_stand_completed_time = -1.0
+        self.unitree_stand_initial_mode = self.sport_mode
+        self.unitree_stand_requested_api_id = api_id
+        self.unitree_stand_motion_observed = False
+        self.unitree_stand_fallback_sent = False
         self.start_time = -1.0
         self.prev_action[:] = 0.0
         self.publish_sport_request(api_id)
-        logging.info(f"Requested Unitree {self.standup_label}")
+        request_name = (
+            "RecoveryStand" if api_id == SPORT_API_ID_RECOVERYSTAND else "StandUp"
+        )
+        logging.info(f"Requested Unitree {request_name}")
 
     def start(self):
         if self.latest_tick == -1:
@@ -849,6 +878,22 @@ class WBCNodeLeg12ArmPassthrough(Node):
         if self.uses_unitree_standup:
             if self.awaiting_unitree_stand:
                 elapsed = time.monotonic() - self.unitree_stand_request_time
+                if (
+                    self.standup_mode == "unitree_auto"
+                    and not self.unitree_stand_motion_observed
+                    and not self.unitree_stand_fallback_sent
+                    and self.unitree_stand_requested_api_id == SPORT_API_ID_STANDUP
+                    and elapsed > self.unitree_motion_detect_timeout
+                ):
+                    self.unitree_stand_fallback_sent = True
+                    self.unitree_stand_request_time = time.monotonic()
+                    self.unitree_stand_initial_mode = self.sport_mode
+                    self.unitree_stand_requested_api_id = SPORT_API_ID_RECOVERYSTAND
+                    self.publish_sport_request(SPORT_API_ID_RECOVERYSTAND)
+                    logging.warning(
+                        "Unitree StandUp showed no motion; fallback to RecoveryStand"
+                    )
+                    elapsed = 0.0
                 if elapsed > self.unitree_stand_timeout:
                     self.awaiting_unitree_stand = False
                     logging.warning(
