@@ -313,6 +313,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
             dtype=np.float64,
         )
         self.sim2sim_action_delay_range = (0, 0)
+        self.train_sim2sim_action_delay_range = (0, 0)
         self.sim2sim_action_delay_steps = 0
         self.sim2sim_action_hold_prob = 0.0
         self.sim2sim_action_noise_std = 0.0
@@ -350,7 +351,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
             dtype=np.float64,
         )
         self.policy_handover_leg_start = np.zeros(12, dtype=np.float64)
-        self.policy_handover_duration = 1.2
+        self.policy_handover_duration = 0.25
         self.stand_target_leg_pos = np.array(
             [
                 0.00571868, 0.608813, -1.21763,
@@ -1589,10 +1590,11 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.policy_kp = _build_joint_gain_array(joint_names, actuator_cfg, "stiffness")
         self.policy_kd = _build_joint_gain_array(joint_names, actuator_cfg, "damping")
         delay_cfg = config.get("sim2sim_action_delay_range", (0, 0))
-        self.sim2sim_action_delay_range = (
+        self.train_sim2sim_action_delay_range = (
             int(delay_cfg[0]),
             int(delay_cfg[1]),
         )
+        self.sim2sim_action_delay_range = (0, 0)
         self.sim2sim_action_hold_prob = float(
             config.get("sim2sim_action_hold_prob", 0.0)
         )
@@ -1671,7 +1673,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
             + f" obs_dof_vel_scale: {self.obs_dof_vel_scale}, "
             + f"leg_action_offset: {self.leg_action_offset},"
             + f" leg_action_scale: {self.leg_action_scale},"
-            + f" sim2sim_action_delay_range: {self.sim2sim_action_delay_range},"
+            + f" train_sim2sim_action_delay_range: {self.train_sim2sim_action_delay_range},"
+            + f" deploy_sim2sim_action_delay_range: {self.sim2sim_action_delay_range},"
             + f" sim2sim_action_hold_prob: {self.sim2sim_action_hold_prob},"
             + f" sim2sim_action_noise_std: {self.sim2sim_action_noise_std},"
             + f" sim2sim_obs_delay_steps: {self.sim2sim_obs_delay_steps},"
