@@ -1,4 +1,6 @@
 doc/
-policies/
+policies/*
+!policies/
+!policies/env.yaml
 __pycache__/
 *.pyc
