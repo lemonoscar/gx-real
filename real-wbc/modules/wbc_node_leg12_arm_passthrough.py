@@ -218,12 +218,13 @@ class WBCNodeLeg12ArmPassthrough(Node):
         
         self.prev_action = self.init_action.copy()
         self.init_leg_pos = np.zeros(12, dtype=np.float64)
+        self.internal_getup_arm_target = np.zeros(6, dtype=np.float64)
         self.pre_getup_leg_pos = np.array(
             [
-                0.10, 1.15, -2.25,
-                -0.10, 1.15, -2.25,
-                0.10, 1.35, -2.25,
-                -0.10, 1.35, -2.25,
+                0.00, 1.36, -2.65,
+                0.00, 1.36, -2.65,
+                0.00, 1.36, -2.65,
+                0.00, 1.36, -2.65,
             ],
             dtype=np.float64,
         )
@@ -239,16 +240,16 @@ class WBCNodeLeg12ArmPassthrough(Node):
             dtype=np.float64,
         )
         self.policy_handover_leg_start[:] = self.stand_target_leg_pos
-        self.getup_settle_time = 0.35
-        self.getup_crouch_time = 1.25
-        self.getup_stand_time = 1.75
-        self.getup_hold_time = 0.50
-        self.getup_start_kp = np.ones(12, dtype=np.float64) * 28.0
-        self.getup_start_kd = np.ones(12, dtype=np.float64) * 0.8
-        self.getup_crouch_kp = np.ones(12, dtype=np.float64) * 55.0
-        self.getup_crouch_kd = np.ones(12, dtype=np.float64) * 2.0
-        self.getup_stand_kp = np.ones(12, dtype=np.float64) * 72.0
-        self.getup_stand_kd = np.ones(12, dtype=np.float64) * 2.8
+        self.getup_settle_time = 0.0
+        self.getup_crouch_time = 1.0
+        self.getup_stand_time = 2.0
+        self.getup_hold_time = 0.0
+        self.getup_start_kp = np.ones(12, dtype=np.float64) * 80.0
+        self.getup_start_kd = np.ones(12, dtype=np.float64) * 3.0
+        self.getup_crouch_kp = np.ones(12, dtype=np.float64) * 80.0
+        self.getup_crouch_kd = np.ones(12, dtype=np.float64) * 3.0
+        self.getup_stand_kp = np.ones(12, dtype=np.float64) * 80.0
+        self.getup_stand_kd = np.ones(12, dtype=np.float64) * 3.0
         self.unitree_takeover_kp = np.ones(12, dtype=np.float64) * 40.0
         self.unitree_takeover_kd = np.ones(12, dtype=np.float64) * 1.0
         self.unitree_stand_min_wait = 2.5
@@ -425,7 +426,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
             logging.info(f"Press R1 to trigger Unitree {self.standup_mode}")
             logging.info("Wait for the robot to finish the built-in recovery motion before pressing L2")
         elif self.uses_internal_standup:
-            logging.info("Press R1 to start internal stand-up")
+            logging.info("Press R1 to start rl_sar get-up")
         else:
             logging.info("Stand the robot up with the controller first, then press L2 to start policy")
             logging.info("Press L2 again after takeover to command forward motion")
@@ -526,7 +527,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
             return "StandUp"
         if self.standup_mode == "manual":
             return "manual stand-up"
-        return "internal stand-up"
+        return "rl_sar get-up"
 
     def sport_state_cb(self, msg: SportModeState):
         self.sport_mode = int(msg.mode)
@@ -953,65 +954,45 @@ class WBCNodeLeg12ArmPassthrough(Node):
             elapsed = max(time.monotonic() - self.start_time, 0.0)
             wbc_action = np.zeros(18, dtype=np.float64)
 
-            if elapsed <= self.getup_settle_time:
-                wbc_action[:12] = self.init_leg_pos.copy()
-                getup_kp = self.getup_start_kp.copy()
-                getup_kd = self.getup_start_kd.copy()
-            elif elapsed <= self.getup_settle_time + self.getup_crouch_time:
-                crouch_ratio = _smoothstep(
-                    (elapsed - self.getup_settle_time) / self.getup_crouch_time
+            if elapsed <= self.getup_crouch_time:
+                crouch_ratio = float(
+                    np.clip(elapsed / max(self.getup_crouch_time, 1e-6), 0.0, 1.0)
                 )
                 wbc_action[:12] = _blend_arrays(
                     self.init_leg_pos,
                     self.pre_getup_leg_pos,
                     crouch_ratio,
                 )
-                getup_kp = _blend_arrays(
-                    self.getup_start_kp,
-                    self.getup_crouch_kp,
-                    crouch_ratio,
-                )
-                getup_kd = _blend_arrays(
-                    self.getup_start_kd,
-                    self.getup_crouch_kd,
-                    crouch_ratio,
-                )
-            elif elapsed <= self.getup_settle_time + self.getup_crouch_time + self.getup_stand_time:
-                stand_ratio = _smoothstep(
-                    (
-                        elapsed
-                        - self.getup_settle_time
-                        - self.getup_crouch_time
+                getup_kp = self.getup_crouch_kp.copy()
+                getup_kd = self.getup_crouch_kd.copy()
+            elif elapsed <= self.getup_crouch_time + self.getup_stand_time:
+                stand_ratio = float(
+                    np.clip(
+                        (elapsed - self.getup_crouch_time)
+                        / max(self.getup_stand_time, 1e-6),
+                        0.0,
+                        1.0,
                     )
-                    / self.getup_stand_time
                 )
                 wbc_action[:12] = _blend_arrays(
                     self.pre_getup_leg_pos,
                     self.stand_target_leg_pos,
                     stand_ratio,
                 )
-                getup_kp = _blend_arrays(
-                    self.getup_crouch_kp,
-                    self.getup_stand_kp,
-                    stand_ratio,
-                )
-                getup_kd = _blend_arrays(
-                    self.getup_crouch_kd,
-                    self.getup_stand_kd,
-                    stand_ratio,
-                )
+                getup_kp = self.getup_stand_kp.copy()
+                getup_kd = self.getup_stand_kd.copy()
             else:
                 wbc_action[:12] = self.stand_target_leg_pos.copy()
                 getup_kp = self.getup_stand_kp.copy()
                 getup_kd = self.getup_stand_kd.copy()
 
             self.set_gains(kp=getup_kp, kd=getup_kd)
-            arm_ratio = _smoothstep(
-                min(elapsed / max(self.getup_total_time - self.getup_hold_time, 1e-6), 1.0)
+            arm_ratio = float(
+                np.clip(elapsed / max(self.getup_crouch_time, 1e-6), 0.0, 1.0)
             )
             wbc_action[12:] = _blend_arrays(
                 self.init_arm_pos,
-                self.arm_passthrough_pose,
+                self.internal_getup_arm_target,
                 arm_ratio,
             )
             gripper_pos = 0.0
