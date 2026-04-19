@@ -7,8 +7,12 @@ import importlib.util
 def main() -> int:
     policy_path = os.environ.get("GX_REAL_POLICY_PATH", "")
     crc_module_path = os.environ.get("GX_REAL_CRC_MODULE_PATH", "")
+    policy_env_path = (
+        os.path.join(os.path.dirname(policy_path), "env.yaml") if policy_path else ""
+    )
     required_files = [
         policy_path,
+        policy_env_path,
         crc_module_path,
         os.path.join(os.environ["GX_REAL_ROOT"], "arx5-sdk", "models", "X5_umi.urdf"),
     ]
@@ -44,6 +48,7 @@ def main() -> int:
 
     print("[gx-real] python imports OK")
     print(f"[gx-real] policy={policy_path}")
+    print(f"[gx-real] policy_env={policy_env_path}")
     return 0
 
 

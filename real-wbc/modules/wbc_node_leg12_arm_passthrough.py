@@ -2,10 +2,12 @@ import datetime
 import pytz
 import numpy as np
 import os
+import re
 import sys
 import importlib.util
 from typing import Dict, List, Optional
 import logging
+import yaml
 
 from modules.common import (
     LEG_DOF,
@@ -39,7 +41,6 @@ _crc_module = importlib.util.module_from_spec(_crc_spec)
 _crc_spec.loader.exec_module(_crc_module)  # type: ignore[union-attr]
 get_crc = _crc_module.get_crc
 from modules.velocity_estimator import MovingWindowFilter, VelocityEstimator
-import numpy as np
 import onnxruntime as ort
 import faulthandler
 
@@ -54,12 +55,86 @@ from unitree_go.msg import (
 import time
 from geometry_msgs.msg import PoseStamped
 from rclpy.time import Time
+
+
 def quat_rotate_inv(q: np.ndarray, v: np.ndarray):
     return quaternions.rotate_vector(
         v=v,
         q=quaternions.qinverse(q),
     )
+
+
 import arx5_interface as arx5
+
+
+class _PolicyConfigLoader(yaml.SafeLoader):
+    pass
+
+
+def _construct_python_tag(loader, suffix, node):
+    if isinstance(node, yaml.ScalarNode):
+        return loader.construct_scalar(node)
+    if isinstance(node, yaml.SequenceNode):
+        return loader.construct_sequence(node)
+    if isinstance(node, yaml.MappingNode):
+        return loader.construct_mapping(node)
+    raise TypeError(f"unsupported yaml node type: {type(node)!r}")
+
+
+_PolicyConfigLoader.add_multi_constructor(
+    "tag:yaml.org,2002:python/",
+    _construct_python_tag,
+)
+
+
+def _load_policy_env_config(config_path: str) -> Dict:
+    with open(config_path, "r", encoding="utf-8") as handle:
+        return yaml.load(handle, Loader=_PolicyConfigLoader)
+
+
+def _expand_pattern_values(
+    joint_names: List[str],
+    pattern_values: Dict,
+    default_value,
+) -> List:
+    expanded = []
+    for joint_name in joint_names:
+        value = default_value
+        for pattern, candidate in pattern_values.items():
+            if re.fullmatch(pattern, joint_name):
+                value = candidate
+                break
+        expanded.append(value)
+    return expanded
+
+
+def _build_joint_gain_array(
+    joint_names: List[str],
+    actuators: Dict,
+    field_name: str,
+) -> np.ndarray:
+    joint_values = np.zeros(len(joint_names), dtype=np.float64)
+    matched = np.zeros(len(joint_names), dtype=bool)
+    for actuator_cfg in actuators.values():
+        joint_patterns = actuator_cfg.get("joint_names_expr", [])
+        value = float(actuator_cfg[field_name])
+        for joint_index, joint_name in enumerate(joint_names):
+            if any(re.fullmatch(pattern, joint_name) for pattern in joint_patterns):
+                joint_values[joint_index] = value
+                matched[joint_index] = True
+    if not matched.all():
+        missing_joints = [joint for joint, is_matched in zip(joint_names, matched) if not is_matched]
+        raise RuntimeError(f"missing {field_name} for joints: {missing_joints}")
+    return joint_values
+
+
+def _smoothstep(ratio: float) -> float:
+    ratio = float(np.clip(ratio, 0.0, 1.0))
+    return ratio * ratio * (3.0 - 2.0 * ratio)
+
+
+def _blend_arrays(start: np.ndarray, end: np.ndarray, ratio: float) -> np.ndarray:
+    return start * (1.0 - ratio) + end * ratio
 
 
 class _ZeroArmState:
@@ -105,35 +180,10 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.fix_at_init_pose = True
         self.init_action = np.zeros(18, dtype=np.float64)
         self.latest_tick = -1
-        self.umi_cup_action = np.array(
-            [
-                -0.6732,
-                1.4633,
-                1.0376,
-                0.8649,
-                1.6390,
-                1.2028,
-                0.1966,
-                3.2722,
-                -3.4770,
-                0.5734,
-                3.0701,
-                -3.2379,
-                0.2190,
-                6.0063,
-                0.4964,
-                2.2911,
-                -0.0708,
-                0.8192,
-            ],
-            dtype=np.float64,
-        )
-        self.umi_cup_action[12:] = 0.0
-        self.init_action[:] = self.umi_cup_action[:]
         self.policy_path = policy_path
         self.arm_enabled = not disable_arm
         self.default_arm_hold_pose = np.array(
-            [0.0, 1.57, 1.57, 0.0, 0.0, 0.0], dtype=np.float64
+            [0.0, 0.3, 0.5, 0.0, 0.0, 0.0], dtype=np.float64
         )
         self.arm_passthrough_pose_user_set = arm_pose is not None
         self.arm_passthrough_pose = (
@@ -148,24 +198,35 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.init_leg_pos = np.zeros(12, dtype=np.float64)
         self.pre_getup_leg_pos = np.array(
             [
-                0.00, 1.36, -2.65,
-                0.00, 1.36, -2.65,
-                0.00, 1.36, -2.65,
-                0.00, 1.36, -2.65,
+                0.10, 1.15, -2.25,
+                -0.10, 1.15, -2.25,
+                0.10, 1.35, -2.25,
+                -0.10, 1.35, -2.25,
             ],
             dtype=np.float64,
         )
-        self.policy_handover_leg_start = self.stand_target_leg_pos.copy()
-        self.policy_handover_duration = 0.5
+        self.policy_handover_leg_start = np.zeros(12, dtype=np.float64)
+        self.policy_handover_duration = 0.8
         self.stand_target_leg_pos = np.array(
             [
-                0.00, 0.80, -1.50,
-                0.00, 0.80, -1.50,
-                0.00, 0.72, -1.38,
-                0.00, 0.72, -1.38,
+                0.10, 0.80, -1.50,
+                -0.10, 0.80, -1.50,
+                0.10, 1.00, -1.50,
+                -0.10, 1.00, -1.50,
             ],
             dtype=np.float64,
         )
+        self.policy_handover_leg_start[:] = self.stand_target_leg_pos
+        self.getup_settle_time = 0.35
+        self.getup_crouch_time = 1.25
+        self.getup_stand_time = 1.75
+        self.getup_hold_time = 0.50
+        self.getup_start_kp = np.ones(12, dtype=np.float64) * 28.0
+        self.getup_start_kd = np.ones(12, dtype=np.float64) * 0.8
+        self.getup_crouch_kp = np.ones(12, dtype=np.float64) * 55.0
+        self.getup_crouch_kd = np.ones(12, dtype=np.float64) * 2.0
+        self.getup_stand_kp = np.ones(12, dtype=np.float64) * 72.0
+        self.getup_stand_kd = np.ones(12, dtype=np.float64) * 2.8
 
         self.arm2base = affines.compose(
             T=np.array([0.085, 0.0, 0.094]),
@@ -264,6 +325,12 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.default_dof_pos: np.ndarray
         self.device = device
         self.init_policy(policy_path=policy_path)
+        if not self.arm_passthrough_pose_user_set:
+            self.default_arm_hold_pose = self.default_dof_pos[12:].copy()
+            self.arm_passthrough_pose = self.default_arm_hold_pose.copy()
+        self.stand_target_leg_pos = self.leg_action_offset.copy()
+        self.pre_getup_leg_pos = self._build_pre_getup_leg_pos(self.stand_target_leg_pos)
+        self.policy_handover_leg_start = self.stand_target_leg_pos.copy()
         self.policy_dt_slack = policy_dt_slack
 
         # Create a quick timer for steadier timer interval
@@ -298,8 +365,9 @@ class WBCNodeLeg12ArmPassthrough(Node):
         # Joystick Callback variables
         self.start_policy = False
         self.start_policy_time = time.monotonic()
-        logging.info("Press L2 to start policy")
-        logging.info("Press L1 for emergent stop")
+        logging.info("Press R1 to start stand-up")
+        logging.info("Press L2 to start policy after stand-up completes")
+        logging.info("Press L1 for emergency stop")
         self.key_is_pressed = False  # for key press event
 
         # Set up Arm
@@ -362,10 +430,32 @@ class WBCNodeLeg12ArmPassthrough(Node):
 
         self.target_input_mode = "passthrough"
 
+    def _build_pre_getup_leg_pos(self, stand_target_leg_pos: np.ndarray) -> np.ndarray:
+        crouch_pose = stand_target_leg_pos.copy()
+        crouch_pose[1::3] += 0.35
+        crouch_pose[2::3] -= 0.75
+        return crouch_pose
+
+    @property
+    def getup_total_time(self) -> float:
+        return (
+            self.getup_settle_time
+            + self.getup_crouch_time
+            + self.getup_stand_time
+            + self.getup_hold_time
+        )
+
     def start(self):
+        if self.latest_tick == -1:
+            logging.warning("Low-state is not ready yet; wait for robot state before pressing R1")
+            return
+        if self.start_policy:
+            logging.warning("Policy is running; stop it with R2 before restarting stand-up")
+            return
         self.init_leg_pos = reorder(self.quadruped_q).copy()
         lowstate = self.get_arm_joint_state()
         self.init_arm_pos = lowstate.pos().copy()
+        self.prev_action[:] = 0.0
         self.start_time = time.monotonic()
 
     def get_arm_joint_state(self):
@@ -431,7 +521,9 @@ class WBCNodeLeg12ArmPassthrough(Node):
 
     @property
     def ready_to_start_policy(self) -> bool:
-        return True
+        if self.start_time == -1.0 or self.latest_tick == -1:
+            return False
+        return (time.monotonic() - self.start_time) >= self.getup_total_time
 
     def joy_stick_cb(self, msg):
         if msg.keys == 1:  # R1: start pipeline
@@ -451,9 +543,15 @@ class WBCNodeLeg12ArmPassthrough(Node):
             if self.ready_to_start_policy:
                 logging.info("Start policy")
                 self.policy_handover_leg_start = reorder(self.quadruped_q).copy()
+                self.prev_action[:] = 0.0
                 self.start_policy = True
                 self.start_policy_time = time.monotonic()
                 self.policy_ctrl_iter = 0
+            elif self.start_time == -1.0:
+                logging.warning("Press R1 first to start the stand-up sequence")
+            else:
+                remaining = max(self.getup_total_time - (time.monotonic() - self.start_time), 0.0)
+                logging.warning(f"Stand-up is not finished yet; wait {remaining:.1f}s before pressing L2")
         # if msg.keys == int(2**15):  # Left # NOTE must map to another key, left already used in pose latency
         #     # pass
 
@@ -618,37 +716,73 @@ class WBCNodeLeg12ArmPassthrough(Node):
     # policy inference
     ##############################
     def policy_timer_callback(self):
-        # stand up first
-        getup_kp = np.ones(12) * 80.0
-        getup_kd = np.ones(12) * 3.0
-        pre_getup_time = 1.0
-        stand_up_time = 2.0
-        stand_up_buffer_time = 0.0
-
         if self.start_time == -1.0:
             return
 
         if not self.start_policy:
-            elapsed = time.monotonic() - self.start_time - stand_up_buffer_time
-            pre_ratio = max(min(elapsed / pre_getup_time, 1.0), 0.0)
-            getup_ratio = max(min((elapsed - pre_getup_time) / stand_up_time, 1.0), 0.0)
-            total_getup_time = pre_getup_time + stand_up_time
-            self.set_gains(kp=getup_kp, kd=getup_kd)
+            elapsed = max(time.monotonic() - self.start_time, 0.0)
             wbc_action = np.zeros(18, dtype=np.float64)
-            if elapsed <= pre_getup_time:
-                wbc_action[:12] = (
-                    self.init_leg_pos * (1.0 - pre_ratio)
-                    + self.pre_getup_leg_pos * pre_ratio
+
+            if elapsed <= self.getup_settle_time:
+                wbc_action[:12] = self.init_leg_pos.copy()
+                getup_kp = self.getup_start_kp.copy()
+                getup_kd = self.getup_start_kd.copy()
+            elif elapsed <= self.getup_settle_time + self.getup_crouch_time:
+                crouch_ratio = _smoothstep(
+                    (elapsed - self.getup_settle_time) / self.getup_crouch_time
+                )
+                wbc_action[:12] = _blend_arrays(
+                    self.init_leg_pos,
+                    self.pre_getup_leg_pos,
+                    crouch_ratio,
+                )
+                getup_kp = _blend_arrays(
+                    self.getup_start_kp,
+                    self.getup_crouch_kp,
+                    crouch_ratio,
+                )
+                getup_kd = _blend_arrays(
+                    self.getup_start_kd,
+                    self.getup_crouch_kd,
+                    crouch_ratio,
+                )
+            elif elapsed <= self.getup_settle_time + self.getup_crouch_time + self.getup_stand_time:
+                stand_ratio = _smoothstep(
+                    (
+                        elapsed
+                        - self.getup_settle_time
+                        - self.getup_crouch_time
+                    )
+                    / self.getup_stand_time
+                )
+                wbc_action[:12] = _blend_arrays(
+                    self.pre_getup_leg_pos,
+                    self.stand_target_leg_pos,
+                    stand_ratio,
+                )
+                getup_kp = _blend_arrays(
+                    self.getup_crouch_kp,
+                    self.getup_stand_kp,
+                    stand_ratio,
+                )
+                getup_kd = _blend_arrays(
+                    self.getup_crouch_kd,
+                    self.getup_stand_kd,
+                    stand_ratio,
                 )
             else:
-                wbc_action[:12] = (
-                    self.pre_getup_leg_pos * (1.0 - getup_ratio)
-                    + self.stand_target_leg_pos * getup_ratio
-                )
-            arm_ratio = max(min(elapsed / total_getup_time, 1.0), 0.0)
-            wbc_action[12:] = (
-                self.init_arm_pos * (1.0 - arm_ratio)
-                + self.arm_passthrough_pose * arm_ratio
+                wbc_action[:12] = self.stand_target_leg_pos.copy()
+                getup_kp = self.getup_stand_kp.copy()
+                getup_kd = self.getup_stand_kd.copy()
+
+            self.set_gains(kp=getup_kp, kd=getup_kd)
+            arm_ratio = _smoothstep(
+                min(elapsed / max(self.getup_total_time - self.getup_hold_time, 1e-6), 1.0)
+            )
+            wbc_action[12:] = _blend_arrays(
+                self.init_arm_pos,
+                self.arm_passthrough_pose,
+                arm_ratio,
             )
             gripper_pos = 0.0
             # send leg action
@@ -662,8 +796,16 @@ class WBCNodeLeg12ArmPassthrough(Node):
             handover_ratio = max(
                 min(policy_elapsed / self.policy_handover_duration, 1.0), 0.0
             )
-            blended_kp = getup_kp * (1.0 - handover_ratio) + self.policy_kp[:12] * handover_ratio
-            blended_kd = getup_kd * (1.0 - handover_ratio) + self.policy_kd[:12] * handover_ratio
+            blended_kp = _blend_arrays(
+                self.getup_stand_kp,
+                self.policy_kp[:12],
+                handover_ratio,
+            )
+            blended_kd = _blend_arrays(
+                self.getup_stand_kd,
+                self.policy_kd[:12],
+                handover_ratio,
+            )
             self.set_gains(kp=blended_kp, kd=blended_kd)
             raw_action = self.run_policy(self.obs)
             leg_action = np.clip(
@@ -700,46 +842,81 @@ class WBCNodeLeg12ArmPassthrough(Node):
     def init_policy(self, policy_path: str):
         logging.info("Preparing policy")
         faulthandler.enable()
+        config_path = os.path.join(os.path.dirname(policy_path), "env.yaml")
+        if not os.path.isfile(config_path):
+            raise FileNotFoundError(f"missing policy config: {config_path}")
+        config = _load_policy_env_config(config_path)
 
-        self.policy_freq = 50.0
-        self.obs_history_len = 1
-        self.obs_dim = 260
-        self.action_dim = 12
-        self.height_scan_default = np.zeros(187, dtype=np.float64)
-        self.clip_obs = 100.0
-        self.lin_vel_scale = 2.0
-        self.ang_vel_scale = 0.25
-        self.commands_scale = np.array([1.0, 1.0, 1.0], dtype=np.float64)
-        self.obs_dof_pos_scale = 1.0
+        joint_names = list(config["joint_names"])
+        leg_joint_names = list(config["dog_joint_names"])
+        init_joint_pos = config["scene"]["robot"]["init_state"]["joint_pos"]
         self.default_dof_pos = np.array(
-            [
-                0.0, 0.8, -1.5,
-                0.0, 0.8, -1.5,
-                0.0, 0.8, -1.5,
-                0.0, 0.8, -1.5,
-                0.0, 0.0, 0.0,
-                0.0, 0.0, 0.0,
-            ],
+            [float(init_joint_pos[joint_name]) for joint_name in joint_names],
             dtype=np.float64,
         )
+
+        policy_obs_cfg = config["observations"]["policy"]
+        action_cfg = config["actions"]["joint_pos"]
+        action_scale_cfg = action_cfg["scale"]
+        clip_cfg = action_cfg["clip"]
+        actuator_cfg = config["scene"]["robot"]["actuators"]
+
+        self.policy_freq = 1.0 / (
+            float(config["sim"]["dt"]) * float(config["sim"]["render_interval"])
+        )
+        self.obs_history_len = 1
+        self.clip_obs = max(
+            float(abs(term_cfg["clip"][1]))
+            for term_cfg in policy_obs_cfg.values()
+            if isinstance(term_cfg, dict) and term_cfg.get("clip") is not None
+        )
+        self.lin_vel_scale = float(policy_obs_cfg["base_lin_vel"]["scale"])
+        self.ang_vel_scale = float(policy_obs_cfg["base_ang_vel"]["scale"])
+        self.commands_scale = np.full(
+            3,
+            float(policy_obs_cfg["velocity_commands"]["scale"]),
+            dtype=np.float64,
+        )
+        self.obs_dof_pos_scale = float(policy_obs_cfg["joint_pos"]["scale"])
         self.obs_dof_pos_offset = self.default_dof_pos.copy()
-        self.obs_dof_vel_scale = 0.05
-        self.clip_actions_lower = np.full(12, -100.0, dtype=np.float64)
-        self.clip_actions_upper = np.full(12, 100.0, dtype=np.float64)
-        self.leg_action_scale = np.array(
-            [0.10, 0.20, 0.20, 0.10, 0.20, 0.20, 0.10, 0.20, 0.20, 0.10, 0.20, 0.20],
+        self.obs_dof_vel_scale = float(policy_obs_cfg["joint_vel"]["scale"])
+        leg_clip = np.asarray(
+            _expand_pattern_values(leg_joint_names, clip_cfg, [-100.0, 100.0]),
             dtype=np.float64,
         )
-        self.leg_action_offset = np.array(
-            [0.0, 0.8, -1.5, 0.0, 0.8, -1.5, 0.0, 0.8, -1.5, 0.0, 0.8, -1.5],
+        self.clip_actions_lower = leg_clip[:, 0].copy()
+        self.clip_actions_upper = leg_clip[:, 1].copy()
+        self.leg_action_scale = np.asarray(
+            _expand_pattern_values(leg_joint_names, action_scale_cfg, 1.0),
             dtype=np.float64,
         )
+        self.leg_action_offset = self.default_dof_pos[:LEG_DOF].copy()
+        self.policy_kp = _build_joint_gain_array(joint_names, actuator_cfg, "stiffness")
+        self.policy_kd = _build_joint_gain_array(joint_names, actuator_cfg, "damping")
+
         self.ort_session = ort.InferenceSession(
             policy_path,
             providers=["CPUExecutionProvider"],
         )
-        self.ort_input_name = self.ort_session.get_inputs()[0].name
-        self.ort_output_name = self.ort_session.get_outputs()[0].name
+        ort_input = self.ort_session.get_inputs()[0]
+        ort_output = self.ort_session.get_outputs()[0]
+        self.ort_input_name = ort_input.name
+        self.ort_output_name = ort_output.name
+        input_dim = ort_input.shape[-1]
+        output_dim = ort_output.shape[-1]
+        if not isinstance(input_dim, int) or not isinstance(output_dim, int):
+            raise RuntimeError(
+                f"unexpected model io shapes: input={ort_input.shape}, output={ort_output.shape}"
+            )
+        self.obs_dim = input_dim
+        self.action_dim = output_dim
+        known_obs_dim = 3 + 3 + 3 + 3 + 18 + 18 + 18 + 6 + 1
+        height_scan_dim = self.obs_dim - known_obs_dim
+        if height_scan_dim < 0:
+            raise RuntimeError(
+                f"invalid observation dimension: {self.obs_dim} < {known_obs_dim}"
+            )
+        self.height_scan_default = np.zeros(height_scan_dim, dtype=np.float64)
         placeholder_obs = np.zeros((1, self.obs_dim), dtype=np.float32)
         self.ort_session.run([self.ort_output_name], {self.ort_input_name: placeholder_obs})
 
@@ -753,13 +930,6 @@ class WBCNodeLeg12ArmPassthrough(Node):
         logging.info(
             f"Policy inference time: {np.mean(policy_inference_times)} ({np.std(policy_inference_times)})"
         )
-        # init p_gains, d_gains, torque_limits, default_dof_pos_all
-        self.policy_kp = np.zeros(18)
-        self.policy_kd = np.zeros(18)
-        self.policy_kp[:12] = 40.0
-        self.policy_kd[:12] = 1.0
-        self.policy_kp[12:] = 20.0
-        self.policy_kd[12:] = 0.5
 
         init_pose = reorder(self.leg_action_offset.copy())
         for i in range(LEG_DOF):
@@ -769,6 +939,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
             self.motor_cmd[i].kp = 0.0  # self.env.p_gains[i]  # 30
             self.motor_cmd[i].kd = 0.0  # float(self.env.d_gains[i])  # 0.6
         self.cmd_msg.motor_cmd = self.motor_cmd.copy()
+        self.prev_action[:] = 0.0
 
         logging.info("starting to play policy")
         logging.info(
@@ -778,6 +949,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
             + f" obs_dof_vel_scale: {self.obs_dof_vel_scale}, "
             + f"leg_action_offset: {self.leg_action_offset},"
             + f" leg_action_scale: {self.leg_action_scale},"
+            + f" policy_freq: {self.policy_freq},"
+            + f" config_path: {config_path},"
             + f" fixed_commands: {self.fixed_commands},"
             + f" fixed_gripper_cmd: {self.fixed_gripper_cmd}"
         )

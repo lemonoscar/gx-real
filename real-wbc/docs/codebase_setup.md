@@ -87,29 +87,52 @@ sudo systemctl start spacenavd.service
 It will create a socket `/var/run/spnav.sock`, and we will mount it to the container. The first time you start the services, you need to restart the container to ensure it is connected.
 
 
-## Run Whole Body Controller
+## Run Leg12 Deployment
 
-After checking all the other components (sports mode disabled, mocap/iphone connected, arx5 connected), you can start to run the whole-body controller
-"`sh
-python scripts/run_wbc.py --ckpt_path your_checkpoint.pt --pickle_path your_trajectory.pkl --traj_idx 0 --pose_estimator iphone --use_realtime_target  --fix_at_init_pose
+For the current Go2-X5 deployment flow in this repository, use the exported policy under `policies/` together with the helper scripts in `scripts/`.
+
+Recommended on-robot sequence:
+
+1. Put the robot in low-level mode and make sure sports mode is disabled.
+2. Make sure the robot is on the floor with enough clearance in front, and keep one hand near the emergency stop button on the controller.
+3. Source the runtime environment and run the pre-flight check:
+```sh
+source scripts/setup_env.sh
+scripts/check_env.sh
 ```
-Argument `--pose_estimator` depends on the pose estimator you are using (iphone or mocap). `--use_realtime_target` will let the controller listen to external trajectory updates. `--fix_at_init_pose` will disable the trajectory replay.
+4. Start the deployment process:
+```sh
+scripts/run_leg12_real.sh --pose_estimator none
+```
+Use `--pose_estimator iphone` or `--pose_estimator mocap` only when that sensor pipeline is already running and verified. Use `--disable-arm` if you want to test the quadruped body without the arm.
 
-Joystick key mapping: 
-- L1: Emergency stop. Ensure you can always push this button in case of any dangerous behaviors.
-- R1: The robot gradually stands up (interpolating to the target joint actions)  
-- L2: Start RL controller. Before pressing this button, please hold the arm tightly if it shakes badly. The robot should be able to stabilize itself in a few seconds.
-- R2: Stop RL controller. The controller will stop running, and the motor command will be fixed to the last output action. Press L2 to restart the controller.
+Joystick key mapping:
+- L1: Emergency stop. Treat this as the primary safety action.
+- R1: Start the stand-up sequence. The controller will first settle, then crouch, then stand, and finally hold a stable standing posture.
+- L2: Start the RL policy. Only press this after the stand-up sequence finishes and the robot looks stable.
+- R2: Stop the RL policy and hold the last commanded posture.
+
+Practical stand-up guidance:
+- Do not press L2 immediately after R1. Wait until the robot has fully finished the stand-up motion and is no longer shifting its weight.
+- If the robot is not receiving low-state data yet, pressing R1 will be ignored. Fix the state pipeline first instead of retrying the stand-up.
+- If the arm is enabled, keep the arm workspace clear during stand-up and policy handover.
+- If the robot looks unstable after standing, stop with L1, reset the robot posture manually, and restart from R1.
 
 After starting the RL controller, you may disturb the robot and gripper to check whether it is tracking poses well in the task space. The gripper should stay in the same spot when you drag the dog's body.
 
-Finally, for space mouse teleoperation, run
-"`sh
+For space mouse teleoperation, run
+```sh
 python scripts/run_teleop.py
 ```
-and you should be able to control the gripper pose. Notice that the coordinate frame of the iPhone or mocap can be different from the space mouse. You need to find out the correct orientation through trial and error.
+after the RL controller is already running. The coordinate frame of the iPhone or mocap can be different from the space mouse, so expect to tune the orientation mapping.
 
-After the RL controller stops, you should manually kill the `run_teleop.py` script and run this script after the RL controller starts again.
+## Run Legacy Whole Body Controller
+
+The older trajectory-tracking flow is still available:
+```sh
+python scripts/run_wbc.py --ckpt_path your_checkpoint.pt --pickle_path your_trajectory.pkl --traj_idx 0 --pose_estimator iphone --use_realtime_target --fix_at_init_pose
+```
+Argument `--pose_estimator` depends on the pose estimator you are using (iphone or mocap). `--use_realtime_target` lets the controller listen to external trajectory updates. `--fix_at_init_pose` disables the trajectory replay.
 
 
 ## Autonomous Diffusion Policy
