@@ -1,12 +1,6 @@
-from operator import le
-import time
-from typing import List
-
 import numpy as np
-import collections
-
-
-"""Moving window filter to smooth out sensor readings. From https://github.com/erwincoumans/motion_imitation"""
+ 
+"""Moving window filter to smooth out sensor readings. From motion_imitation."""
 
 class MovingWindowFilter(object):
     """A stable O(1) moving filter for incoming data streams.
@@ -31,6 +25,7 @@ class MovingWindowFilter(object):
         # The correction term to compensate numerical precision loss during
         # calculation.
         self._correction = np.zeros((self._data_dim,), dtype=np.float64)
+        self._count = 0
 
     def _neumaier_sum(self, value):
         """Update the moving window sum using Neumaier's algorithm.
@@ -75,7 +70,8 @@ class MovingWindowFilter(object):
             self._value_deque[i, :] = np.roll(self._value_deque[i, :], -1)
         self._value_deque[:, -1] = new_value
 
-        return (self._sum + self._correction) / self._window_size
+        self._count = min(self._count + 1, self._window_size)
+        return (self._sum + self._correction) / max(self._count, 1)
 
 
 def analytical_leg_jacobian(
@@ -148,6 +144,64 @@ def inv_with_jit(M):
     return np.linalg.inv(M)
 
 
+class KalmanFilter3D:
+    def __init__(
+        self,
+        accelerometer_variance: float,
+        sensor_variance: float,
+        initial_variance: float,
+    ):
+        self.initial_variance = float(initial_variance)
+        self.x = np.zeros(3, dtype=np.float64)
+        self.P = np.eye(3, dtype=np.float64) * self.initial_variance
+        self.Q = np.eye(3, dtype=np.float64) * float(accelerometer_variance)
+        self.R = np.eye(3, dtype=np.float64) * float(sensor_variance)
+
+    def reset(self):
+        self.x.fill(0.0)
+        self.P[:] = np.eye(3, dtype=np.float64) * self.initial_variance
+
+    def predict(self, dt: float, acceleration: np.ndarray):
+        self.x = self.x + acceleration * float(dt)
+        self.P = self.P + self.Q
+
+    def update(self, measurement: np.ndarray):
+        innovation = measurement - self.x
+        S = self.P + self.R
+        try:
+            S_inv = np.linalg.inv(S)
+        except np.linalg.LinAlgError:
+            return
+        K = self.P @ S_inv
+        self.x = self.x + K @ innovation
+        identity = np.eye(3, dtype=np.float64)
+        i_minus_k = identity - K
+        self.P = i_minus_k @ self.P @ i_minus_k.T + K @ self.R @ K.T
+
+
+def quaternion_to_rotation_matrix(q: np.ndarray) -> np.ndarray:
+    qw, qx, qy, qz = q.astype(np.float64)
+    norm = float(np.linalg.norm(q))
+    if norm > 1e-6:
+        qw /= norm
+        qx /= norm
+        qy /= norm
+        qz /= norm
+    return np.array(
+        [
+            [1.0 - 2.0 * (qy * qy + qz * qz), 2.0 * (qx * qy - qw * qz), 2.0 * (qx * qz + qw * qy)],
+            [2.0 * (qx * qy + qw * qz), 1.0 - 2.0 * (qx * qx + qz * qz), 2.0 * (qy * qz - qw * qx)],
+            [2.0 * (qx * qz - qw * qy), 2.0 * (qy * qz + qw * qx), 1.0 - 2.0 * (qx * qx + qy * qy)],
+        ],
+        dtype=np.float64,
+    )
+
+
+def rotate_inverse(q: np.ndarray, v: np.ndarray) -> np.ndarray:
+    rotation = quaternion_to_rotation_matrix(q)
+    return rotation.T @ v
+
+
 class VelocityEstimator:
     """Estimates base velocity of A1 robot.
 
@@ -172,27 +226,29 @@ class VelocityEstimator:
         moving_window_filter_size=120,
         default_control_dt=0.002,
     ):
-        """Compatibility estimator for Jetson deployment.
-
-        The original UMI estimator depends on filterpy/scipy, which is fragile on
-        the robot's system Python stack. For deployment bootstrap we keep the same
-        interface but output a conservative zero body linear velocity estimate.
-        """
-
+        """Numpy-only velocity estimator compatible with umi-on-legs behavior."""
+        self.filter = KalmanFilter3D(
+            accelerometer_variance=accelerometer_variance,
+            sensor_variance=sensor_variance,
+            initial_variance=initial_variance,
+        )
         self._initial_variance = initial_variance
         self._window_size = moving_window_filter_size
         self.moving_window_filter = MovingWindowFilter(
             window_size=self._window_size, data_dim=3
         )
-        self._estimated_velocity = np.zeros(3)
+        self._estimated_velocity = np.zeros(3, dtype=np.float64)
         self._last_timestamp_s = 0.0
         self._default_control_dt = default_control_dt
         self.hip_length = hip_length
         self.thigh_length = thigh_length
         self.calf_length = calf_length
+        self._accelerometer_bias = np.zeros(3, dtype=np.float64)
+        self._velocity_bias = np.zeros(3, dtype=np.float64)
 
     def reset(self):
-        self._estimated_velocity = np.zeros(3)
+        self.filter.reset()
+        self._estimated_velocity = np.zeros(3, dtype=np.float64)
         self.moving_window_filter = MovingWindowFilter(
             window_size=self._window_size, data_dim=3
         )
@@ -216,16 +272,42 @@ class VelocityEstimator:
         joint_velocity,
         joint_position,
     ):
-        """Keep interface-compatible updates with conservative zero velocity."""
+        """Estimate body-frame linear velocity from IMU and contact leg kinematics."""
         assert acceleration.shape == (3,)
         assert foot_contact.shape == (4,)
         assert quaternion.shape == (4,)
         assert joint_velocity.shape == (12,)
+        assert joint_position.shape == (12,)
 
-        self._compute_delta_time(new_timestamp_s)
-        self._estimated_velocity = self.moving_window_filter.calculate_average(
-            np.zeros(3, dtype=np.float64)
-        )
+        delta_time_s = self._compute_delta_time(new_timestamp_s)
+        rot_mat = quaternion_to_rotation_matrix(quaternion)
+        calibrated_acc = acceleration.astype(np.float64) - self._accelerometer_bias
+        acc_world = rot_mat @ calibrated_acc + np.array([0.0, 0.0, -9.81], dtype=np.float64)
+        self.filter.predict(delta_time_s, acc_world)
+
+        observed_velocities = []
+        for leg_id in range(4):
+            if foot_contact[leg_id]:
+                start = leg_id * 3
+                leg_angles = joint_position[start : start + 3]
+                jacobian = analytical_leg_jacobian(
+                    leg_angles=leg_angles,
+                    leg_id=leg_id,
+                    hip_length=self.hip_length,
+                    thigh_length=self.thigh_length,
+                    calf_length=self.calf_length,
+                )
+                joint_velocities = joint_velocity[start : start + 3]
+                leg_velocity_in_base = jacobian.dot(joint_velocities)
+                base_velocity_in_base = -leg_velocity_in_base[:3]
+                observed_velocities.append(rot_mat.dot(base_velocity_in_base))
+
+        if observed_velocities:
+            observed_velocities = np.mean(np.asarray(observed_velocities, dtype=np.float64), axis=0)
+            self.filter.update(observed_velocities)
+
+        smoothed_velocity_world = self.moving_window_filter.calculate_average(self.filter.x.copy())
+        self._estimated_velocity = rotate_inverse(quaternion, smoothed_velocity_world) - self._velocity_bias
 
     @property
     def estimated_velocity(self):

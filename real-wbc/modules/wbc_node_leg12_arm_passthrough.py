@@ -95,6 +95,18 @@ INTERFACE_LEG_JOINT_NAMES = [
     "RL_thigh_joint",
     "RL_calf_joint",
 ]
+EXPECTED_POLICY_OBS_FUNCS = {
+    "base_lin_vel": "isaaclab.envs.mdp.observations:base_lin_vel",
+    "base_ang_vel": "isaaclab.envs.mdp.observations:base_ang_vel",
+    "projected_gravity": "isaaclab.envs.mdp.observations:projected_gravity",
+    "velocity_commands": "isaaclab.envs.mdp.observations:generated_commands",
+    "joint_pos": "isaaclab.envs.mdp.observations:joint_pos_rel",
+    "joint_vel": "isaaclab.envs.mdp.observations:joint_vel_rel",
+    "actions": "robot_lab.tasks.manager_based.locomotion.velocity.mdp.observations:last_action_with_padding",
+    "height_scan": "robot_lab.tasks.manager_based.locomotion.velocity.config.quadruped.go2_x5.train_route_env_cfg:_zero_height_scan",
+    "arm_joint_command": "isaaclab.envs.mdp.observations:generated_commands",
+    "gripper_command": "robot_lab.tasks.manager_based.locomotion.velocity.mdp.observations:constant_observation",
+}
 
 
 class _PolicyConfigLoader(yaml.SafeLoader):
@@ -156,6 +168,34 @@ def _build_joint_gain_array(
         missing_joints = [joint for joint, is_matched in zip(joint_names, matched) if not is_matched]
         raise RuntimeError(f"missing {field_name} for joints: {missing_joints}")
     return joint_values
+
+
+def _validate_policy_config(config: Dict, leg_joint_names: List[str], joint_names: List[str]):
+    if len(leg_joint_names) != LEG_DOF:
+        raise RuntimeError(
+            f"expected {LEG_DOF} dog joints, got {len(leg_joint_names)}: {leg_joint_names}"
+        )
+    if sorted(leg_joint_names) != sorted(INTERFACE_LEG_JOINT_NAMES):
+        raise RuntimeError(
+            f"dog_joint_names are not a permutation of the hardware leg joints: {leg_joint_names}"
+        )
+    if joint_names[:LEG_DOF] != leg_joint_names:
+        raise RuntimeError(
+            "unsupported policy config: joint_names[:12] must match dog_joint_names exactly "
+            f"for deployment. joint_names[:12]={joint_names[:LEG_DOF]}, dog_joint_names={leg_joint_names}"
+        )
+    policy_obs_cfg = config["observations"]["policy"]
+    missing_terms = [
+        name for name in EXPECTED_POLICY_OBS_FUNCS if name not in policy_obs_cfg
+    ]
+    if missing_terms:
+        raise RuntimeError(f"policy observation is missing required terms: {missing_terms}")
+    for term_name, expected_func in EXPECTED_POLICY_OBS_FUNCS.items():
+        actual_func = policy_obs_cfg[term_name].get("func")
+        if actual_func != expected_func:
+            raise RuntimeError(
+                f"unsupported observation func for {term_name}: expected {expected_func}, got {actual_func}"
+            )
 
 
 def _smoothstep(ratio: float) -> float:
@@ -1373,6 +1413,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
 
         joint_names = list(config["joint_names"])
         leg_joint_names = list(config["dog_joint_names"])
+        _validate_policy_config(config, leg_joint_names, joint_names)
         self.policy_leg_joint_names = leg_joint_names.copy()
         self.policy_leg_indices_from_interface = np.array(
             [INTERFACE_LEG_JOINT_NAMES.index(name) for name in leg_joint_names],
@@ -1437,6 +1478,10 @@ class WBCNodeLeg12ArmPassthrough(Node):
             config.get("sim2sim_action_noise_std", 0.0)
         )
         self.sim2sim_obs_delay_steps = int(config.get("sim2sim_obs_delay_steps", 0))
+        if self.sim2sim_obs_delay_steps != 0:
+            raise RuntimeError(
+                f"sim2sim_obs_delay_steps={self.sim2sim_obs_delay_steps} is unsupported in real deployment"
+            )
         self.reset_sim2sim_action_state()
 
         self.ort_session = ort.InferenceSession(
@@ -1455,6 +1500,10 @@ class WBCNodeLeg12ArmPassthrough(Node):
             )
         self.obs_dim = input_dim
         self.action_dim = output_dim
+        if self.action_dim != LEG_DOF:
+            raise RuntimeError(
+                f"expected policy action_dim={LEG_DOF} for dog-only deployment, got {self.action_dim}"
+            )
         known_obs_dim = 3 + 3 + 3 + 3 + 18 + 18 + 18 + 6 + 1
         height_scan_dim = self.obs_dim - known_obs_dim
         if height_scan_dim < 0:
