@@ -218,6 +218,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         
         self.prev_action = self.init_action.copy()
         self.init_leg_pos = np.zeros(12, dtype=np.float64)
+        self.latest_foot_force = np.zeros(4, dtype=np.float64)
         self.internal_getup_arm_target = np.zeros(6, dtype=np.float64)
         self.pre_getup_leg_pos = np.array(
             [
@@ -799,6 +800,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         foot_force = np.array(
             [msg.foot_force[foot_id] for foot_id in range(4)], dtype=np.float64
         )
+        self.latest_foot_force = foot_force.copy()
         foot_contact = np.array(foot_force > self.foot_contact_thres, dtype=np.float64)
 
         angular_velocity = self.angular_velocity_filter.calculate_average(
@@ -1024,14 +1026,31 @@ class WBCNodeLeg12ArmPassthrough(Node):
             blended_kd = _blend_arrays(base_kd, self.policy_kd[:12], handover_ratio)
             self.set_gains(kp=blended_kp, kd=blended_kd)
             raw_action = self.run_policy(self.obs)
+            leg_action = np.clip(
+                raw_action,
+                self.clip_actions_lower,
+                self.clip_actions_upper,
+            )
+            wbc_action = np.zeros(18, dtype=np.float64)
+            target_leg_q = self.map_leg_action_to_targets(leg_action)
+            commanded_leg_q = (
+                self.policy_handover_leg_start * (1.0 - handover_ratio)
+                + target_leg_q * handover_ratio
+            )
+            wbc_action[:12] = commanded_leg_q
+            wbc_action[12:] = self.arm_passthrough_pose.copy()
+            current_leg_q = reorder(self.quadruped_q).copy()
+            current_leg_dq = reorder(self.quadruped_dq).copy()
+            leg_q_error = commanded_leg_q - current_leg_q
             if (
                 self.last_policy_diag_log_time < 0.0
                 or (time.monotonic() - self.last_policy_diag_log_time)
                 >= self.policy_diag_log_interval
             ):
                 logging.info(
-                    "Policy diag | est_lin_vel=%s commands=%s raw_action=%s"
+                    "Policy diag | handover=%.3f est_lin_vel=%s commands=%s raw_action=%s clipped_action=%s target_leg_q=%s commanded_leg_q=%s current_leg_q=%s leg_q_error=%s current_leg_dq=%s foot_force=%s"
                     % (
+                        handover_ratio,
                         np.array2string(
                             self.estimated_linear_velocity,
                             precision=3,
@@ -1047,21 +1066,44 @@ class WBCNodeLeg12ArmPassthrough(Node):
                             precision=3,
                             floatmode="fixed",
                         ),
+                        np.array2string(
+                            leg_action,
+                            precision=3,
+                            floatmode="fixed",
+                        ),
+                        np.array2string(
+                            target_leg_q,
+                            precision=3,
+                            floatmode="fixed",
+                        ),
+                        np.array2string(
+                            commanded_leg_q,
+                            precision=3,
+                            floatmode="fixed",
+                        ),
+                        np.array2string(
+                            current_leg_q,
+                            precision=3,
+                            floatmode="fixed",
+                        ),
+                        np.array2string(
+                            leg_q_error,
+                            precision=3,
+                            floatmode="fixed",
+                        ),
+                        np.array2string(
+                            current_leg_dq,
+                            precision=3,
+                            floatmode="fixed",
+                        ),
+                        np.array2string(
+                            self.latest_foot_force,
+                            precision=3,
+                            floatmode="fixed",
+                        ),
                     )
                 )
                 self.last_policy_diag_log_time = time.monotonic()
-            leg_action = np.clip(
-                raw_action,
-                self.clip_actions_lower,
-                self.clip_actions_upper,
-            )
-            wbc_action = np.zeros(18, dtype=np.float64)
-            target_leg_q = self.map_leg_action_to_targets(leg_action)
-            wbc_action[:12] = (
-                self.policy_handover_leg_start * (1.0 - handover_ratio)
-                + target_leg_q * handover_ratio
-            )
-            wbc_action[12:] = self.arm_passthrough_pose.copy()
             self.prev_action[:12] = leg_action
             self.prev_action[12:] = 0.0
             self.set_motor_position(wbc_action, self.gripper_pos_cmd)
