@@ -255,7 +255,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.arm_enabled = not disable_arm
         self.standup_mode = standup_mode
         self.default_arm_hold_pose = np.array(
-            [0.0, 2.8, 1.5, 1.4, 0.0, 0.0], dtype=np.float64
+            [-0.8, 2.8, 1.9, -0.4, 0.0, 0.0], dtype=np.float64
         )
         self.policy_takeover_commands = np.array([0.0, 0.0, 0.0], dtype=np.float64)
         self.policy_move_commands = np.array([0.0, 0.0, 0.0], dtype=np.float64)
