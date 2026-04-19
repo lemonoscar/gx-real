@@ -274,21 +274,29 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.align_to_policy_duration = 1.5
         self.align_to_policy_hold_time = 0.4
         self.align_to_policy_kp = np.array(
-            [60.0, 75.0, 70.0, 60.0, 75.0, 70.0, 60.0, 90.0, 75.0, 60.0, 90.0, 75.0],
+            [75.0, 95.0, 90.0, 75.0, 95.0, 90.0, 75.0, 105.0, 95.0, 75.0, 105.0, 95.0],
             dtype=np.float64,
         )
         self.align_to_policy_kd = np.array(
-            [2.5, 3.5, 3.0, 2.5, 3.5, 3.0, 2.5, 4.0, 3.2, 2.5, 4.0, 3.2],
+            [3.0, 4.2, 3.8, 3.0, 4.2, 3.8, 3.0, 4.6, 4.0, 3.0, 4.6, 4.0],
             dtype=np.float64,
         )
         self.align_to_policy_leg_start = np.zeros(12, dtype=np.float64)
         self.align_to_policy_arm_start = np.zeros(6, dtype=np.float64)
         self.manual_takeover_kp = np.array(
-            [55.0, 70.0, 65.0, 55.0, 70.0, 65.0, 55.0, 85.0, 70.0, 55.0, 85.0, 70.0],
+            [70.0, 90.0, 85.0, 70.0, 90.0, 85.0, 70.0, 100.0, 90.0, 70.0, 100.0, 90.0],
             dtype=np.float64,
         )
         self.manual_takeover_kd = np.array(
-            [2.0, 3.0, 2.8, 2.0, 3.0, 2.8, 2.0, 3.5, 3.0, 2.0, 3.5, 3.0],
+            [2.8, 4.0, 3.5, 2.8, 4.0, 3.5, 2.8, 4.4, 3.8, 2.8, 4.4, 3.8],
+            dtype=np.float64,
+        )
+        self.deploy_policy_kp = np.array(
+            [65.0, 85.0, 80.0, 65.0, 85.0, 80.0, 65.0, 95.0, 85.0, 65.0, 95.0, 85.0],
+            dtype=np.float64,
+        )
+        self.deploy_policy_kd = np.array(
+            [2.5, 3.8, 3.2, 2.5, 3.8, 3.2, 2.5, 4.2, 3.6, 2.5, 4.2, 3.6],
             dtype=np.float64,
         )
         self.pose_test_active = False
@@ -296,8 +304,14 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.pose_test_duration = 1.0
         self.pose_test_leg_start = np.zeros(12, dtype=np.float64)
         self.pose_test_arm_start = np.zeros(6, dtype=np.float64)
-        self.pose_test_kp = np.ones(12, dtype=np.float64) * 80.0
-        self.pose_test_kd = np.ones(12, dtype=np.float64) * 3.0
+        self.pose_test_kp = np.array(
+            [85.0, 105.0, 100.0, 85.0, 105.0, 100.0, 85.0, 115.0, 105.0, 85.0, 115.0, 105.0],
+            dtype=np.float64,
+        )
+        self.pose_test_kd = np.array(
+            [3.2, 4.5, 4.0, 3.2, 4.5, 4.0, 3.2, 4.8, 4.2, 3.2, 4.8, 4.2],
+            dtype=np.float64,
+        )
         self.sim2sim_action_delay_range = (0, 0)
         self.sim2sim_action_delay_steps = 0
         self.sim2sim_action_hold_prob = 0.0
@@ -357,8 +371,14 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.getup_crouch_kd = np.ones(12, dtype=np.float64) * 3.5
         self.getup_stand_kp = np.ones(12, dtype=np.float64) * 50.0
         self.getup_stand_kd = np.ones(12, dtype=np.float64) * 3.5
-        self.unitree_takeover_kp = np.ones(12, dtype=np.float64) * 40.0
-        self.unitree_takeover_kd = np.ones(12, dtype=np.float64) * 1.0
+        self.unitree_takeover_kp = np.array(
+            [60.0, 80.0, 75.0, 60.0, 80.0, 75.0, 60.0, 90.0, 80.0, 60.0, 90.0, 80.0],
+            dtype=np.float64,
+        )
+        self.unitree_takeover_kd = np.array(
+            [2.4, 3.5, 3.0, 2.4, 3.5, 3.0, 2.4, 3.8, 3.2, 2.4, 3.8, 3.2],
+            dtype=np.float64,
+        )
         self.unitree_stand_min_wait = 2.5
         self.unitree_stand_timeout = 10.0
         self.unitree_motion_detect_timeout = 1.5
@@ -1369,8 +1389,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
             else:
                 base_kp = self.manual_takeover_kp
                 base_kd = self.manual_takeover_kd
-            blended_kp = _blend_arrays(base_kp, self.policy_kp[:12], handover_ratio)
-            blended_kd = _blend_arrays(base_kd, self.policy_kd[:12], handover_ratio)
+            blended_kp = _blend_arrays(base_kp, self.deploy_policy_kp, handover_ratio)
+            blended_kd = _blend_arrays(base_kd, self.deploy_policy_kd, handover_ratio)
             self.set_gains(kp=blended_kp, kd=blended_kd)
             raw_action = self.run_policy(self.obs)
             clipped_action = np.clip(
@@ -1641,6 +1661,10 @@ class WBCNodeLeg12ArmPassthrough(Node):
         logging.info("starting to play policy")
         logging.info(
             f"kp: {self.policy_kp}, kd: {self.policy_kd}, torque_limits: {torque_limits},"
+            + f" deploy_policy_kp: {self.deploy_policy_kp},"
+            + f" deploy_policy_kd: {self.deploy_policy_kd},"
+            + f" manual_takeover_kp: {self.manual_takeover_kp},"
+            + f" manual_takeover_kd: {self.manual_takeover_kd},"
             + f" obs_dof_pos_scale: {self.obs_dof_pos_scale}, "
             + f"train_leg_default_offset: {self.default_dof_pos[:LEG_DOF]},"
             + f"obs_dof_pos_offset: {self.obs_dof_pos_offset},"
