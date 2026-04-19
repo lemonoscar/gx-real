@@ -221,10 +221,10 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.internal_getup_arm_target = np.zeros(6, dtype=np.float64)
         self.pre_getup_leg_pos = np.array(
             [
-                0.00, 1.36, -2.65,
-                0.00, 1.36, -2.65,
-                0.00, 1.36, -2.65,
-                0.00, 1.36, -2.65,
+                0.10, 1.00, -2.05,
+                -0.10, 1.00, -2.05,
+                0.08, 0.95, -1.80,
+                -0.08, 0.95, -1.80,
             ],
             dtype=np.float64,
         )
@@ -232,24 +232,24 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.policy_handover_duration = 0.8
         self.stand_target_leg_pos = np.array(
             [
-                0.10, 0.80, -1.50,
-                -0.10, 0.80, -1.50,
-                0.10, 1.00, -1.50,
-                -0.10, 1.00, -1.50,
+                0.10, 0.75, -1.45,
+                -0.10, 0.75, -1.45,
+                0.08, 0.86, -1.35,
+                -0.08, 0.86, -1.35,
             ],
             dtype=np.float64,
         )
         self.policy_handover_leg_start[:] = self.stand_target_leg_pos
         self.getup_settle_time = 0.0
-        self.getup_crouch_time = 1.0
-        self.getup_stand_time = 2.0
-        self.getup_hold_time = 0.0
-        self.getup_start_kp = np.ones(12, dtype=np.float64) * 80.0
-        self.getup_start_kd = np.ones(12, dtype=np.float64) * 3.0
-        self.getup_crouch_kp = np.ones(12, dtype=np.float64) * 80.0
-        self.getup_crouch_kd = np.ones(12, dtype=np.float64) * 3.0
-        self.getup_stand_kp = np.ones(12, dtype=np.float64) * 80.0
-        self.getup_stand_kd = np.ones(12, dtype=np.float64) * 3.0
+        self.getup_crouch_time = 1.2
+        self.getup_stand_time = 2.4
+        self.getup_hold_time = 0.3
+        self.getup_start_kp = np.ones(12, dtype=np.float64) * 60.0
+        self.getup_start_kd = np.ones(12, dtype=np.float64) * 2.0
+        self.getup_crouch_kp = np.ones(12, dtype=np.float64) * 60.0
+        self.getup_crouch_kd = np.ones(12, dtype=np.float64) * 2.0
+        self.getup_stand_kp = np.ones(12, dtype=np.float64) * 72.0
+        self.getup_stand_kd = np.ones(12, dtype=np.float64) * 2.5
         self.unitree_takeover_kp = np.ones(12, dtype=np.float64) * 40.0
         self.unitree_takeover_kd = np.ones(12, dtype=np.float64) * 1.0
         self.unitree_stand_min_wait = 2.5
@@ -384,7 +384,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         if not self.arm_passthrough_pose_user_set:
             self.default_arm_hold_pose = self.default_dof_pos[12:].copy()
             self.arm_passthrough_pose = self.default_arm_hold_pose.copy()
-        self.stand_target_leg_pos = self.leg_action_offset.copy()
+        self.stand_target_leg_pos = self._build_internal_stand_leg_pos(self.leg_action_offset)
         self.pre_getup_leg_pos = self._build_pre_getup_leg_pos(self.stand_target_leg_pos)
         self.policy_handover_leg_start = self.stand_target_leg_pos.copy()
         self.policy_dt_slack = policy_dt_slack
@@ -493,10 +493,23 @@ class WBCNodeLeg12ArmPassthrough(Node):
 
         self.target_input_mode = "passthrough"
 
+    def _build_internal_stand_leg_pos(self, policy_leg_pos: np.ndarray) -> np.ndarray:
+        stand_pose = policy_leg_pos.copy()
+        # Bias the stand target slightly forward so rear legs do not immediately tuck under the body.
+        stand_pose[[1, 4]] -= 0.05
+        stand_pose[[2, 5]] += 0.05
+        stand_pose[[6, 9]] *= 0.8
+        stand_pose[[7, 10]] -= 0.14
+        stand_pose[[8, 11]] += 0.15
+        return stand_pose
+
     def _build_pre_getup_leg_pos(self, stand_target_leg_pos: np.ndarray) -> np.ndarray:
         crouch_pose = stand_target_leg_pos.copy()
-        crouch_pose[1::3] += 0.35
-        crouch_pose[2::3] -= 0.75
+        # Front legs go deeper first to create support; rear legs stay shallower to avoid sitting back.
+        crouch_pose[[1, 4]] += 0.22
+        crouch_pose[[2, 5]] -= 0.60
+        crouch_pose[[7, 10]] += 0.06
+        crouch_pose[[8, 11]] -= 0.38
         return crouch_pose
 
     @property
@@ -947,8 +960,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
             wbc_action = np.zeros(18, dtype=np.float64)
 
             if elapsed <= self.getup_crouch_time:
-                crouch_ratio = float(
-                    np.clip(elapsed / max(self.getup_crouch_time, 1e-6), 0.0, 1.0)
+                crouch_ratio = _smoothstep(
+                    float(np.clip(elapsed / max(self.getup_crouch_time, 1e-6), 0.0, 1.0))
                 )
                 wbc_action[:12] = _blend_arrays(
                     self.init_leg_pos,
@@ -958,12 +971,14 @@ class WBCNodeLeg12ArmPassthrough(Node):
                 getup_kp = self.getup_crouch_kp.copy()
                 getup_kd = self.getup_crouch_kd.copy()
             elif elapsed <= self.getup_crouch_time + self.getup_stand_time:
-                stand_ratio = float(
-                    np.clip(
+                stand_ratio = _smoothstep(
+                    float(
+                        np.clip(
                         (elapsed - self.getup_crouch_time)
                         / max(self.getup_stand_time, 1e-6),
                         0.0,
                         1.0,
+                        )
                     )
                 )
                 wbc_action[:12] = _blend_arrays(
@@ -979,8 +994,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
                 getup_kd = self.getup_stand_kd.copy()
 
             self.set_gains(kp=getup_kp, kd=getup_kd)
-            arm_ratio = float(
-                np.clip(elapsed / max(self.getup_crouch_time, 1e-6), 0.0, 1.0)
+            arm_ratio = _smoothstep(
+                float(np.clip(elapsed / max(self.getup_crouch_time, 1e-6), 0.0, 1.0))
             )
             wbc_action[12:] = _blend_arrays(
                 self.init_arm_pos,
