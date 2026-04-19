@@ -213,6 +213,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
         )
         self.fixed_commands = np.array([cmd_vx, cmd_vy, cmd_yaw], dtype=np.float64)
         self.fixed_gripper_cmd = float(gripper_cmd)
+        self.policy_diag_log_interval = 0.5
+        self.last_policy_diag_log_time = -1.0
         
         self.prev_action = self.init_action.copy()
         self.init_leg_pos = np.zeros(12, dtype=np.float64)
@@ -702,6 +704,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
                 self.start_policy = False
                 self.policy_motion_started = False
                 self.fixed_commands[:] = self.policy_takeover_commands
+                self.last_policy_diag_log_time = -1.0
         if msg.keys == 2:  # L1: emergency stop
             logging.info("Emergency stop")
             self.emergency_stop()
@@ -724,6 +727,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
                     self.arm_passthrough_pose = self.default_dof_pos[12:].copy()
                     self.fixed_commands[:] = self.policy_takeover_commands
                     self.policy_motion_started = False
+                    self.last_policy_diag_log_time = -1.0
                     self.prev_action[:] = 0.0
                     self.start_policy = True
                     self.start_policy_time = time.monotonic()
@@ -1028,6 +1032,32 @@ class WBCNodeLeg12ArmPassthrough(Node):
             blended_kd = _blend_arrays(base_kd, self.policy_kd[:12], handover_ratio)
             self.set_gains(kp=blended_kp, kd=blended_kd)
             raw_action = self.run_policy(self.obs)
+            if (
+                self.last_policy_diag_log_time < 0.0
+                or (time.monotonic() - self.last_policy_diag_log_time)
+                >= self.policy_diag_log_interval
+            ):
+                logging.info(
+                    "Policy diag | est_lin_vel=%s commands=%s raw_action=%s"
+                    % (
+                        np.array2string(
+                            self.estimated_linear_velocity,
+                            precision=3,
+                            floatmode="fixed",
+                        ),
+                        np.array2string(
+                            self.fixed_commands,
+                            precision=3,
+                            floatmode="fixed",
+                        ),
+                        np.array2string(
+                            raw_action,
+                            precision=3,
+                            floatmode="fixed",
+                        ),
+                    )
+                )
+                self.last_policy_diag_log_time = time.monotonic()
             leg_action = np.clip(
                 raw_action,
                 self.clip_actions_lower,
