@@ -14,7 +14,6 @@ from modules.common import (
     POS_STOP_F,
     SDK_DOF,
     VEL_STOP_F,
-    reorder,
     torque_limits,
 )
 from transforms3d import affines, quaternions, euler
@@ -81,6 +80,21 @@ SPORT_API_ID_RECOVERYSTAND = 1006
 SPORT_MODE_IDLE = 0
 SPORT_MODE_BALANCE_STAND = 1
 SPORT_MODE_RECOVERY_STAND = 8
+
+INTERFACE_LEG_JOINT_NAMES = [
+    "FR_hip_joint",
+    "FR_thigh_joint",
+    "FR_calf_joint",
+    "FL_hip_joint",
+    "FL_thigh_joint",
+    "FL_calf_joint",
+    "RR_hip_joint",
+    "RR_thigh_joint",
+    "RR_calf_joint",
+    "RL_hip_joint",
+    "RL_thigh_joint",
+    "RL_calf_joint",
+]
 
 
 class _PolicyConfigLoader(yaml.SafeLoader):
@@ -246,6 +260,9 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.sim2sim_action_buffer_idx = 0
         self.sim2sim_last_action = np.zeros(LEG_DOF, dtype=np.float64)
         self.sim2sim_rng = np.random.default_rng()
+        self.policy_leg_joint_names = INTERFACE_LEG_JOINT_NAMES.copy()
+        self.policy_leg_indices_from_interface = np.arange(LEG_DOF, dtype=np.int64)
+        self.interface_leg_indices_from_policy = np.arange(LEG_DOF, dtype=np.int64)
         
         self.prev_action = self.init_action.copy()
         self.init_leg_pos = np.zeros(12, dtype=np.float64)
@@ -660,7 +677,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         if self.start_policy:
             logging.warning("Policy is running; stop it with R2 before restarting stand-up")
             return
-        self.init_leg_pos = reorder(self.quadruped_q).copy()
+        self.init_leg_pos = self.interface_to_policy_leg_order(self.quadruped_q).copy()
         lowstate = self.get_arm_joint_state()
         self.init_arm_pos = lowstate.pos().copy()
         self.prev_action[:] = 0.0
@@ -678,7 +695,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
             return
         self.align_to_policy_active = True
         self.align_to_policy_start_time = time.monotonic()
-        self.align_to_policy_leg_start = reorder(self.quadruped_q).copy()
+        self.align_to_policy_leg_start = self.interface_to_policy_leg_order(self.quadruped_q).copy()
         lowstate = self.get_arm_joint_state()
         self.align_to_policy_arm_start = lowstate.pos().copy()
         self.arm_passthrough_pose = self.default_dof_pos[12:].copy()
@@ -734,6 +751,18 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.sim2sim_action_buffer_idx = (write_idx + 1) % self.sim2sim_action_buffer.shape[0]
         self.sim2sim_last_action = action_to_buffer.copy()
         return action_to_buffer, delayed_action
+
+    def interface_to_policy_leg_order(self, value: np.ndarray) -> np.ndarray:
+        value = np.asarray(value, dtype=np.float64)
+        if value.shape[0] != LEG_DOF:
+            raise RuntimeError(f"Expected {LEG_DOF} leg values, got {value.shape[0]}")
+        return value[self.policy_leg_indices_from_interface].copy()
+
+    def policy_to_interface_leg_order(self, value: np.ndarray) -> np.ndarray:
+        value = np.asarray(value, dtype=np.float64)
+        if value.shape[0] != LEG_DOF:
+            raise RuntimeError(f"Expected {LEG_DOF} leg values, got {value.shape[0]}")
+        return value[self.interface_leg_indices_from_policy].copy()
 
     # obs history getters and setters
     @property
@@ -908,9 +937,13 @@ class WBCNodeLeg12ArmPassthrough(Node):
         lowstate = self.get_arm_joint_state()
         arm_dof_pos = lowstate.pos().copy()
         arm_dof_vel = lowstate.vel().copy()
-        full_dof_pos = np.concatenate((reorder(self.quadruped_q), arm_dof_pos), axis=0)
+        full_dof_pos = np.concatenate(
+            (self.interface_to_policy_leg_order(self.quadruped_q), arm_dof_pos), axis=0
+        )
         dof_pos = (full_dof_pos - self.obs_dof_pos_offset) * self.obs_dof_pos_scale
-        full_dof_vel = np.concatenate((reorder(self.quadruped_dq), arm_dof_vel), axis=0)
+        full_dof_vel = np.concatenate(
+            (self.interface_to_policy_leg_order(self.quadruped_dq), arm_dof_vel), axis=0
+        )
         dof_vel = full_dof_vel * self.obs_dof_vel_scale
         gravity = quat_rotate_inv(quaternion, np.array([0, 0, -1], dtype=np.float64))
         base_lin_vel = self.estimated_linear_velocity.copy()
@@ -998,7 +1031,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
     ):
         assert len(q) == 18
         self.latest_lowcmd_leg_q_policy = q[:12].copy()
-        leg_q = reorder(q[:12])
+        leg_q = self.policy_to_interface_leg_order(q[:12])
         self.latest_lowcmd_leg_q_hw = leg_q.copy()
         # prepare arm action
         if self.arm_enabled and self.arx5_robot_config is not None:
@@ -1061,7 +1094,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
 
         if self.align_to_policy_active and not self.start_policy:
             align_elapsed = max(time.monotonic() - self.align_to_policy_start_time, 0.0)
-            current_leg_q = reorder(self.quadruped_q).copy()
+            current_leg_q = self.interface_to_policy_leg_order(self.quadruped_q).copy()
             leg_q_error = self.leg_action_offset - current_leg_q
             max_leg_error = float(np.max(np.abs(leg_q_error)))
             rear_thigh_error = float(np.max(np.abs(leg_q_error[[7, 10]])))
@@ -1089,7 +1122,11 @@ class WBCNodeLeg12ArmPassthrough(Node):
                         np.array2string(leg_q_error, precision=3, floatmode="fixed"),
                         max_leg_error,
                         rear_thigh_error,
-                        np.array2string(reorder(self.quadruped_dq), precision=3, floatmode="fixed"),
+                        np.array2string(
+                            self.interface_to_policy_leg_order(self.quadruped_dq),
+                            precision=3,
+                            floatmode="fixed",
+                        ),
                         np.array2string(self.latest_foot_force, precision=3, floatmode="fixed"),
                     )
                 )
@@ -1114,7 +1151,9 @@ class WBCNodeLeg12ArmPassthrough(Node):
                     % (max_leg_error, rear_thigh_error)
                 )
                 self.align_to_policy_active = False
-                self.policy_handover_leg_start = reorder(self.quadruped_q).copy()
+                self.policy_handover_leg_start = self.interface_to_policy_leg_order(
+                    self.quadruped_q
+                ).copy()
                 self.fixed_commands[:] = self.policy_move_commands
                 self.policy_motion_started = True
                 self.last_policy_diag_log_time = -1.0
@@ -1206,8 +1245,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
             )
             wbc_action[:12] = commanded_leg_q
             wbc_action[12:] = self.arm_passthrough_pose.copy()
-            current_leg_q = reorder(self.quadruped_q).copy()
-            current_leg_dq = reorder(self.quadruped_dq).copy()
+            current_leg_q = self.interface_to_policy_leg_order(self.quadruped_q).copy()
+            current_leg_dq = self.interface_to_policy_leg_order(self.quadruped_dq).copy()
             leg_q_error = commanded_leg_q - current_leg_q
             if (
                 self.last_policy_diag_log_time < 0.0
@@ -1334,6 +1373,14 @@ class WBCNodeLeg12ArmPassthrough(Node):
 
         joint_names = list(config["joint_names"])
         leg_joint_names = list(config["dog_joint_names"])
+        self.policy_leg_joint_names = leg_joint_names.copy()
+        self.policy_leg_indices_from_interface = np.array(
+            [INTERFACE_LEG_JOINT_NAMES.index(name) for name in leg_joint_names],
+            dtype=np.int64,
+        )
+        self.interface_leg_indices_from_policy = np.argsort(
+            self.policy_leg_indices_from_interface
+        )
         init_joint_pos = config["scene"]["robot"]["init_state"]["joint_pos"]
         self.default_dof_pos = np.array(
             [float(init_joint_pos[joint_name]) for joint_name in joint_names],
@@ -1429,7 +1476,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
             f"Policy inference time: {np.mean(policy_inference_times)} ({np.std(policy_inference_times)})"
         )
 
-        init_pose = reorder(self.leg_action_offset.copy())
+        init_pose = self.policy_to_interface_leg_order(self.leg_action_offset.copy())
         for i in range(LEG_DOF):
             self.motor_cmd[i].q = init_pose[i]
             self.motor_cmd[i].dq = 0.0
@@ -1451,6 +1498,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
             + f" sim2sim_action_hold_prob: {self.sim2sim_action_hold_prob},"
             + f" sim2sim_action_noise_std: {self.sim2sim_action_noise_std},"
             + f" sim2sim_obs_delay_steps: {self.sim2sim_obs_delay_steps},"
+            + f" policy_leg_joint_names: {self.policy_leg_joint_names},"
+            + f" policy_leg_indices_from_interface: {self.policy_leg_indices_from_interface.tolist()},"
             + f" policy_freq: {self.policy_freq},"
             + f" config_path: {config_path},"
             + f" fixed_commands: {self.fixed_commands},"
