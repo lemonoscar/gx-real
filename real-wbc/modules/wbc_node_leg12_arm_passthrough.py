@@ -307,6 +307,15 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.sim2sim_action_buffer_idx = 0
         self.sim2sim_last_action = np.zeros(LEG_DOF, dtype=np.float64)
         self.sim2sim_rng = np.random.default_rng()
+        self.real_deploy_leg_offset = np.array(
+            [
+                -0.035, 0.852, -1.570,
+                 0.011, 0.846, -1.597,
+                 0.006, 0.936, -1.578,
+                 0.021, 0.919, -1.564,
+            ],
+            dtype=np.float64,
+        )
         self.policy_leg_joint_names = INTERFACE_LEG_JOINT_NAMES.copy()
         self.policy_leg_indices_from_interface = np.arange(LEG_DOF, dtype=np.int64)
         self.interface_leg_indices_from_policy = np.arange(LEG_DOF, dtype=np.int64)
@@ -1545,6 +1554,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         )
         self.obs_dof_pos_scale = float(policy_obs_cfg["joint_pos"]["scale"])
         self.obs_dof_pos_offset = self.default_dof_pos.copy()
+        self.obs_dof_pos_offset[:LEG_DOF] = self.real_deploy_leg_offset.copy()
         self.obs_dof_vel_scale = float(policy_obs_cfg["joint_vel"]["scale"])
         leg_clip = np.asarray(
             _expand_pattern_values(leg_joint_names, clip_cfg, [-100.0, 100.0]),
@@ -1556,7 +1566,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
             _expand_pattern_values(leg_joint_names, action_scale_cfg, 1.0),
             dtype=np.float64,
         )
-        self.leg_action_offset = self.default_dof_pos[:LEG_DOF].copy()
+        self.leg_action_offset = self.real_deploy_leg_offset.copy()
         self.policy_kp = _build_joint_gain_array(joint_names, actuator_cfg, "stiffness")
         self.policy_kd = _build_joint_gain_array(joint_names, actuator_cfg, "damping")
         delay_cfg = config.get("sim2sim_action_delay_range", (0, 0))
@@ -1632,6 +1642,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         logging.info(
             f"kp: {self.policy_kp}, kd: {self.policy_kd}, torque_limits: {torque_limits},"
             + f" obs_dof_pos_scale: {self.obs_dof_pos_scale}, "
+            + f"train_leg_default_offset: {self.default_dof_pos[:LEG_DOF]},"
             + f"obs_dof_pos_offset: {self.obs_dof_pos_offset},"
             + f" obs_dof_vel_scale: {self.obs_dof_vel_scale}, "
             + f"leg_action_offset: {self.leg_action_offset},"
