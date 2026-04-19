@@ -452,6 +452,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
         )
         self.sport_mode = -1
         self.sport_progress = 0.0
+        self.sport_state_seen = False
+        self.last_sport_state_time = -1.0
         self.awaiting_unitree_stand = False
         self.unitree_stand_ready = False
         self.unitree_stand_request_time = -1.0
@@ -689,6 +691,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
     def sport_state_cb(self, msg: SportModeState):
         self.sport_mode = int(msg.mode)
         self.sport_progress = float(msg.progress)
+        self.sport_state_seen = True
+        self.last_sport_state_time = time.monotonic()
         if not self.awaiting_unitree_stand:
             return
         elapsed = time.monotonic() - self.unitree_stand_request_time
@@ -776,6 +780,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
         if self.latest_tick == -1:
             logging.warning("Low-state is not ready yet; wait for robot state before pressing L2")
             return
+        if not self.is_low_level_control_safe():
+            return
         if self.pose_test_active:
             logging.info("Pose test is already running")
             return
@@ -795,6 +801,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
         if self.latest_tick == -1:
             logging.warning("Low-state is not ready yet; wait for robot state before pressing L2")
             return
+        if not self.is_low_level_control_safe():
+            return
         if self.align_to_policy_active:
             logging.info("Policy stand alignment is already running")
             return
@@ -813,6 +821,23 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.reset_sim2sim_action_state()
         self.last_policy_diag_log_time = -1.0
         logging.info("Starting dog-only startup before rollout")
+
+    def is_low_level_control_safe(self) -> bool:
+        if self.uses_unitree_standup:
+            return True
+        if not self.sport_state_seen:
+            logging.warning(
+                "sport_mode state has not been received; proceeding without a hard sport_mode confirmation"
+            )
+            return True
+        if self.sport_mode != SPORT_MODE_IDLE or self.sport_progress > 0.0:
+            logging.error(
+                "Refusing low-level rollout while sport_mode is still active: mode=%d progress=%.3f. "
+                "Disable sport_mode first, then retry L2."
+                % (self.sport_mode, self.sport_progress)
+            )
+            return False
+        return True
 
     def update_policy_commands(self):
         if not self.start_policy:
