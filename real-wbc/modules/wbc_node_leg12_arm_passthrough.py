@@ -429,7 +429,6 @@ class WBCNodeLeg12ArmPassthrough(Node):
             logging.info("Press R1 to start rl_sar get-up")
         else:
             logging.info("Stand the robot up with the controller first, then press L2 to start policy")
-            logging.info("Press L2 again after takeover to command forward motion")
         logging.info("Press L2 to start policy after stand-up completes")
         logging.info("Press L1 for emergency stop")
         self.key_is_pressed = False  # for key press event
@@ -712,22 +711,15 @@ class WBCNodeLeg12ArmPassthrough(Node):
         if msg.keys == 32:  # L2: start policy
             if not self.key_is_pressed:
                 if self.start_policy:
-                    if not self.policy_motion_started:
-                        self.fixed_commands[:] = self.policy_move_commands
-                        self.policy_motion_started = True
-                        logging.info(
-                            f"Policy command updated to {self.fixed_commands.tolist()}"
-                        )
-                    else:
-                        logging.info(
-                            f"Policy command is already {self.fixed_commands.tolist()}"
-                        )
+                    logging.info(
+                        f"Policy command is already {self.fixed_commands.tolist()}"
+                    )
                 elif self.ready_to_start_policy:
                     logging.info("Start policy")
                     self.policy_handover_leg_start = reorder(self.quadruped_q).copy()
                     self.arm_passthrough_pose = self.default_dof_pos[12:].copy()
-                    self.fixed_commands[:] = self.policy_takeover_commands
-                    self.policy_motion_started = False
+                    self.fixed_commands[:] = self.policy_move_commands
+                    self.policy_motion_started = True
                     self.last_policy_diag_log_time = -1.0
                     self.prev_action[:] = 0.0
                     self.start_policy = True
