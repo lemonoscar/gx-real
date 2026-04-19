@@ -258,7 +258,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
             [0.0, 0.3, 0.5, 0.0, 0.0, 0.0], dtype=np.float64
         )
         self.policy_takeover_commands = np.array([0.0, 0.0, 0.0], dtype=np.float64)
-        self.policy_move_commands = np.array([0.5, 0.0, 0.0], dtype=np.float64)
+        self.policy_move_commands = np.array([0.2, 0.0, 0.0], dtype=np.float64)
+        self.policy_command_ramp_duration = 1.5
         self.arm_passthrough_pose_user_set = arm_pose is not None
         self.arm_passthrough_pose = (
             np.array(arm_pose, dtype=np.float64)
@@ -284,19 +285,19 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.align_to_policy_leg_start = np.zeros(12, dtype=np.float64)
         self.align_to_policy_arm_start = np.zeros(6, dtype=np.float64)
         self.manual_takeover_kp = np.array(
-            [70.0, 90.0, 85.0, 70.0, 90.0, 85.0, 70.0, 100.0, 90.0, 70.0, 100.0, 90.0],
+            [78.0, 100.0, 92.0, 78.0, 100.0, 92.0, 80.0, 112.0, 98.0, 80.0, 112.0, 98.0],
             dtype=np.float64,
         )
         self.manual_takeover_kd = np.array(
-            [2.8, 4.0, 3.5, 2.8, 4.0, 3.5, 2.8, 4.4, 3.8, 2.8, 4.4, 3.8],
+            [3.0, 4.5, 3.9, 3.0, 4.5, 3.9, 3.1, 4.9, 4.2, 3.1, 4.9, 4.2],
             dtype=np.float64,
         )
         self.deploy_policy_kp = np.array(
-            [65.0, 85.0, 80.0, 65.0, 85.0, 80.0, 65.0, 95.0, 85.0, 65.0, 95.0, 85.0],
+            [82.0, 108.0, 96.0, 82.0, 108.0, 96.0, 85.0, 122.0, 102.0, 85.0, 122.0, 102.0],
             dtype=np.float64,
         )
         self.deploy_policy_kd = np.array(
-            [2.5, 3.8, 3.2, 2.5, 3.8, 3.2, 2.5, 4.2, 3.6, 2.5, 4.2, 3.6],
+            [3.2, 5.0, 4.2, 3.2, 5.0, 4.2, 3.3, 5.5, 4.5, 3.3, 5.5, 4.5],
             dtype=np.float64,
         )
         self.pose_test_active = False
@@ -813,6 +814,23 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.last_policy_diag_log_time = -1.0
         logging.info("Starting dog-only startup before rollout")
 
+    def update_policy_commands(self):
+        if not self.start_policy:
+            return
+        ramp_ratio = float(
+            np.clip(
+                (time.monotonic() - self.start_policy_time)
+                / max(self.policy_command_ramp_duration, 1e-6),
+                0.0,
+                1.0,
+            )
+        )
+        self.fixed_commands[:] = _blend_arrays(
+            self.policy_takeover_commands,
+            self.policy_move_commands,
+            _smoothstep(ramp_ratio),
+        )
+
     def get_arm_joint_state(self):
         if not self.arm_enabled or self.arx5_joint_controller is None:
             return _ZeroArmState()
@@ -1317,7 +1335,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
                 self.policy_handover_leg_start = self.interface_to_policy_leg_order(
                     self.quadruped_q
                 ).copy()
-                self.fixed_commands[:] = self.policy_move_commands
+                self.fixed_commands[:] = self.policy_takeover_commands
                 self.policy_motion_started = True
                 self.last_policy_diag_log_time = -1.0
                 self.prev_action[:] = 0.0
@@ -1380,6 +1398,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
             time.monotonic() - self.start_policy_time
             > self.policy_dt * self.policy_ctrl_iter - self.policy_dt_slack
         ):
+            self.update_policy_commands()
             policy_elapsed = time.monotonic() - self.start_policy_time
             handover_ratio = max(
                 min(policy_elapsed / self.policy_handover_duration, 1.0), 0.0
