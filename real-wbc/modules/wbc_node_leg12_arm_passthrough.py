@@ -255,10 +255,10 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.arm_enabled = not disable_arm
         self.standup_mode = standup_mode
         self.default_arm_hold_pose = np.array(
-            [0.0, 0.3, 0.5, 0.0, 0.0, 0.0], dtype=np.float64
+            [0.0, 2.8, 1.5, 1.4, 0.0, 0.0], dtype=np.float64
         )
         self.policy_takeover_commands = np.array([0.0, 0.0, 0.0], dtype=np.float64)
-        self.policy_move_commands = np.array([0.5, 0.0, 0.0], dtype=np.float64)
+        self.policy_move_commands = np.array([0.0, 0.0, 0.0], dtype=np.float64)
         self.policy_command_ramp_duration = 1e-6
         self.startup_kick_duration = 0.0
         self.startup_kick_leg_delta = np.zeros(LEG_DOF, dtype=np.float64)
@@ -267,6 +267,12 @@ class WBCNodeLeg12ArmPassthrough(Node):
             np.array(arm_pose, dtype=np.float64)
             if arm_pose is not None
             else self.default_arm_hold_pose.copy()
+        )
+        self.arm_smoothed_pose = self.arm_passthrough_pose.copy()
+        self.arm_last_cmd_time = -1.0
+        self.arm_interp_tau = 0.30
+        self.arm_max_velocity = np.array(
+            [0.8, 1.2, 1.2, 1.5, 1.5, 1.5], dtype=np.float64
         )
         self.fixed_commands = np.array([cmd_vx, cmd_vy, cmd_yaw], dtype=np.float64)
         self.fixed_gripper_cmd = float(gripper_cmd)
@@ -503,7 +509,6 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.device = device
         self.init_policy(policy_path=policy_path)
         if not self.arm_passthrough_pose_user_set:
-            self.default_arm_hold_pose = self.default_dof_pos[12:].copy()
             self.arm_passthrough_pose = self.default_arm_hold_pose.copy()
         self.stand_target_leg_pos = self._build_internal_stand_leg_pos(self.leg_action_offset)
         self.pre_getup_leg_pos = self._build_pre_getup_leg_pos(self.stand_target_leg_pos)
@@ -598,6 +603,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
             self.arx5_joint_controller.set_gain(self.arx5_gain)
             arm_state = self.get_arm_joint_state()
             arm_hold_pos = arm_state.pos().copy()
+            self.arm_smoothed_pose = arm_hold_pos.copy()
+            self.arm_last_cmd_time = time.monotonic()
             self.arx5_cmd = arx5.JointState(self.arx5_robot_config.joint_dof)
             self.arx5_cmd.gripper_pos = 0.0
             self.arx5_cmd.pos()[:] = arm_hold_pos
@@ -783,7 +790,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.pose_test_leg_start = self.interface_to_policy_leg_order(self.quadruped_q).copy()
         lowstate = self.get_arm_joint_state()
         self.pose_test_arm_start = lowstate.pos().copy()
-        self.arm_passthrough_pose = self.default_dof_pos[12:].copy()
+        self.arm_passthrough_pose = self.default_arm_hold_pose.copy()
         self.last_policy_diag_log_time = -1.0
         logging.info("Starting pose test toward policy stand target")
 
@@ -804,7 +811,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.align_to_policy_leg_start = self.interface_to_policy_leg_order(self.quadruped_q).copy()
         lowstate = self.get_arm_joint_state()
         self.align_to_policy_arm_start = lowstate.pos().copy()
-        self.arm_passthrough_pose = self.default_dof_pos[12:].copy()
+        self.arm_passthrough_pose = self.default_arm_hold_pose.copy()
         self.fixed_commands[:] = self.policy_takeover_commands
         self.policy_motion_started = False
         self.prev_action[:] = 0.0
@@ -1197,13 +1204,33 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.latest_lowcmd_leg_q_hw = leg_q.copy()
         # prepare arm action
         if self.arm_enabled and self.arx5_robot_config is not None:
+            target_arm_q = self._smooth_arm_command(q[12:])
             self.arx5_cmd = arx5.JointState(self.arx5_robot_config.joint_dof)
             self.arx5_cmd.gripper_pos = gripper_pos
-            self.arx5_cmd.pos()[:] = q[12:]
+            self.arx5_cmd.pos()[:] = target_arm_q
             self.arx5_joint_controller.set_joint_cmd(self.arx5_cmd)
         for i in range(LEG_DOF):
             self.motor_cmd[i].q = float(leg_q[i])
         self.cmd_msg.motor_cmd = self.motor_cmd.copy()
+
+    def _smooth_arm_command(self, target: np.ndarray) -> np.ndarray:
+        target = np.asarray(target, dtype=np.float64)
+        if target.shape[0] != 6:
+            raise RuntimeError(f"Expected 6 arm joints, got {target.shape[0]}")
+        now = time.monotonic()
+        if self.arm_last_cmd_time < 0.0:
+            self.arm_smoothed_pose = target.copy()
+            self.arm_last_cmd_time = now
+            return self.arm_smoothed_pose.copy()
+
+        dt = max(now - self.arm_last_cmd_time, 1e-3)
+        self.arm_last_cmd_time = now
+        alpha = 1.0 - np.exp(-dt / max(self.arm_interp_tau, 1e-6))
+        blended = self.arm_smoothed_pose + alpha * (target - self.arm_smoothed_pose)
+        max_step = self.arm_max_velocity * dt
+        delta = np.clip(blended - self.arm_smoothed_pose, -max_step, max_step)
+        self.arm_smoothed_pose = self.arm_smoothed_pose + delta
+        return self.arm_smoothed_pose.copy()
 
     def emergency_stop(self):
         if self.debug_log:
