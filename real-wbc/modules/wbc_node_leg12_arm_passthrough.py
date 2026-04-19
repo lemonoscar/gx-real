@@ -215,10 +215,33 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.fixed_gripper_cmd = float(gripper_cmd)
         self.policy_diag_log_interval = 0.5
         self.last_policy_diag_log_time = -1.0
+        self.align_to_policy_active = False
+        self.align_to_policy_start_time = -1.0
+        self.align_to_policy_timeout = 6.0
+        self.align_to_policy_kp = np.array(
+            [60.0, 75.0, 70.0, 60.0, 75.0, 70.0, 60.0, 90.0, 75.0, 60.0, 90.0, 75.0],
+            dtype=np.float64,
+        )
+        self.align_to_policy_kd = np.array(
+            [2.5, 3.5, 3.0, 2.5, 3.5, 3.0, 2.5, 4.0, 3.2, 2.5, 4.0, 3.2],
+            dtype=np.float64,
+        )
+        self.align_to_policy_leg_tol = 0.08
+        self.align_to_policy_rear_thigh_tol = 0.06
+        self.manual_takeover_kp = np.array(
+            [55.0, 70.0, 65.0, 55.0, 70.0, 65.0, 55.0, 85.0, 70.0, 55.0, 85.0, 70.0],
+            dtype=np.float64,
+        )
+        self.manual_takeover_kd = np.array(
+            [2.0, 3.0, 2.8, 2.0, 3.0, 2.8, 2.0, 3.5, 3.0, 2.0, 3.5, 3.0],
+            dtype=np.float64,
+        )
         
         self.prev_action = self.init_action.copy()
         self.init_leg_pos = np.zeros(12, dtype=np.float64)
         self.latest_foot_force = np.zeros(4, dtype=np.float64)
+        self.latest_lowcmd_leg_q_policy = np.zeros(12, dtype=np.float64)
+        self.latest_lowcmd_leg_q_hw = np.zeros(12, dtype=np.float64)
         self.internal_getup_arm_target = np.zeros(6, dtype=np.float64)
         self.pre_getup_leg_pos = np.array(
             [
@@ -230,7 +253,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
             dtype=np.float64,
         )
         self.policy_handover_leg_start = np.zeros(12, dtype=np.float64)
-        self.policy_handover_duration = 0.8
+        self.policy_handover_duration = 1.2
         self.stand_target_leg_pos = np.array(
             [
                 0.00571868, 0.608813, -1.21763,
@@ -633,6 +656,25 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.prev_action[:] = 0.0
         self.start_time = time.monotonic()
 
+    def start_policy_alignment(self):
+        if self.latest_tick == -1:
+            logging.warning("Low-state is not ready yet; wait for robot state before pressing L2")
+            return
+        if self.align_to_policy_active:
+            logging.info("Policy stand alignment is already running")
+            return
+        if self.start_policy:
+            logging.info("Policy is already running")
+            return
+        self.align_to_policy_active = True
+        self.align_to_policy_start_time = time.monotonic()
+        self.arm_passthrough_pose = self.default_dof_pos[12:].copy()
+        self.fixed_commands[:] = self.policy_takeover_commands
+        self.policy_motion_started = False
+        self.prev_action[:] = 0.0
+        self.last_policy_diag_log_time = -1.0
+        logging.info("Aligning to policy stand before rollout")
+
     def get_arm_joint_state(self):
         if not self.arm_enabled or self.arx5_joint_controller is None:
             return _ZeroArmState()
@@ -721,6 +763,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
             if not self.key_is_pressed:
                 logging.info("Stop policy")
                 self.start_policy = False
+                self.align_to_policy_active = False
                 self.policy_motion_started = False
                 self.fixed_commands[:] = self.policy_takeover_commands
                 self.last_policy_diag_log_time = -1.0
@@ -733,17 +776,10 @@ class WBCNodeLeg12ArmPassthrough(Node):
                     logging.info(
                         f"Policy command is already {self.fixed_commands.tolist()}"
                     )
+                elif self.align_to_policy_active:
+                    logging.info("Policy stand alignment is already running")
                 elif self.ready_to_start_policy:
-                    logging.info("Start policy")
-                    self.policy_handover_leg_start = reorder(self.quadruped_q).copy()
-                    self.arm_passthrough_pose = self.default_dof_pos[12:].copy()
-                    self.fixed_commands[:] = self.policy_move_commands
-                    self.policy_motion_started = True
-                    self.last_policy_diag_log_time = -1.0
-                    self.prev_action[:] = 0.0
-                    self.start_policy = True
-                    self.start_policy_time = time.monotonic()
-                    self.policy_ctrl_iter = 0
+                    self.start_policy_alignment()
                 elif self.uses_unitree_standup and self.awaiting_unitree_stand:
                     elapsed = time.monotonic() - self.unitree_stand_request_time
                     remaining = max(self.unitree_stand_min_wait - elapsed, 0.0)
@@ -908,7 +944,9 @@ class WBCNodeLeg12ArmPassthrough(Node):
         gripper_pos: float,
     ):
         assert len(q) == 18
+        self.latest_lowcmd_leg_q_policy = q[:12].copy()
         leg_q = reorder(q[:12])
+        self.latest_lowcmd_leg_q_hw = leg_q.copy()
         # prepare arm action
         if self.arm_enabled and self.arx5_robot_config is not None:
             self.arx5_cmd = arx5.JointState(self.arx5_robot_config.joint_dof)
@@ -953,13 +991,71 @@ class WBCNodeLeg12ArmPassthrough(Node):
                     logging.warning(
                         f"Timed out waiting for Unitree {self.standup_label}; press R1 to retry"
                     )
-            if not self.start_policy:
+            if not self.start_policy and not self.align_to_policy_active:
                 return
 
         if self.uses_internal_standup and self.start_time == -1.0 and not self.start_policy:
+            if not self.align_to_policy_active:
+                return
+
+        if (
+            not self.uses_unitree_standup
+            and not self.uses_internal_standup
+            and not self.start_policy
+            and not self.align_to_policy_active
+        ):
             return
 
-        if not self.uses_unitree_standup and not self.uses_internal_standup and not self.start_policy:
+        if self.align_to_policy_active and not self.start_policy:
+            align_elapsed = max(time.monotonic() - self.align_to_policy_start_time, 0.0)
+            current_leg_q = reorder(self.quadruped_q).copy()
+            leg_q_error = self.leg_action_offset - current_leg_q
+            max_leg_error = float(np.max(np.abs(leg_q_error)))
+            rear_thigh_error = float(np.max(np.abs(leg_q_error[[7, 10]])))
+            if (
+                self.last_policy_diag_log_time < 0.0
+                or (time.monotonic() - self.last_policy_diag_log_time)
+                >= self.policy_diag_log_interval
+            ):
+                logging.info(
+                    "Align diag | elapsed=%.2f current_leg_q=%s target_leg_q=%s leg_q_error=%s max_leg_error=%.3f rear_thigh_error=%.3f current_leg_dq=%s foot_force=%s"
+                    % (
+                        align_elapsed,
+                        np.array2string(current_leg_q, precision=3, floatmode="fixed"),
+                        np.array2string(self.leg_action_offset, precision=3, floatmode="fixed"),
+                        np.array2string(leg_q_error, precision=3, floatmode="fixed"),
+                        max_leg_error,
+                        rear_thigh_error,
+                        np.array2string(reorder(self.quadruped_dq), precision=3, floatmode="fixed"),
+                        np.array2string(self.latest_foot_force, precision=3, floatmode="fixed"),
+                    )
+                )
+                self.last_policy_diag_log_time = time.monotonic()
+            wbc_action = np.zeros(18, dtype=np.float64)
+            wbc_action[:12] = self.leg_action_offset.copy()
+            wbc_action[12:] = self.arm_passthrough_pose.copy()
+            self.set_gains(kp=self.align_to_policy_kp, kd=self.align_to_policy_kd)
+            self.set_motor_position(wbc_action, self.gripper_pos_cmd)
+            self.motor_timer_callback()
+            if (
+                max_leg_error <= self.align_to_policy_leg_tol
+                and rear_thigh_error <= self.align_to_policy_rear_thigh_tol
+            ):
+                logging.info("Policy stand alignment completed; starting rollout")
+                self.align_to_policy_active = False
+                self.policy_handover_leg_start = reorder(self.quadruped_q).copy()
+                self.fixed_commands[:] = self.policy_move_commands
+                self.policy_motion_started = True
+                self.last_policy_diag_log_time = -1.0
+                self.prev_action[:] = 0.0
+                self.start_policy = True
+                self.start_policy_time = time.monotonic()
+                self.policy_ctrl_iter = 0
+            elif align_elapsed >= self.align_to_policy_timeout:
+                logging.warning(
+                    "Policy stand alignment is still not finished; max_leg_error=%.3f rear_thigh_error=%.3f"
+                    % (max_leg_error, rear_thigh_error)
+                )
             return
 
         if not self.start_policy:
@@ -1020,8 +1116,12 @@ class WBCNodeLeg12ArmPassthrough(Node):
             handover_ratio = max(
                 min(policy_elapsed / self.policy_handover_duration, 1.0), 0.0
             )
-            base_kp = self.unitree_takeover_kp if self.uses_unitree_standup else self.getup_stand_kp
-            base_kd = self.unitree_takeover_kd if self.uses_unitree_standup else self.getup_stand_kd
+            if self.uses_unitree_standup:
+                base_kp = self.unitree_takeover_kp
+                base_kd = self.unitree_takeover_kd
+            else:
+                base_kp = self.manual_takeover_kp
+                base_kd = self.manual_takeover_kd
             blended_kp = _blend_arrays(base_kp, self.policy_kp[:12], handover_ratio)
             blended_kd = _blend_arrays(base_kd, self.policy_kd[:12], handover_ratio)
             self.set_gains(kp=blended_kp, kd=blended_kd)
@@ -1048,7 +1148,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
                 >= self.policy_diag_log_interval
             ):
                 logging.info(
-                    "Policy diag | handover=%.3f est_lin_vel=%s commands=%s raw_action=%s clipped_action=%s target_leg_q=%s commanded_leg_q=%s current_leg_q=%s leg_q_error=%s current_leg_dq=%s foot_force=%s"
+                    "Policy diag | handover=%.3f est_lin_vel=%s commands=%s raw_action=%s clipped_action=%s target_leg_q=%s commanded_leg_q=%s current_leg_q=%s leg_q_error=%s current_leg_dq=%s lowcmd_leg_q_policy=%s lowcmd_leg_q_hw=%s lowcmd_kp=%s lowcmd_kd=%s foot_force=%s"
                     % (
                         handover_ratio,
                         np.array2string(
@@ -1093,6 +1193,26 @@ class WBCNodeLeg12ArmPassthrough(Node):
                         ),
                         np.array2string(
                             current_leg_dq,
+                            precision=3,
+                            floatmode="fixed",
+                        ),
+                        np.array2string(
+                            self.latest_lowcmd_leg_q_policy,
+                            precision=3,
+                            floatmode="fixed",
+                        ),
+                        np.array2string(
+                            self.latest_lowcmd_leg_q_hw,
+                            precision=3,
+                            floatmode="fixed",
+                        ),
+                        np.array2string(
+                            self.quadruped_kp,
+                            precision=3,
+                            floatmode="fixed",
+                        ),
+                        np.array2string(
+                            self.quadruped_kd,
                             precision=3,
                             floatmode="fixed",
                         ),
