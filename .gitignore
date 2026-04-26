@@ -4,3 +4,4 @@ policies/*
 !policies/env.yaml
 __pycache__/
 *.pyc
+logs/

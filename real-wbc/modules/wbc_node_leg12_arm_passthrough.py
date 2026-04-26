@@ -529,7 +529,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
         )
         self.obs_history_log: List[Dict[str, np.ndarray]] = []
         self.action_history_log: List[Dict[str, np.ndarray]] = []
-        self.logging_dir = logging_dir
+        self.logging_dir = os.path.abspath(logging_dir)
+        os.makedirs(self.logging_dir, exist_ok=True)
         self.angular_velocity_filter = MovingWindowFilter(window_size=10, data_dim=3)
         self.linear_velocity_estimator = VelocityEstimator(
             hip_length=0.0955,
@@ -1822,7 +1823,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
         action_history_log = self.action_history_log
         timezone = pytz.timezone("US/Pacific")
         timestamp = datetime.datetime.now(timezone).strftime("%Y%m%d_%H%M%S")
-        logging.info(f"Dumping logs to {self.logging_dir}/{timestamp}")
+        os.makedirs(self.logging_dir, exist_ok=True)
+        logging.info(f"Dumping logs to {self.logging_dir}/{timestamp}_*.npy")
         dump_start_time = time.monotonic()
         np.save(
             f"{self.logging_dir}/{timestamp}_obs_history.npy",
