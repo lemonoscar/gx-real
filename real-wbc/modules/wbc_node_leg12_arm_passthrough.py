@@ -481,6 +481,9 @@ class WBCNodeLeg12ArmPassthrough(Node):
             LowCmd, "lowcmd", low_state_history_depth
         )
         self.cmd_msg = LowCmd()
+        self.cmd_msg.head = [0xFE, 0xEF]
+        self.cmd_msg.level_flag = 0xFF
+        self.cmd_msg.gpio = 0
 
         # init motor command
         self.motor_cmd = [
@@ -517,6 +520,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
 
         # Create a quick timer for steadier timer interval
         self.policy_timer = self.create_timer(1.0 / 1000.0, self.policy_timer_callback)
+        self.motor_timer = self.create_timer(1.0 / 500.0, self.motor_timer_callback)
 
         self.prev_policy_time = time.monotonic()
         self.prev_obs_time = time.monotonic()
@@ -544,6 +548,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.quadruped_dq = np.zeros(LEG_DOF)
         self.quadruped_q = np.zeros(LEG_DOF)
         self.quadruped_tau = np.zeros(LEG_DOF)
+        self.quadruped_motor_mode = np.zeros(LEG_DOF, dtype=np.uint8)
 
         # Joystick Callback variables
         self.start_policy = False
@@ -1083,6 +1088,10 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.quadruped_tau = np.array(
             [motor_data.tau_est for motor_data in msg.motor_state[:LEG_DOF]]
         )
+        self.quadruped_motor_mode = np.array(
+            [motor_data.mode for motor_data in msg.motor_state[:LEG_DOF]],
+            dtype=np.uint8,
+        )
         acceleration = np.array(imu_data.accelerometer, dtype=np.float64)
         quaternion = np.array(imu_data.quaternion, dtype=np.float64)
         foot_force = np.array(
@@ -1183,7 +1192,13 @@ class WBCNodeLeg12ArmPassthrough(Node):
     ##############################
 
     def motor_timer_callback(self):
-        cb_start_time = time.monotonic()
+        if not (
+            self.start_policy
+            or self.align_to_policy_active
+            or self.pose_test_active
+            or self.start_time != -1.0
+        ):
+            return
         self.cmd_msg.crc = get_crc(self.cmd_msg)
         self.motor_pub.publish(self.cmd_msg)
 
@@ -1330,7 +1345,6 @@ class WBCNodeLeg12ArmPassthrough(Node):
             )
             self.set_gains(kp=self.pose_test_kp, kd=self.pose_test_kd)
             self.set_motor_position(wbc_action, self.gripper_pos_cmd)
-            self.motor_timer_callback()
             return
 
         if self.align_to_policy_active and not self.start_policy:
@@ -1354,7 +1368,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
                 >= self.policy_diag_log_interval
             ):
                 logging.info(
-                    "Startup diag | elapsed=%.2f ratio=%.3f current_leg_q=%s target_leg_q=%s leg_q_error=%s max_leg_error=%.3f rear_thigh_error=%.3f current_leg_dq=%s foot_force=%s"
+                    "Startup diag | elapsed=%.2f ratio=%.3f current_leg_q=%s target_leg_q=%s leg_q_error=%s max_leg_error=%.3f rear_thigh_error=%.3f current_leg_dq=%s current_tau_est=%s motor_mode=%s foot_force=%s"
                     % (
                         align_elapsed,
                         startup_ratio,
@@ -1366,6 +1380,18 @@ class WBCNodeLeg12ArmPassthrough(Node):
                         np.array2string(
                             self.interface_to_policy_leg_order(self.quadruped_dq),
                             precision=3,
+                            floatmode="fixed",
+                        ),
+                        np.array2string(
+                            self.interface_to_policy_leg_order(self.quadruped_tau),
+                            precision=3,
+                            floatmode="fixed",
+                        ),
+                        np.array2string(
+                            self.interface_to_policy_leg_order(
+                                self.quadruped_motor_mode.astype(np.float64)
+                            ),
+                            precision=0,
                             floatmode="fixed",
                         ),
                         np.array2string(self.latest_foot_force, precision=3, floatmode="fixed"),
@@ -1385,7 +1411,6 @@ class WBCNodeLeg12ArmPassthrough(Node):
             )
             self.set_gains(kp=self.align_to_policy_kp, kd=self.align_to_policy_kd)
             self.set_motor_position(wbc_action, self.gripper_pos_cmd)
-            self.motor_timer_callback()
             if align_elapsed >= (self.align_to_policy_duration + self.align_to_policy_hold_time):
                 logging.info(
                     "Dog-only startup completed; starting rollout with residual errors max=%.3f rear_thigh=%.3f"
@@ -1453,7 +1478,6 @@ class WBCNodeLeg12ArmPassthrough(Node):
             gripper_pos = 0.0
             # send leg action
             self.set_motor_position(wbc_action, gripper_pos)
-            self.motor_timer_callback()
         elif (
             time.monotonic() - self.start_policy_time
             > self.policy_dt * self.policy_ctrl_iter - self.policy_dt_slack
@@ -1498,7 +1522,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
                 >= self.policy_diag_log_interval
             ):
                 logging.info(
-                    "Policy diag | handover=%.3f est_lin_vel=%s commands=%s raw_action=%s clipped_action=%s timed_action=%s applied_action=%s startup_kick=%s target_leg_q=%s commanded_leg_q=%s current_leg_q=%s leg_q_error=%s current_leg_dq=%s lowcmd_leg_q_policy=%s lowcmd_leg_q_hw=%s lowcmd_kp=%s lowcmd_kd=%s sim2sim_delay=%d hold_prob=%.3f foot_force=%s"
+                    "Policy diag | handover=%.3f est_lin_vel=%s commands=%s raw_action=%s clipped_action=%s timed_action=%s applied_action=%s startup_kick=%s target_leg_q=%s commanded_leg_q=%s current_leg_q=%s leg_q_error=%s current_leg_dq=%s current_tau_est=%s motor_mode=%s lowcmd_leg_q_policy=%s lowcmd_leg_q_hw=%s lowcmd_kp=%s lowcmd_kd=%s sim2sim_delay=%d hold_prob=%.3f foot_force=%s"
                     % (
                         handover_ratio,
                         np.array2string(
@@ -1562,6 +1586,18 @@ class WBCNodeLeg12ArmPassthrough(Node):
                             floatmode="fixed",
                         ),
                         np.array2string(
+                            self.interface_to_policy_leg_order(self.quadruped_tau),
+                            precision=3,
+                            floatmode="fixed",
+                        ),
+                        np.array2string(
+                            self.interface_to_policy_leg_order(
+                                self.quadruped_motor_mode.astype(np.float64)
+                            ),
+                            precision=0,
+                            floatmode="fixed",
+                        ),
+                        np.array2string(
                             self.latest_lowcmd_leg_q_policy,
                             precision=3,
                             floatmode="fixed",
@@ -1594,7 +1630,6 @@ class WBCNodeLeg12ArmPassthrough(Node):
             self.prev_action[:12] = leg_action
             self.prev_action[12:] = 0.0
             self.set_motor_position(wbc_action, self.gripper_pos_cmd)
-            self.motor_timer_callback()
             self.prev_policy_time = time.monotonic()
             self.prev_motor_time = time.monotonic()
             self.prev_action_tick_s = self.prev_obs_tick_s

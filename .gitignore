@@ -5,3 +5,4 @@ policies/*
 __pycache__/
 *.pyc
 logs/
+run.log
