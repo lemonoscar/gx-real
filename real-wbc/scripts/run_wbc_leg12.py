@@ -57,13 +57,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--leg-kp",
         type=float,
-        default=100.0,
+        default=120.0,
         help="Low-level leg position Kp used during internal stand-up, handover, and rollout.",
     )
     parser.add_argument(
         "--leg-kd",
         type=float,
-        default=5.0,
+        default=6.0,
         help="Low-level leg damping Kd used during internal stand-up, handover, and rollout.",
     )
     parser.add_argument("--pose_estimator", type=str, default="none")

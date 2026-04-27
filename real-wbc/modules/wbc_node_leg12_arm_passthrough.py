@@ -245,8 +245,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
         standup_mode: str = "internal",
         allow_unknown_sport_mode: bool = False,
         live_ready_pose_calibration: bool = True,
-        leg_kp: float = 100.0,
-        leg_kd: float = 5.0,
+        leg_kp: float = 120.0,
+        leg_kd: float = 6.0,
     ):
         super().__init__("deploy_node")  # type: ignore
         self.replay_speed = replay_speed
@@ -280,8 +280,14 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.arm_smoothed_pose = self.arm_passthrough_pose.copy()
         self.arm_last_cmd_time = -1.0
         self.arm_interp_tau = 0.30
+        self.arm_filter_max_dt = 0.03
+        self.arm_resync_threshold = 0.35
+        self.last_arm_resync_log_time = -1.0
+        self.last_invalid_arm_state_log_time = -1.0
+        self.latest_arm_pos = self.arm_passthrough_pose.copy()
+        self.latest_arm_state_valid = False
         self.arm_max_velocity = np.array(
-            [0.8, 1.2, 1.2, 1.5, 1.5, 1.5], dtype=np.float64
+            [0.45, 0.65, 0.65, 0.9, 0.9, 0.9], dtype=np.float64
         )
         self.fixed_commands = self.policy_takeover_commands.copy()
         self.fixed_gripper_cmd = float(gripper_cmd)
@@ -617,6 +623,11 @@ class WBCNodeLeg12ArmPassthrough(Node):
             self.arx5_joint_controller.set_gain(self.arx5_gain)
             arm_state = self.get_arm_joint_state()
             arm_hold_pos = arm_state.pos().copy()
+            self.latest_arm_pos = arm_hold_pos.copy()
+            self.latest_arm_state_valid = self.is_valid_arm_state(
+                arm_hold_pos,
+                arm_state.vel().copy(),
+            )
             self.arm_smoothed_pose = arm_hold_pos.copy()
             self.arm_last_cmd_time = time.monotonic()
             self.arx5_cmd = arx5.JointState(self.arx5_robot_config.joint_dof)
@@ -666,6 +677,41 @@ class WBCNodeLeg12ArmPassthrough(Node):
 
     def reset_arm_passthrough_pose(self):
         self.arm_passthrough_pose = self.requested_arm_hold_pose.copy()
+
+    def is_valid_arm_state(
+        self,
+        arm_pos: np.ndarray,
+        arm_vel: Optional[np.ndarray] = None,
+    ) -> bool:
+        arm_pos = np.asarray(arm_pos, dtype=np.float64)
+        if arm_pos.shape[0] != 6 or not np.isfinite(arm_pos).all():
+            return False
+        if arm_vel is None:
+            return not np.allclose(arm_pos, 0.0)
+        arm_vel = np.asarray(arm_vel, dtype=np.float64)
+        if arm_vel.shape[0] != 6 or not np.isfinite(arm_vel).all():
+            return False
+        return not (np.allclose(arm_pos, 0.0) and np.allclose(arm_vel, 0.0))
+
+    def sync_arm_command_filter(self, arm_pos: np.ndarray, source: str):
+        if not self.arm_enabled:
+            return
+        arm_pos = np.asarray(arm_pos, dtype=np.float64)
+        if not self.is_valid_arm_state(arm_pos):
+            logging.warning("Skipping arm command sync from %s: invalid arm_pos=%s", source, arm_pos)
+            return
+        self.latest_arm_pos = arm_pos.copy()
+        self.latest_arm_state_valid = True
+        self.arm_smoothed_pose = arm_pos.copy()
+        self.arm_last_cmd_time = time.monotonic()
+        logging.info(
+            "Arm command filter sync | source=%s current_arm_q=%s target_arm_q=%s"
+            % (
+                source,
+                np.array2string(self.arm_smoothed_pose, precision=3, floatmode="fixed"),
+                np.array2string(self.arm_passthrough_pose, precision=3, floatmode="fixed"),
+            )
+        )
 
     def set_runtime_leg_offset(self, leg_offset: np.ndarray, source: str):
         leg_offset = np.asarray(leg_offset, dtype=np.float64)
@@ -816,6 +862,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
             ready_error = 0.0
         lowstate = self.get_arm_joint_state()
         self.init_arm_pos = lowstate.pos().copy()
+        self.sync_arm_command_filter(self.init_arm_pos, "r1_start")
         self.prev_action[:] = 0.0
         self.start_time = time.monotonic()
         if self.internal_direct_stand_active:
@@ -849,6 +896,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         lowstate = self.get_arm_joint_state()
         self.pose_test_arm_start = lowstate.pos().copy()
         self.reset_arm_passthrough_pose()
+        self.sync_arm_command_filter(self.pose_test_arm_start, "pose_test_start")
         self.last_policy_diag_log_time = -1.0
         logging.info("Starting pose test toward policy stand target")
 
@@ -870,6 +918,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         lowstate = self.get_arm_joint_state()
         self.align_to_policy_arm_start = lowstate.pos().copy()
         self.reset_arm_passthrough_pose()
+        self.sync_arm_command_filter(self.align_to_policy_arm_start, "policy_alignment_start")
         self.fixed_commands[:] = self.policy_takeover_commands
         self.policy_motion_started = False
         self.prev_action[:] = 0.0
@@ -1182,6 +1231,27 @@ class WBCNodeLeg12ArmPassthrough(Node):
         lowstate = self.get_arm_joint_state()
         arm_dof_pos = lowstate.pos().copy()
         arm_dof_vel = lowstate.vel().copy()
+        arm_state_valid = self.is_valid_arm_state(arm_dof_pos, arm_dof_vel)
+        if arm_state_valid:
+            self.latest_arm_pos = arm_dof_pos.copy()
+            self.latest_arm_state_valid = True
+        elif self.latest_arm_state_valid:
+            now = time.monotonic()
+            if (
+                self.last_invalid_arm_state_log_time < 0.0
+                or (now - self.last_invalid_arm_state_log_time) >= self.policy_diag_log_interval
+            ):
+                logging.warning(
+                    "Ignoring invalid arm state sample | arm_pos=%s arm_vel=%s fallback_arm_q=%s"
+                    % (
+                        np.array2string(arm_dof_pos, precision=3, floatmode="fixed"),
+                        np.array2string(arm_dof_vel, precision=3, floatmode="fixed"),
+                        np.array2string(self.latest_arm_pos, precision=3, floatmode="fixed"),
+                    )
+                )
+                self.last_invalid_arm_state_log_time = now
+            arm_dof_pos = self.latest_arm_pos.copy()
+            arm_dof_vel = np.zeros_like(arm_dof_vel)
         full_dof_pos = np.concatenate(
             (self.interface_to_policy_leg_order(self.quadruped_q), arm_dof_pos), axis=0
         )
@@ -1300,12 +1370,36 @@ class WBCNodeLeg12ArmPassthrough(Node):
         if target.shape[0] != 6:
             raise RuntimeError(f"Expected 6 arm joints, got {target.shape[0]}")
         now = time.monotonic()
+        if (
+            self.latest_arm_state_valid
+            and self.latest_arm_pos.shape[0] == 6
+            and np.isfinite(self.latest_arm_pos).all()
+        ):
+            arm_cmd_error = float(np.max(np.abs(self.latest_arm_pos - self.arm_smoothed_pose)))
+            if arm_cmd_error > self.arm_resync_threshold:
+                if (
+                    self.last_arm_resync_log_time < 0.0
+                    or (now - self.last_arm_resync_log_time) >= self.policy_diag_log_interval
+                ):
+                    logging.warning(
+                        "Arm command filter resync | measured_vs_command_error=%.3f current_arm_q=%s previous_cmd=%s target_arm_q=%s"
+                        % (
+                            arm_cmd_error,
+                            np.array2string(self.latest_arm_pos, precision=3, floatmode="fixed"),
+                            np.array2string(self.arm_smoothed_pose, precision=3, floatmode="fixed"),
+                            np.array2string(target, precision=3, floatmode="fixed"),
+                        )
+                    )
+                    self.last_arm_resync_log_time = now
+                self.arm_smoothed_pose = self.latest_arm_pos.copy()
+                self.arm_last_cmd_time = now
+
         if self.arm_last_cmd_time < 0.0:
             self.arm_smoothed_pose = target.copy()
             self.arm_last_cmd_time = now
             return self.arm_smoothed_pose.copy()
 
-        dt = max(now - self.arm_last_cmd_time, 1e-3)
+        dt = min(max(now - self.arm_last_cmd_time, 1e-3), self.arm_filter_max_dt)
         self.arm_last_cmd_time = now
         alpha = 1.0 - np.exp(-dt / max(self.arm_interp_tau, 1e-6))
         blended = self.arm_smoothed_pose + alpha * (target - self.arm_smoothed_pose)
@@ -1650,7 +1744,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
                 >= self.policy_diag_log_interval
             ):
                 logging.info(
-                    "Policy diag | handover=%.3f est_lin_vel=%s commands=%s raw_action=%s clipped_action=%s timed_action=%s applied_action=%s startup_kick=%s target_leg_q=%s commanded_leg_q=%s current_leg_q=%s leg_q_error=%s current_leg_dq=%s current_tau_est=%s motor_mode=%s lowcmd_leg_q_policy=%s lowcmd_leg_q_hw=%s lowcmd_kp=%s lowcmd_kd=%s sim2sim_delay=%d hold_prob=%.3f foot_force=%s"
+                    "Policy diag | handover=%.3f est_lin_vel=%s commands=%s raw_action=%s clipped_action=%s timed_action=%s applied_action=%s startup_kick=%s target_leg_q=%s commanded_leg_q=%s current_leg_q=%s leg_q_error=%s current_leg_dq=%s current_tau_est=%s motor_mode=%s lowcmd_leg_q_policy=%s lowcmd_leg_q_hw=%s lowcmd_kp=%s lowcmd_kd=%s arm_target=%s arm_current=%s arm_smoothed_cmd=%s sim2sim_delay=%d hold_prob=%.3f foot_force=%s"
                     % (
                         handover_ratio,
                         np.array2string(
@@ -1742,6 +1836,21 @@ class WBCNodeLeg12ArmPassthrough(Node):
                         ),
                         np.array2string(
                             self.quadruped_kd,
+                            precision=3,
+                            floatmode="fixed",
+                        ),
+                        np.array2string(
+                            wbc_action[12:],
+                            precision=3,
+                            floatmode="fixed",
+                        ),
+                        np.array2string(
+                            self.latest_arm_pos,
+                            precision=3,
+                            floatmode="fixed",
+                        ),
+                        np.array2string(
+                            self.arm_smoothed_pose,
                             precision=3,
                             floatmode="fixed",
                         ),
