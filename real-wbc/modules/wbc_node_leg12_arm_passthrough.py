@@ -365,6 +365,9 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.getup_crouch_time = 0.6
         self.getup_stand_time = 2.4
         self.getup_hold_time = 0.3
+        self.internal_direct_stand_active = False
+        self.internal_direct_stand_duration = 0.8
+        self.internal_skip_crouch_max_error = 0.8
         self.getup_start_kp = self.commanded_leg_kp.copy()
         self.getup_start_kd = np.ones(12, dtype=np.float64) * 3.5
         self.getup_crouch_kp = self.commanded_leg_kp.copy()
@@ -689,6 +692,12 @@ class WBCNodeLeg12ArmPassthrough(Node):
         )
 
     @property
+    def active_getup_total_time(self) -> float:
+        if self.internal_direct_stand_active:
+            return self.internal_direct_stand_duration + self.getup_hold_time
+        return self.getup_total_time
+
+    @property
     def standup_label(self) -> str:
         if self.standup_mode == "unitree_auto":
             return "StandUp/RecoveryStand"
@@ -785,10 +794,28 @@ class WBCNodeLeg12ArmPassthrough(Node):
             logging.warning("Policy is running; stop it with R2 before restarting stand-up")
             return
         self.init_leg_pos = self.interface_to_policy_leg_order(self.quadruped_q).copy()
+        stand_error = float(np.max(np.abs(self.stand_target_leg_pos - self.init_leg_pos)))
+        crouch_error = float(np.max(np.abs(self.pre_getup_leg_pos - self.init_leg_pos)))
+        self.internal_direct_stand_active = (
+            stand_error <= self.internal_skip_crouch_max_error
+            or stand_error < crouch_error
+        )
         lowstate = self.get_arm_joint_state()
         self.init_arm_pos = lowstate.pos().copy()
         self.prev_action[:] = 0.0
         self.start_time = time.monotonic()
+        if self.internal_direct_stand_active:
+            logging.info(
+                "Internal ready-pose alignment: current posture is standing-like "
+                "(stand_error=%.3f, crouch_error=%.3f); skipping crouch phase"
+                % (stand_error, crouch_error)
+            )
+        else:
+            logging.info(
+                "Internal stand-up: current posture is not near stand target "
+                "(stand_error=%.3f, crouch_error=%.3f); running full get-up sequence"
+                % (stand_error, crouch_error)
+            )
 
     def start_pose_test(self):
         if self.latest_tick == -1:
@@ -1020,7 +1047,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         if self.uses_internal_standup:
             if self.start_time == -1.0 or self.latest_tick == -1:
                 return False
-            return (time.monotonic() - self.start_time) >= self.getup_total_time
+            return (time.monotonic() - self.start_time) >= self.active_getup_total_time
         return self.latest_tick != -1
 
     def joy_stick_cb(self, msg):
@@ -1077,7 +1104,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
                 elif self.uses_internal_standup and self.start_time == -1.0:
                     logging.warning("Press R1 first to start the stand-up sequence")
                 elif self.uses_internal_standup:
-                    remaining = max(self.getup_total_time - (time.monotonic() - self.start_time), 0.0)
+                    remaining = max(self.active_getup_total_time - (time.monotonic() - self.start_time), 0.0)
                     logging.warning(f"Stand-up is not finished yet; wait {remaining:.1f}s before pressing L2")
                 else:
                     logging.warning("Low-state is not ready yet; wait for robot state before pressing L2")
@@ -1497,7 +1524,24 @@ class WBCNodeLeg12ArmPassthrough(Node):
             elapsed = max(time.monotonic() - self.start_time, 0.0)
             wbc_action = np.zeros(18, dtype=np.float64)
 
-            if elapsed <= self.getup_crouch_time:
+            if self.internal_direct_stand_active:
+                direct_ratio = _smoothstep(
+                    float(
+                        np.clip(
+                            elapsed / max(self.internal_direct_stand_duration, 1e-6),
+                            0.0,
+                            1.0,
+                        )
+                    )
+                )
+                wbc_action[:12] = _blend_arrays(
+                    self.init_leg_pos,
+                    self.stand_target_leg_pos,
+                    direct_ratio,
+                )
+                getup_kp = self.getup_stand_kp.copy()
+                getup_kd = self.getup_stand_kd.copy()
+            elif elapsed <= self.getup_crouch_time:
                 crouch_ratio = _smoothstep(
                     float(np.clip(elapsed / max(self.getup_crouch_time, 1e-6), 0.0, 1.0))
                 )
@@ -1528,7 +1572,13 @@ class WBCNodeLeg12ArmPassthrough(Node):
             arm_ratio = _smoothstep(
                 float(
                     np.clip(
-                        elapsed / max(self.getup_crouch_time + self.getup_stand_time, 1e-6),
+                        elapsed
+                        / max(
+                            self.internal_direct_stand_duration
+                            if self.internal_direct_stand_active
+                            else self.getup_crouch_time + self.getup_stand_time,
+                            1e-6,
+                        ),
                         0.0,
                         1.0,
                     )
