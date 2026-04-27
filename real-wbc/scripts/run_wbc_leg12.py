@@ -50,6 +50,13 @@ if __name__ == "__main__":
     )
     parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument("--arm_pose", type=float, nargs=6, default=None)
+    parser.add_argument("--button-arm-pose", type=float, nargs=6, default=None)
+    parser.add_argument(
+        "--arm-reset-pose",
+        type=float,
+        nargs=6,
+        default=[0.0, 0.5, 0.3, 0.0, 0.0, 0.0],
+    )
     parser.add_argument("--cmd-vx", type=float, default=0.0)
     parser.add_argument("--cmd-vy", type=float, default=0.0)
     parser.add_argument("--cmd-yaw", type=float, default=0.0)

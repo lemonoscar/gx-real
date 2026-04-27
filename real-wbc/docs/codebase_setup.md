@@ -106,14 +106,17 @@ scripts/run_leg12_real.sh --pose_estimator none --standup-mode internal
 ```
 Use `--pose_estimator iphone` or `--pose_estimator mocap` only when that sensor pipeline is already running and verified. Use `--disable-arm` if you want to test the quadruped body without the arm. The default `--standup-mode internal` always runs the repository's internal stand-up sequence with R1, even if the robot was manually stood up first.
 
-The leg low-level position-control gains default to `--leg-kp 200 --leg-kd 10` for internal stand-up, low-level alignment, and policy rollout. The real deployment path starts from `real_deploy_leg_offset`, then, when R1 is pressed from an already standing posture, live-calibrates the current leg pose as the runtime leg action offset and joint-position observation offset. If `--arm_pose` is provided, that six-joint pose is also used through internal stand-up, alignment, pose test, and policy rollout instead of being replaced by the repository default arm pose. The arm command filter rate-limits joint commands, resynchronizes from measured arm position if the arm falls far away from the last commanded position, and emits `Arm diag` logs with target/current/smoothed arm joint positions.
+The leg low-level position-control gains default to `--leg-kp 200 --leg-kd 10` for internal stand-up, low-level alignment, and policy rollout. The real deployment path starts from `real_deploy_leg_offset`, then, when R1 is pressed from an already standing posture, live-calibrates the current leg pose as the runtime leg action offset and joint-position observation offset. If `--arm_pose` is provided, that six-joint pose is also used through internal stand-up, alignment, pose test, and policy rollout instead of being replaced by the repository default arm pose. The `--button-arm-pose` and `--arm-reset-pose` options configure runtime arm targets for controller buttons. The arm command filter rate-limits joint commands, resynchronizes from measured arm position if the arm falls far away from the last commanded position, and emits `Arm diag` logs with target/current/smoothed arm joint positions.
 
 The controller refuses to start low-level rollout until it has seen a usable `sport_mode` state. Use `--allow-unknown-sport-mode` only for controlled diagnostics when that state topic is known to be unavailable.
 
 Joystick key mapping:
 - L1: Emergency stop. Treat this as the primary safety action.
 - R1: In the default flow, live-calibrate the current mechanical standing posture as the policy ready pose, then skip the crouch phase. In explicit `unitree_*` modes, R1 triggers Unitree's built-in stand-up or recovery-stand action.
-- L2: After stand-up completes, start low-level alignment and then the RL policy. If a nonzero `--cmd-vx/--cmd-vy/--cmd-yaw` was provided, the command ramps up automatically after takeover.
+- L2: After stand-up completes, start low-level alignment and then the RL policy. If a nonzero `--cmd-vx/--cmd-vy/--cmd-yaw` was provided, the command ramps up automatically after takeover. While rollout is already running, press L2 again to resume the configured motion command.
+- A: Send the arm to `--button-arm-pose` if that launch argument was provided.
+- X: Send the arm to `--arm-reset-pose`, which defaults to `0 0.5 0.3 0 0 0`.
+- Y: Smoothly set the base command to `0 0 0` while keeping the RL policy alive.
 - R2: Stop the RL policy and hold the last commanded posture.
 
 Practical stand-up guidance:

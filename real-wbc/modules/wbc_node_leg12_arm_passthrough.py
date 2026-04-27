@@ -232,6 +232,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
         cmd_vy: float = 0.0,
         cmd_yaw: float = 0.0,
         gripper_cmd: float = 0.0,
+        button_arm_pose: Optional[List[float]] = None,
+        arm_reset_pose: Optional[List[float]] = None,
         time_to_replay: float = 3.0,  # how long to wait after policy starts before starting trajectory
         replay_speed: float = 1.0,
         policy_dt_slack: float = 0.003,
@@ -276,6 +278,16 @@ class WBCNodeLeg12ArmPassthrough(Node):
             if arm_pose is not None
             else self.default_arm_hold_pose.copy()
         )
+        self.button_arm_pose = (
+            np.array(button_arm_pose, dtype=np.float64)
+            if button_arm_pose is not None
+            else None
+        )
+        self.arm_reset_pose = (
+            np.array(arm_reset_pose, dtype=np.float64)
+            if arm_reset_pose is not None
+            else np.array([0.0, 0.5, 0.3, 0.0, 0.0, 0.0], dtype=np.float64)
+        )
         self.arm_passthrough_pose = self.requested_arm_hold_pose.copy()
         self.arm_smoothed_pose = self.arm_passthrough_pose.copy()
         self.arm_last_cmd_time = -1.0
@@ -290,6 +302,10 @@ class WBCNodeLeg12ArmPassthrough(Node):
             [0.45, 0.65, 0.65, 0.9, 0.9, 0.9], dtype=np.float64
         )
         self.fixed_commands = self.policy_takeover_commands.copy()
+        self.policy_command_start = self.policy_takeover_commands.copy()
+        self.policy_command_target = self.policy_takeover_commands.copy()
+        self.policy_command_ramp_start_time = time.monotonic()
+        self.policy_command_current_ramp_duration = self.policy_command_ramp_duration
         self.fixed_gripper_cmd = float(gripper_cmd)
         self.policy_diag_log_interval = 0.5
         self.last_policy_diag_log_time = -1.0
@@ -523,11 +539,17 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.policy_handover_leg_start = self.stand_target_leg_pos.copy()
         self.policy_dt_slack = policy_dt_slack
         logging.info(
-            "Runtime targets | standup_mode=%s arm_pose_source=%s arm_hold_pose=%s commanded_leg_kp=%s commanded_leg_kd=%s move_commands=%s"
+            "Runtime targets | standup_mode=%s arm_pose_source=%s arm_hold_pose=%s button_arm_pose=%s arm_reset_pose=%s commanded_leg_kp=%s commanded_leg_kd=%s move_commands=%s"
             % (
                 self.standup_mode,
                 self.arm_pose_source,
                 np.array2string(self.requested_arm_hold_pose, precision=3, floatmode="fixed"),
+                (
+                    "None"
+                    if self.button_arm_pose is None
+                    else np.array2string(self.button_arm_pose, precision=3, floatmode="fixed")
+                ),
+                np.array2string(self.arm_reset_pose, precision=3, floatmode="fixed"),
                 np.array2string(self.commanded_leg_kp, precision=1, floatmode="fixed"),
                 np.array2string(self.commanded_leg_kd, precision=1, floatmode="fixed"),
                 np.array2string(self.policy_move_commands, precision=3, floatmode="fixed"),
@@ -583,6 +605,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
             logging.info("Press L2 to start pose test and hold the policy stand target")
         else:
             logging.info("Press L2 to start policy after stand-up completes")
+        logging.info("Press A to send --button-arm-pose, X to reset arm, Y to zero base command")
         logging.info("Press L1 for emergency stop")
         self.key_is_pressed = False  # for key press event
 
@@ -679,6 +702,22 @@ class WBCNodeLeg12ArmPassthrough(Node):
 
     def reset_arm_passthrough_pose(self):
         self.arm_passthrough_pose = self.requested_arm_hold_pose.copy()
+
+    def set_arm_passthrough_pose(self, arm_pose: np.ndarray, source: str) -> bool:
+        arm_pose = np.asarray(arm_pose, dtype=np.float64)
+        if arm_pose.shape[0] != 6 or not np.isfinite(arm_pose).all():
+            logging.warning("Ignoring invalid arm target from %s: %s", source, arm_pose)
+            return False
+        self.arm_passthrough_pose = arm_pose.copy()
+        self.last_arm_diag_log_time = -1.0
+        logging.info(
+            "Arm target update | source=%s target_arm_q=%s"
+            % (
+                source,
+                np.array2string(self.arm_passthrough_pose, precision=3, floatmode="fixed"),
+            )
+        )
+        return True
 
     def is_valid_arm_state(
         self,
@@ -922,6 +961,9 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.reset_arm_passthrough_pose()
         self.sync_arm_command_filter(self.align_to_policy_arm_start, "policy_alignment_start")
         self.fixed_commands[:] = self.policy_takeover_commands
+        self.policy_command_start = self.policy_takeover_commands.copy()
+        self.policy_command_target = self.policy_takeover_commands.copy()
+        self.policy_command_ramp_start_time = time.monotonic()
         self.policy_motion_started = False
         self.prev_action[:] = 0.0
         self.reset_sim2sim_action_state()
@@ -964,17 +1006,45 @@ class WBCNodeLeg12ArmPassthrough(Node):
             return
         ramp_ratio = float(
             np.clip(
-                (time.monotonic() - self.start_policy_time)
-                / max(self.policy_command_ramp_duration, 1e-6),
+                (time.monotonic() - self.policy_command_ramp_start_time)
+                / max(self.policy_command_current_ramp_duration, 1e-6),
                 0.0,
                 1.0,
             )
         )
         self.fixed_commands[:] = _blend_arrays(
-            self.policy_takeover_commands,
-            self.policy_move_commands,
+            self.policy_command_start,
+            self.policy_command_target,
             _smoothstep(ramp_ratio),
         )
+
+    def set_policy_command_target(
+        self,
+        target_commands: np.ndarray,
+        source: str,
+        ramp_duration: Optional[float] = None,
+    ) -> bool:
+        target_commands = np.asarray(target_commands, dtype=np.float64)
+        if target_commands.shape[0] != 3 or not np.isfinite(target_commands).all():
+            logging.warning("Ignoring invalid policy command target from %s: %s", source, target_commands)
+            return False
+        self.policy_command_start = self.fixed_commands.copy()
+        self.policy_command_target = target_commands.copy()
+        self.policy_command_ramp_start_time = time.monotonic()
+        self.policy_command_current_ramp_duration = float(
+            self.policy_command_ramp_duration if ramp_duration is None else ramp_duration
+        )
+        self.last_policy_diag_log_time = -1.0
+        logging.info(
+            "Policy command target update | source=%s start=%s target=%s ramp=%.2fs"
+            % (
+                source,
+                np.array2string(self.policy_command_start, precision=3, floatmode="fixed"),
+                np.array2string(self.policy_command_target, precision=3, floatmode="fixed"),
+                self.policy_command_current_ramp_duration,
+            )
+        )
+        return True
 
     def get_startup_kick_leg_delta(self) -> np.ndarray:
         if not self.start_policy:
@@ -1136,6 +1206,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
                 self.pose_test_active = False
                 self.policy_motion_started = False
                 self.fixed_commands[:] = self.policy_takeover_commands
+                self.policy_command_start = self.policy_takeover_commands.copy()
+                self.policy_command_target = self.policy_takeover_commands.copy()
                 self.last_policy_diag_log_time = -1.0
         if msg.keys == 2:  # L1: emergency stop
             logging.info("Emergency stop")
@@ -1143,8 +1215,10 @@ class WBCNodeLeg12ArmPassthrough(Node):
         if msg.keys == 32:  # L2: start policy
             if not self.key_is_pressed:
                 if self.start_policy:
-                    logging.info(
-                        f"Policy command is already {self.fixed_commands.tolist()}"
+                    self.set_policy_command_target(
+                        self.policy_move_commands,
+                        "l2_resume_move_command",
+                        self.policy_command_ramp_duration,
                     )
                 elif self.pose_test_active:
                     logging.info("Pose test is already running")
@@ -1176,6 +1250,28 @@ class WBCNodeLeg12ArmPassthrough(Node):
             self.key_is_pressed = True
         # if msg.keys == int(2**15):  # Left # NOTE must map to another key, left already used in pose latency
         #     # pass
+
+        if msg.keys == int(2**8):  # A: move arm to launch-specified button pose
+            if not self.key_is_pressed:
+                if self.button_arm_pose is None:
+                    logging.warning("A pressed but --button-arm-pose was not provided")
+                else:
+                    self.set_arm_passthrough_pose(self.button_arm_pose, "button_A")
+            self.key_is_pressed = True
+
+        if msg.keys == int(2**10):  # X: reset arm to configured reset pose
+            if not self.key_is_pressed:
+                self.set_arm_passthrough_pose(self.arm_reset_pose, "button_X_reset")
+            self.key_is_pressed = True
+
+        if msg.keys == int(2**11):  # Y: stop base motion while keeping policy alive
+            if not self.key_is_pressed:
+                self.set_policy_command_target(
+                    self.policy_takeover_commands,
+                    "button_Y_zero_base_command",
+                    self.policy_command_ramp_duration,
+                )
+            self.key_is_pressed = True
 
         if msg.keys == int(2**9):  # B: start/stop dumping logs
             if not self.key_is_pressed:
@@ -1669,6 +1765,11 @@ class WBCNodeLeg12ArmPassthrough(Node):
                 self.prev_action[:] = 0.0
                 self.start_policy = True
                 self.start_policy_time = time.monotonic()
+                self.set_policy_command_target(
+                    self.policy_move_commands,
+                    "policy_start",
+                    self.policy_command_ramp_duration,
+                )
                 self.policy_ctrl_iter = 0
             return
 
