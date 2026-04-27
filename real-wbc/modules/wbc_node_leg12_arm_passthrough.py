@@ -794,11 +794,11 @@ class WBCNodeLeg12ArmPassthrough(Node):
             logging.warning("Policy is running; stop it with R2 before restarting stand-up")
             return
         self.init_leg_pos = self.interface_to_policy_leg_order(self.quadruped_q).copy()
-        stand_error = float(np.max(np.abs(self.stand_target_leg_pos - self.init_leg_pos)))
+        ready_error = float(np.max(np.abs(self.leg_action_offset - self.init_leg_pos)))
         crouch_error = float(np.max(np.abs(self.pre_getup_leg_pos - self.init_leg_pos)))
         self.internal_direct_stand_active = (
-            stand_error <= self.internal_skip_crouch_max_error
-            or stand_error < crouch_error
+            ready_error <= self.internal_skip_crouch_max_error
+            or ready_error < crouch_error
         )
         lowstate = self.get_arm_joint_state()
         self.init_arm_pos = lowstate.pos().copy()
@@ -807,14 +807,14 @@ class WBCNodeLeg12ArmPassthrough(Node):
         if self.internal_direct_stand_active:
             logging.info(
                 "Internal ready-pose alignment: current posture is standing-like "
-                "(stand_error=%.3f, crouch_error=%.3f); skipping crouch phase"
-                % (stand_error, crouch_error)
+                "(ready_error=%.3f, crouch_error=%.3f); skipping crouch phase"
+                % (ready_error, crouch_error)
             )
         else:
             logging.info(
                 "Internal stand-up: current posture is not near stand target "
-                "(stand_error=%.3f, crouch_error=%.3f); running full get-up sequence"
-                % (stand_error, crouch_error)
+                "(ready_error=%.3f, crouch_error=%.3f); running full get-up sequence"
+                % (ready_error, crouch_error)
             )
 
     def start_pose_test(self):
@@ -1536,7 +1536,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
                 )
                 wbc_action[:12] = _blend_arrays(
                     self.init_leg_pos,
-                    self.stand_target_leg_pos,
+                    self.leg_action_offset,
                     direct_ratio,
                 )
                 getup_kp = self.getup_stand_kp.copy()

@@ -112,7 +112,7 @@ The controller refuses to start low-level rollout until it has seen a usable `sp
 
 Joystick key mapping:
 - L1: Emergency stop. Treat this as the primary safety action.
-- R1: In the default flow, align the current mechanical standing posture to the policy ready-to-walk posture. If the current leg posture is standing-like, the controller skips the crouch phase and only smooths toward the stand target. In explicit `unitree_*` modes, R1 triggers Unitree's built-in stand-up or recovery-stand action.
+- R1: In the default flow, align the current mechanical standing posture directly to the policy ready-to-walk `leg_action_offset`. If the current leg posture is standing-like, the controller skips the crouch phase. In explicit `unitree_*` modes, R1 triggers Unitree's built-in stand-up or recovery-stand action.
 - L2: After stand-up completes, start low-level alignment and then the RL policy. If a nonzero `--cmd-vx/--cmd-vy/--cmd-yaw` was provided, the command ramps up automatically after takeover.
 - R2: Stop the RL policy and hold the last commanded posture.
 
