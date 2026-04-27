@@ -1785,6 +1785,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
             [float(init_joint_pos[joint_name]) for joint_name in joint_names],
             dtype=np.float64,
         )
+        deploy_leg_offset = self.interface_to_policy_leg_order(self.real_deploy_leg_offset)
 
         policy_obs_cfg = config["observations"]["policy"]
         action_cfg = config["actions"]["joint_pos"]
@@ -1810,6 +1811,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         )
         self.obs_dof_pos_scale = float(policy_obs_cfg["joint_pos"]["scale"])
         self.obs_dof_pos_offset = self.default_dof_pos.copy()
+        self.obs_dof_pos_offset[:LEG_DOF] = deploy_leg_offset.copy()
         self.obs_dof_vel_scale = float(policy_obs_cfg["joint_vel"]["scale"])
         leg_clip = np.asarray(
             _expand_pattern_values(leg_joint_names, clip_cfg, [-100.0, 100.0]),
@@ -1822,7 +1824,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
             dtype=np.float64,
         )
         self.leg_action_scale = train_leg_action_scale.copy()
-        self.leg_action_offset = self.default_dof_pos[:LEG_DOF].copy()
+        self.train_leg_action_offset = self.default_dof_pos[:LEG_DOF].copy()
+        self.leg_action_offset = deploy_leg_offset.copy()
         self.policy_kp = _build_joint_gain_array(joint_names, actuator_cfg, "stiffness")
         self.policy_kd = _build_joint_gain_array(joint_names, actuator_cfg, "damping")
         self.manual_takeover_kp = self.commanded_leg_kp.copy()
@@ -1912,6 +1915,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
             + f" real_deploy_leg_offset: {self.real_deploy_leg_offset},"
             + f"obs_dof_pos_offset: {self.obs_dof_pos_offset},"
             + f" obs_dof_vel_scale: {self.obs_dof_vel_scale}, "
+            + f"train_leg_action_offset: {self.train_leg_action_offset},"
             + f"leg_action_offset: {self.leg_action_offset},"
             + f" train_leg_action_scale: {train_leg_action_scale},"
             + f" leg_action_scale: {self.leg_action_scale},"
