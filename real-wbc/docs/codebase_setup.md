@@ -39,9 +39,9 @@ We customized the devcontainer with the following features:
 
 By default, Go2 is set to sports mode with high-level control by a joystick. If you call Go2's low-level motor API, it will conflict with the internal high-level commands and shake heavily. Therefore, you must lay the dog on the ground and disable its sports mode. If you don't want to disable it through your mobile phone, an easier way is through `unitree_sdk2`. 
 
-We wrote a script `disable_sports_mode_go2.cpp` script using `unitree_sdk2` (available [here](https://github.com/yihuai-gao/unitree_sdk2)) which is installed inside the container. After turning on the container, run 
-"`sh
-~/unitree_sdk2/build/disable_sports_mode_go2 eth0
+We provide a wrapper around the repository-local `unitree_sdk2` `disable_sports_mode_go2.cpp` helper. It builds the helper if the binary is missing, then runs it:
+```sh
+scripts/disable_sports_mode_go2.sh eth0
 ```
 To disable the sports mode immediately. If you are using other devices, change `eth0` to the correct network interface name (under `192.168.123.xxx` segment).
 
