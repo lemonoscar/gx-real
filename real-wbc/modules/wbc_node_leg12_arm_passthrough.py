@@ -244,6 +244,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         logging_dir: str = "logs",
         pose_estimator: str = "iphone",
         disable_arm: bool = False,
+        require_arm: bool = False,
         standup_mode: str = "internal",
         allow_unknown_sport_mode: bool = False,
         live_ready_pose_calibration: bool = True,
@@ -259,6 +260,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.latest_tick = -1
         self.policy_path = policy_path
         self.arm_enabled = not disable_arm
+        self.require_arm = bool(require_arm)
+        self.arm_init_error: Optional[str] = None
         self.standup_mode = standup_mode
         self.allow_unknown_sport_mode = allow_unknown_sport_mode
         self.live_ready_pose_calibration = live_ready_pose_calibration
@@ -520,6 +523,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.arx5_joint_controller = None
         self.arx5_robot_config = None
         self.arx5_controller_config = None
+        self.arx5_config = None
         self.arx5_gain = None
         self.arx5_cmd = None
         # init policy
@@ -612,53 +616,13 @@ class WBCNodeLeg12ArmPassthrough(Node):
         # Set up Arm
         self.gripper_pos_cmd = self.fixed_gripper_cmd
         if self.arm_enabled:
-            self.arx5_robot_config = arx5.RobotConfigFactory.get_instance().get_config(
-                "X5_umi"
-            )
-            self.arx5_robot_config.urdf_path = os.path.join(ARX5_MODELS_DIR, "X5_umi.urdf")
-            self.arx5_controller_config = (
-                arx5.ControllerConfigFactory.get_instance().get_config(
-                    "joint_controller", self.arx5_robot_config.joint_dof
-                )
-            )
-            self.arx5_joint_controller = arx5.Arx5JointController(
-                self.arx5_robot_config,
-                self.arx5_controller_config,
-                "can0",
-            )
-
-            if hasattr(self.arx5_joint_controller, "enable_background_send_recv"):
-                self.arx5_joint_controller.enable_background_send_recv()
-            self.arx5_gain = arx5.Gain(self.arx5_robot_config.joint_dof)
-            self.arx5_config = self.arx5_joint_controller.get_robot_config()
-
-            self.arx5_gain.kp()[:] = self.policy_kp[-6:]
-            self.arx5_gain.kd()[:] = self.policy_kd[-6:]
-            if (self.arx5_gain.kd()[3:] > 2.0).any():
-                logging.error("KD values are too high for top joints")
-                input("Press [Enter] to continue")
-                self.arx5_gain.kd()[3] = 2.0
-            if (self.arx5_gain.kd()[:3] > 10.0).any():
-                logging.info("KD range updated from 0~50 to 0~5")
-                input("Press [Enter] to continue")
-                self.arx5_gain.kd()[:3] /= 10
-
-            self.arx5_gain.gripper_kp = 15.0
-            self.arx5_gain.gripper_kd = self.arx5_controller_config.default_gripper_kd
-            self.arx5_joint_controller.set_gain(self.arx5_gain)
-            arm_state = self.get_arm_joint_state()
-            arm_hold_pos = arm_state.pos().copy()
-            self.latest_arm_pos = arm_hold_pos.copy()
-            self.latest_arm_state_valid = self.is_valid_arm_state(
-                arm_hold_pos,
-                arm_state.vel().copy(),
-            )
-            self.arm_smoothed_pose = arm_hold_pos.copy()
-            self.arm_last_cmd_time = time.monotonic()
-            self.arx5_cmd = arx5.JointState(self.arx5_robot_config.joint_dof)
-            self.arx5_cmd.gripper_pos = 0.0
-            self.arx5_cmd.pos()[:] = arm_hold_pos
-            self.arx5_joint_controller.set_joint_cmd(self.arx5_cmd)
+            try:
+                self.initialize_arm_controller()
+            except Exception as exc:
+                if self.require_arm:
+                    logging.exception("Arm initialization failed and --require-arm was set")
+                    raise
+                self.disable_arm_runtime(str(exc))
         else:
             logging.warning("Arm disabled; running body-only deployment")
         self.start_time = -1.0
@@ -703,8 +667,81 @@ class WBCNodeLeg12ArmPassthrough(Node):
     def reset_arm_passthrough_pose(self):
         self.arm_passthrough_pose = self.requested_arm_hold_pose.copy()
 
+    def initialize_arm_controller(self):
+        self.arx5_robot_config = arx5.RobotConfigFactory.get_instance().get_config("X5_umi")
+        self.arx5_robot_config.urdf_path = os.path.join(ARX5_MODELS_DIR, "X5_umi.urdf")
+        self.arx5_controller_config = (
+            arx5.ControllerConfigFactory.get_instance().get_config(
+                "joint_controller",
+                self.arx5_robot_config.joint_dof,
+            )
+        )
+        self.arx5_joint_controller = arx5.Arx5JointController(
+            self.arx5_robot_config,
+            self.arx5_controller_config,
+            "can0",
+        )
+
+        if hasattr(self.arx5_joint_controller, "enable_background_send_recv"):
+            self.arx5_joint_controller.enable_background_send_recv()
+        self.arx5_gain = arx5.Gain(self.arx5_robot_config.joint_dof)
+        self.arx5_config = self.arx5_joint_controller.get_robot_config()
+
+        self.arx5_gain.kp()[:] = self.policy_kp[-6:]
+        self.arx5_gain.kd()[:] = self.policy_kd[-6:]
+        if (self.arx5_gain.kd()[3:] > 2.0).any():
+            logging.error("KD values are too high for top joints")
+            input("Press [Enter] to continue")
+            self.arx5_gain.kd()[3] = 2.0
+        if (self.arx5_gain.kd()[:3] > 10.0).any():
+            logging.info("KD range updated from 0~50 to 0~5")
+            input("Press [Enter] to continue")
+            self.arx5_gain.kd()[:3] /= 10
+
+        self.arx5_gain.gripper_kp = 15.0
+        self.arx5_gain.gripper_kd = self.arx5_controller_config.default_gripper_kd
+        self.arx5_joint_controller.set_gain(self.arx5_gain)
+        arm_state = self.get_arm_joint_state()
+        arm_hold_pos = arm_state.pos().copy()
+        self.latest_arm_pos = arm_hold_pos.copy()
+        self.latest_arm_state_valid = self.is_valid_arm_state(
+            arm_hold_pos,
+            arm_state.vel().copy(),
+        )
+        self.arm_smoothed_pose = arm_hold_pos.copy()
+        self.arm_last_cmd_time = time.monotonic()
+        self.arx5_cmd = arx5.JointState(self.arx5_robot_config.joint_dof)
+        self.arx5_cmd.gripper_pos = 0.0
+        self.arx5_cmd.pos()[:] = arm_hold_pos
+        self.arx5_joint_controller.set_joint_cmd(self.arx5_cmd)
+
+    def disable_arm_runtime(self, reason: str):
+        self.arm_enabled = False
+        self.arm_init_error = reason
+        self.arx5_solver = None
+        self.arx5_joint_controller = None
+        self.arx5_robot_config = None
+        self.arx5_controller_config = None
+        self.arx5_config = None
+        self.arx5_gain = None
+        self.arx5_cmd = None
+        self.latest_arm_state_valid = False
+        self.latest_arm_pos = self.requested_arm_hold_pose.copy()
+        self.arm_smoothed_pose = self.requested_arm_hold_pose.copy()
+        self.arm_last_cmd_time = -1.0
+        logging.error(
+            "Arm initialization failed; continuing body-only. "
+            "A/X arm buttons will be ignored until ARX5 is available. "
+            "Check X5 power, motor initialization, can0 state, and CAN wiring. error=%s",
+            reason,
+        )
+
     def set_arm_passthrough_pose(self, arm_pose: np.ndarray, source: str) -> bool:
         arm_pose = np.asarray(arm_pose, dtype=np.float64)
+        if not self.arm_enabled:
+            suffix = f": {self.arm_init_error}" if self.arm_init_error else ""
+            logging.warning("Ignoring arm target from %s because arm is disabled%s", source, suffix)
+            return False
         if arm_pose.shape[0] != 6 or not np.isfinite(arm_pose).all():
             logging.warning("Ignoring invalid arm target from %s: %s", source, arm_pose)
             return False

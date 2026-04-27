@@ -76,6 +76,11 @@ if __name__ == "__main__":
     parser.add_argument("--pose_estimator", type=str, default="none")
     parser.add_argument("--disable-arm", action="store_true")
     parser.add_argument(
+        "--require-arm",
+        action="store_true",
+        help="Abort startup if the ARX5 arm cannot be initialized.",
+    )
+    parser.add_argument(
         "--allow-unknown-sport-mode",
         action="store_true",
         help="Allow low-level rollout if sport_mode state has not been received.",
@@ -117,7 +122,7 @@ if __name__ == "__main__":
     rclpy.init(args=None)
     wbc_node = WBCNodeLeg12ArmPassthrough(**vars(args))
     logging.info("Deploy node ready")
-    if not args.disable_arm:
+    if wbc_node.arm_enabled:
         lowstate = wbc_node.get_arm_joint_state()
         if (lowstate.pos() == 0.0).all() and (lowstate.vel() == 0.0).all():
             logging.error("Arm is not connected!")
