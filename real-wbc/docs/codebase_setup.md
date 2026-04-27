@@ -106,13 +106,13 @@ scripts/run_leg12_real.sh --pose_estimator none --standup-mode internal
 ```
 Use `--pose_estimator iphone` or `--pose_estimator mocap` only when that sensor pipeline is already running and verified. Use `--disable-arm` if you want to test the quadruped body without the arm. The default `--standup-mode internal` always runs the repository's internal stand-up sequence with R1, even if the robot was manually stood up first.
 
-The leg low-level position-control Kp is fixed to `100` for internal stand-up, low-level alignment, and policy rollout. The real deployment path uses `real_deploy_leg_offset` as the leg action offset and leg joint-position observation offset, instead of forcing the training default standing pose on the real robot. If `--arm_pose` is provided, that six-joint pose is also used through internal stand-up, alignment, pose test, and policy rollout instead of being replaced by the repository default arm pose.
+The leg low-level position-control gains default to `--leg-kp 100 --leg-kd 5` for internal stand-up, low-level alignment, and policy rollout. The real deployment path starts from `real_deploy_leg_offset`, then, when R1 is pressed from an already standing posture, live-calibrates the current leg pose as the runtime leg action offset and joint-position observation offset. If `--arm_pose` is provided, that six-joint pose is also used through internal stand-up, alignment, pose test, and policy rollout instead of being replaced by the repository default arm pose.
 
 The controller refuses to start low-level rollout until it has seen a usable `sport_mode` state. Use `--allow-unknown-sport-mode` only for controlled diagnostics when that state topic is known to be unavailable.
 
 Joystick key mapping:
 - L1: Emergency stop. Treat this as the primary safety action.
-- R1: In the default flow, align the current mechanical standing posture directly to the real-deploy policy ready pose, `real_deploy_leg_offset`. If the current leg posture is standing-like, the controller skips the crouch phase. In explicit `unitree_*` modes, R1 triggers Unitree's built-in stand-up or recovery-stand action.
+- R1: In the default flow, live-calibrate the current mechanical standing posture as the policy ready pose, then skip the crouch phase. In explicit `unitree_*` modes, R1 triggers Unitree's built-in stand-up or recovery-stand action.
 - L2: After stand-up completes, start low-level alignment and then the RL policy. If a nonzero `--cmd-vx/--cmd-vy/--cmd-yaw` was provided, the command ramps up automatically after takeover.
 - R2: Stop the RL policy and hold the last commanded posture.
 

@@ -54,12 +54,34 @@ if __name__ == "__main__":
     parser.add_argument("--cmd-vy", type=float, default=0.0)
     parser.add_argument("--cmd-yaw", type=float, default=0.0)
     parser.add_argument("--gripper-cmd", type=float, default=0.0)
+    parser.add_argument(
+        "--leg-kp",
+        type=float,
+        default=100.0,
+        help="Low-level leg position Kp used during internal stand-up, handover, and rollout.",
+    )
+    parser.add_argument(
+        "--leg-kd",
+        type=float,
+        default=5.0,
+        help="Low-level leg damping Kd used during internal stand-up, handover, and rollout.",
+    )
     parser.add_argument("--pose_estimator", type=str, default="none")
     parser.add_argument("--disable-arm", action="store_true")
     parser.add_argument(
         "--allow-unknown-sport-mode",
         action="store_true",
         help="Allow low-level rollout if sport_mode state has not been received.",
+    )
+    parser.add_argument(
+        "--no-live-ready-calibration",
+        dest="live_ready_pose_calibration",
+        action="store_false",
+        default=True,
+        help=(
+            "Do not use the current standing leg pose as the runtime policy ready/action "
+            "offset when R1 is pressed in internal mode."
+        ),
     )
     parser.add_argument(
         "--logging-dir",
