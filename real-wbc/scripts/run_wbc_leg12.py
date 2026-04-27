@@ -57,6 +57,11 @@ if __name__ == "__main__":
     parser.add_argument("--pose_estimator", type=str, default="none")
     parser.add_argument("--disable-arm", action="store_true")
     parser.add_argument(
+        "--allow-unknown-sport-mode",
+        action="store_true",
+        help="Allow low-level rollout if sport_mode state has not been received.",
+    )
+    parser.add_argument(
         "--logging-dir",
         type=str,
         default=os.environ.get("GX_REAL_LOG_DIR", DEFAULT_LOG_DIR),

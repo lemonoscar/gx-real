@@ -243,6 +243,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         pose_estimator: str = "iphone",
         disable_arm: bool = False,
         standup_mode: str = "manual",
+        allow_unknown_sport_mode: bool = False,
     ):
         super().__init__("deploy_node")  # type: ignore
         self.replay_speed = replay_speed
@@ -254,12 +255,13 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.policy_path = policy_path
         self.arm_enabled = not disable_arm
         self.standup_mode = standup_mode
+        self.allow_unknown_sport_mode = allow_unknown_sport_mode
         self.default_arm_hold_pose = np.array(
             [-0.8, 2.8, 1.9, -0.4, 0.0, 0.0], dtype=np.float64
         )
         self.policy_takeover_commands = np.array([0.0, 0.0, 0.0], dtype=np.float64)
-        self.policy_move_commands = np.array([0.0, 0.0, 0.0], dtype=np.float64)
-        self.policy_command_ramp_duration = 1e-6
+        self.policy_move_commands = np.array([cmd_vx, cmd_vy, cmd_yaw], dtype=np.float64)
+        self.policy_command_ramp_duration = 1.5
         self.startup_kick_duration = 0.0
         self.startup_kick_leg_delta = np.zeros(LEG_DOF, dtype=np.float64)
         self.arm_passthrough_pose_user_set = arm_pose is not None
@@ -274,7 +276,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.arm_max_velocity = np.array(
             [0.8, 1.2, 1.2, 1.5, 1.5, 1.5], dtype=np.float64
         )
-        self.fixed_commands = np.array([cmd_vx, cmd_vy, cmd_yaw], dtype=np.float64)
+        self.fixed_commands = self.policy_takeover_commands.copy()
         self.fixed_gripper_cmd = float(gripper_cmd)
         self.policy_diag_log_interval = 0.5
         self.last_policy_diag_log_time = -1.0
@@ -309,6 +311,10 @@ class WBCNodeLeg12ArmPassthrough(Node):
             [3.2, 4.5, 4.0, 3.2, 4.5, 4.0, 3.2, 4.8, 4.2, 3.2, 4.8, 4.2],
             dtype=np.float64,
         )
+        self.pose_test_error_warn_threshold = 0.08
+        self.pose_test_settle_warn_time = 0.5
+        self.policy_start_max_leg_error = 0.15
+        self.last_policy_block_log_time = -1.0
         self.sim2sim_action_delay_range = (0, 0)
         self.train_sim2sim_action_delay_range = (0, 0)
         self.sim2sim_action_delay_steps = 0
@@ -823,16 +829,30 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.prev_action[:] = 0.0
         self.reset_sim2sim_action_state()
         self.last_policy_diag_log_time = -1.0
-        logging.info("Starting dog-only startup before rollout")
+        self.last_policy_block_log_time = -1.0
+        logging.info(
+            "Starting dog-only startup before rollout; command ramp %s -> %s over %.2fs"
+            % (
+                self.policy_takeover_commands.tolist(),
+                self.policy_move_commands.tolist(),
+                self.policy_command_ramp_duration,
+            )
+        )
 
     def is_low_level_control_safe(self) -> bool:
-        if self.uses_unitree_standup:
-            return True
         if not self.sport_state_seen:
-            logging.warning(
-                "sport_mode state has not been received; proceeding without a hard sport_mode confirmation"
+            if self.allow_unknown_sport_mode:
+                logging.warning(
+                    "sport_mode state has not been received; proceeding because "
+                    "--allow-unknown-sport-mode was set"
+                )
+                return True
+            logging.error(
+                "Refusing low-level rollout because sport_mode state has not been received. "
+                "Confirm the ROS2 sport state pipeline or pass --allow-unknown-sport-mode "
+                "only for controlled diagnostics."
             )
-            return True
+            return False
         if self.sport_mode != SPORT_MODE_IDLE or self.sport_progress > 0.0:
             logging.error(
                 "Refusing low-level rollout while sport_mode is still active: mode=%d progress=%.3f. "
@@ -1314,20 +1334,46 @@ class WBCNodeLeg12ArmPassthrough(Node):
             current_leg_dq = self.interface_to_policy_leg_order(self.quadruped_dq).copy()
             target_leg_q = self.leg_action_offset.copy()
             leg_q_error = target_leg_q - current_leg_q
+            max_leg_error = float(np.max(np.abs(leg_q_error)))
+            pose_status = "tracking_nominal"
+            if (
+                pose_elapsed >= self.pose_test_duration + self.pose_test_settle_warn_time
+                and max_leg_error > self.pose_test_error_warn_threshold
+            ):
+                pose_status = "tracking_error_high"
             if (
                 self.last_policy_diag_log_time < 0.0
                 or (time.monotonic() - self.last_policy_diag_log_time)
                 >= self.policy_diag_log_interval
             ):
                 logging.info(
-                    "Pose test diag | elapsed=%.2f ratio=%.3f target_leg_q=%s current_leg_q=%s leg_q_error=%s current_leg_dq=%s foot_force=%s"
+                    "Pose test diag | elapsed=%.2f ratio=%.3f status=%s target_leg_q=%s current_leg_q=%s leg_q_error=%s max_leg_error=%.3f current_leg_dq=%s current_tau_est=%s motor_mode=%s lowcmd_leg_q_policy=%s foot_force=%s"
                     % (
                         pose_elapsed,
                         pose_ratio,
+                        pose_status,
                         np.array2string(target_leg_q, precision=3, floatmode="fixed"),
                         np.array2string(current_leg_q, precision=3, floatmode="fixed"),
                         np.array2string(leg_q_error, precision=3, floatmode="fixed"),
+                        max_leg_error,
                         np.array2string(current_leg_dq, precision=3, floatmode="fixed"),
+                        np.array2string(
+                            self.interface_to_policy_leg_order(self.quadruped_tau),
+                            precision=3,
+                            floatmode="fixed",
+                        ),
+                        np.array2string(
+                            self.interface_to_policy_leg_order(
+                                self.quadruped_motor_mode.astype(np.float64)
+                            ),
+                            precision=0,
+                            floatmode="fixed",
+                        ),
+                        np.array2string(
+                            self.latest_lowcmd_leg_q_policy,
+                            precision=3,
+                            floatmode="fixed",
+                        ),
                         np.array2string(self.latest_foot_force, precision=3, floatmode="fixed"),
                     )
                 )
@@ -1412,6 +1458,19 @@ class WBCNodeLeg12ArmPassthrough(Node):
             self.set_gains(kp=self.align_to_policy_kp, kd=self.align_to_policy_kd)
             self.set_motor_position(wbc_action, self.gripper_pos_cmd)
             if align_elapsed >= (self.align_to_policy_duration + self.align_to_policy_hold_time):
+                if max_leg_error > self.policy_start_max_leg_error:
+                    now = time.monotonic()
+                    if (
+                        self.last_policy_block_log_time < 0.0
+                        or (now - self.last_policy_block_log_time) >= self.policy_diag_log_interval
+                    ):
+                        logging.error(
+                            "Waiting before rollout: startup tracking error %.3f rad exceeds %.3f rad. "
+                            "Check sport_mode/low-level ownership and whether current_leg_q follows lowcmd."
+                            % (max_leg_error, self.policy_start_max_leg_error)
+                        )
+                        self.last_policy_block_log_time = now
+                    return
                 logging.info(
                     "Dog-only startup completed; starting rollout with residual errors max=%.3f rear_thigh=%.3f"
                     % (max_leg_error, rear_thigh_error)
@@ -1810,6 +1869,10 @@ class WBCNodeLeg12ArmPassthrough(Node):
             + f" policy_freq: {self.policy_freq},"
             + f" config_path: {config_path},"
             + f" fixed_commands: {self.fixed_commands},"
+            + f" policy_takeover_commands: {self.policy_takeover_commands},"
+            + f" policy_move_commands: {self.policy_move_commands},"
+            + f" policy_command_ramp_duration: {self.policy_command_ramp_duration},"
+            + f" allow_unknown_sport_mode: {self.allow_unknown_sport_mode},"
             + f" fixed_gripper_cmd: {self.fixed_gripper_cmd}"
         )
         return None
