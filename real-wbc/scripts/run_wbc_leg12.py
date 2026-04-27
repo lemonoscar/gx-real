@@ -70,7 +70,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--standup-mode",
         type=str,
-        default="manual",
+        default="internal",
         choices=[
             "manual",
             "pose_test",

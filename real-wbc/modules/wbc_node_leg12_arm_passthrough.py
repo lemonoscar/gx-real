@@ -242,7 +242,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         logging_dir: str = "logs",
         pose_estimator: str = "iphone",
         disable_arm: bool = False,
-        standup_mode: str = "manual",
+        standup_mode: str = "internal",
         allow_unknown_sport_mode: bool = False,
     ):
         super().__init__("deploy_node")  # type: ignore
@@ -259,17 +259,19 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.default_arm_hold_pose = np.array(
             [-0.8, 2.8, 1.9, -0.4, 0.0, 0.0], dtype=np.float64
         )
+        self.commanded_leg_kp = np.ones(LEG_DOF, dtype=np.float64) * 100.0
         self.policy_takeover_commands = np.array([0.0, 0.0, 0.0], dtype=np.float64)
         self.policy_move_commands = np.array([cmd_vx, cmd_vy, cmd_yaw], dtype=np.float64)
         self.policy_command_ramp_duration = 1.5
         self.startup_kick_duration = 0.0
         self.startup_kick_leg_delta = np.zeros(LEG_DOF, dtype=np.float64)
-        self.arm_passthrough_pose_user_set = arm_pose is not None
-        self.arm_passthrough_pose = (
+        self.arm_pose_source = "user" if arm_pose is not None else "default"
+        self.requested_arm_hold_pose = (
             np.array(arm_pose, dtype=np.float64)
             if arm_pose is not None
             else self.default_arm_hold_pose.copy()
         )
+        self.arm_passthrough_pose = self.requested_arm_hold_pose.copy()
         self.arm_smoothed_pose = self.arm_passthrough_pose.copy()
         self.arm_last_cmd_time = -1.0
         self.arm_interp_tau = 0.30
@@ -284,10 +286,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.align_to_policy_start_time = -1.0
         self.align_to_policy_duration = 1.5
         self.align_to_policy_hold_time = 0.4
-        self.align_to_policy_kp = np.array(
-            [75.0, 95.0, 90.0, 75.0, 95.0, 90.0, 75.0, 105.0, 95.0, 75.0, 105.0, 95.0],
-            dtype=np.float64,
-        )
+        self.align_to_policy_kp = self.commanded_leg_kp.copy()
         self.align_to_policy_kd = np.array(
             [3.0, 4.2, 3.8, 3.0, 4.2, 3.8, 3.0, 4.6, 4.0, 3.0, 4.6, 4.0],
             dtype=np.float64,
@@ -303,10 +302,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.pose_test_duration = 1.0
         self.pose_test_leg_start = np.zeros(12, dtype=np.float64)
         self.pose_test_arm_start = np.zeros(6, dtype=np.float64)
-        self.pose_test_kp = np.array(
-            [85.0, 105.0, 100.0, 85.0, 105.0, 100.0, 85.0, 115.0, 105.0, 85.0, 115.0, 105.0],
-            dtype=np.float64,
-        )
+        self.pose_test_kp = self.commanded_leg_kp.copy()
         self.pose_test_kd = np.array(
             [3.2, 4.5, 4.0, 3.2, 4.5, 4.0, 3.2, 4.8, 4.2, 3.2, 4.8, 4.2],
             dtype=np.float64,
@@ -343,7 +339,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.latest_foot_force = np.zeros(4, dtype=np.float64)
         self.latest_lowcmd_leg_q_policy = np.zeros(12, dtype=np.float64)
         self.latest_lowcmd_leg_q_hw = np.zeros(12, dtype=np.float64)
-        self.internal_getup_arm_target = np.zeros(6, dtype=np.float64)
+        self.internal_getup_arm_target = self.requested_arm_hold_pose.copy()
         self.pre_getup_leg_pos = np.array(
             [
                 0.0473455, 1.22187, -2.44375,
@@ -369,16 +365,13 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.getup_crouch_time = 0.6
         self.getup_stand_time = 2.4
         self.getup_hold_time = 0.3
-        self.getup_start_kp = np.ones(12, dtype=np.float64) * 20.0
+        self.getup_start_kp = self.commanded_leg_kp.copy()
         self.getup_start_kd = np.ones(12, dtype=np.float64) * 3.5
-        self.getup_crouch_kp = np.ones(12, dtype=np.float64) * 20.0
+        self.getup_crouch_kp = self.commanded_leg_kp.copy()
         self.getup_crouch_kd = np.ones(12, dtype=np.float64) * 3.5
-        self.getup_stand_kp = np.ones(12, dtype=np.float64) * 50.0
+        self.getup_stand_kp = self.commanded_leg_kp.copy()
         self.getup_stand_kd = np.ones(12, dtype=np.float64) * 3.5
-        self.unitree_takeover_kp = np.array(
-            [60.0, 80.0, 75.0, 60.0, 80.0, 75.0, 60.0, 90.0, 80.0, 60.0, 90.0, 80.0],
-            dtype=np.float64,
-        )
+        self.unitree_takeover_kp = self.commanded_leg_kp.copy()
         self.unitree_takeover_kd = np.array(
             [2.4, 3.5, 3.0, 2.4, 3.5, 3.0, 2.4, 3.8, 3.2, 2.4, 3.8, 3.2],
             dtype=np.float64,
@@ -517,12 +510,21 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.default_dof_pos: np.ndarray
         self.device = device
         self.init_policy(policy_path=policy_path)
-        if not self.arm_passthrough_pose_user_set:
-            self.arm_passthrough_pose = self.default_arm_hold_pose.copy()
+        self.reset_arm_passthrough_pose()
         self.stand_target_leg_pos = self._build_internal_stand_leg_pos(self.leg_action_offset)
         self.pre_getup_leg_pos = self._build_pre_getup_leg_pos(self.stand_target_leg_pos)
         self.policy_handover_leg_start = self.stand_target_leg_pos.copy()
         self.policy_dt_slack = policy_dt_slack
+        logging.info(
+            "Runtime targets | standup_mode=%s arm_pose_source=%s arm_hold_pose=%s commanded_leg_kp=%s move_commands=%s"
+            % (
+                self.standup_mode,
+                self.arm_pose_source,
+                np.array2string(self.requested_arm_hold_pose, precision=3, floatmode="fixed"),
+                np.array2string(self.commanded_leg_kp, precision=1, floatmode="fixed"),
+                np.array2string(self.policy_move_commands, precision=3, floatmode="fixed"),
+            )
+        )
 
         # Create a quick timer for steadier timer interval
         self.policy_timer = self.create_timer(1.0 / 1000.0, self.policy_timer_callback)
@@ -661,6 +663,9 @@ class WBCNodeLeg12ArmPassthrough(Node):
             ],
             dtype=np.float64,
         )
+
+    def reset_arm_passthrough_pose(self):
+        self.arm_passthrough_pose = self.requested_arm_hold_pose.copy()
 
     @property
     def uses_unitree_standup(self) -> bool:
@@ -802,7 +807,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.pose_test_leg_start = self.interface_to_policy_leg_order(self.quadruped_q).copy()
         lowstate = self.get_arm_joint_state()
         self.pose_test_arm_start = lowstate.pos().copy()
-        self.arm_passthrough_pose = self.default_arm_hold_pose.copy()
+        self.reset_arm_passthrough_pose()
         self.last_policy_diag_log_time = -1.0
         logging.info("Starting pose test toward policy stand target")
 
@@ -823,7 +828,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.align_to_policy_leg_start = self.interface_to_policy_leg_order(self.quadruped_q).copy()
         lowstate = self.get_arm_joint_state()
         self.align_to_policy_arm_start = lowstate.pos().copy()
-        self.arm_passthrough_pose = self.default_arm_hold_pose.copy()
+        self.reset_arm_passthrough_pose()
         self.fixed_commands[:] = self.policy_takeover_commands
         self.policy_motion_started = False
         self.prev_action[:] = 0.0
@@ -1770,9 +1775,9 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.leg_action_offset = self.default_dof_pos[:LEG_DOF].copy()
         self.policy_kp = _build_joint_gain_array(joint_names, actuator_cfg, "stiffness")
         self.policy_kd = _build_joint_gain_array(joint_names, actuator_cfg, "damping")
-        self.manual_takeover_kp = self.policy_kp[:LEG_DOF].copy()
+        self.manual_takeover_kp = self.commanded_leg_kp.copy()
         self.manual_takeover_kd = self.policy_kd[:LEG_DOF].copy()
-        self.deploy_policy_kp = self.policy_kp[:LEG_DOF].copy()
+        self.deploy_policy_kp = self.commanded_leg_kp.copy()
         self.deploy_policy_kd = self.policy_kd[:LEG_DOF].copy()
         delay_cfg = config.get("sim2sim_action_delay_range", (0, 0))
         self.train_sim2sim_action_delay_range = (
@@ -1847,6 +1852,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         logging.info("starting to play policy")
         logging.info(
             f"kp: {self.policy_kp}, kd: {self.policy_kd}, torque_limits: {torque_limits},"
+            + f" commanded_leg_kp: {self.commanded_leg_kp},"
             + f" deploy_policy_kp: {self.deploy_policy_kp},"
             + f" deploy_policy_kd: {self.deploy_policy_kd},"
             + f" manual_takeover_kp: {self.manual_takeover_kp},"
