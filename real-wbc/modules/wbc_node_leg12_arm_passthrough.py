@@ -245,8 +245,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
         standup_mode: str = "internal",
         allow_unknown_sport_mode: bool = False,
         live_ready_pose_calibration: bool = True,
-        leg_kp: float = 120.0,
-        leg_kd: float = 6.0,
+        leg_kp: float = 200.0,
+        leg_kd: float = 10.0,
     ):
         super().__init__("deploy_node")  # type: ignore
         self.replay_speed = replay_speed
@@ -293,6 +293,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.fixed_gripper_cmd = float(gripper_cmd)
         self.policy_diag_log_interval = 0.5
         self.last_policy_diag_log_time = -1.0
+        self.arm_diag_log_interval = 0.5
+        self.last_arm_diag_log_time = -1.0
         self.align_to_policy_active = False
         self.align_to_policy_start_time = -1.0
         self.align_to_policy_duration = 1.5
@@ -1356,14 +1358,56 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.latest_lowcmd_leg_q_hw = leg_q.copy()
         # prepare arm action
         if self.arm_enabled and self.arx5_robot_config is not None:
-            target_arm_q = self._smooth_arm_command(q[12:])
+            target_arm_q = q[12:].copy()
+            smoothed_arm_q = self._smooth_arm_command(target_arm_q)
             self.arx5_cmd = arx5.JointState(self.arx5_robot_config.joint_dof)
             self.arx5_cmd.gripper_pos = gripper_pos
-            self.arx5_cmd.pos()[:] = target_arm_q
+            self.arx5_cmd.pos()[:] = smoothed_arm_q
             self.arx5_joint_controller.set_joint_cmd(self.arx5_cmd)
+            self.log_arm_diag(target_arm_q, smoothed_arm_q)
         for i in range(LEG_DOF):
             self.motor_cmd[i].q = float(leg_q[i])
         self.cmd_msg.motor_cmd = self.motor_cmd.copy()
+
+    def control_phase_label(self) -> str:
+        if self.start_policy:
+            return "policy"
+        if self.align_to_policy_active:
+            return "alignment"
+        if self.pose_test_active:
+            return "pose_test"
+        if self.start_time != -1.0:
+            return "standup"
+        return "idle"
+
+    def log_arm_diag(self, target_arm_q: np.ndarray, smoothed_arm_q: np.ndarray):
+        now = time.monotonic()
+        if (
+            self.last_arm_diag_log_time >= 0.0
+            and (now - self.last_arm_diag_log_time) < self.arm_diag_log_interval
+        ):
+            return
+        self.last_arm_diag_log_time = now
+
+        current_arm_q = self.latest_arm_pos.copy()
+        if self.latest_arm_state_valid:
+            target_error = target_arm_q - current_arm_q
+            cmd_error = smoothed_arm_q - current_arm_q
+        else:
+            target_error = np.full(6, np.nan, dtype=np.float64)
+            cmd_error = np.full(6, np.nan, dtype=np.float64)
+        logging.info(
+            "Arm diag | phase=%s state_valid=%s target_arm_q=%s current_arm_q=%s smoothed_cmd=%s target_error=%s cmd_error=%s"
+            % (
+                self.control_phase_label(),
+                self.latest_arm_state_valid,
+                np.array2string(target_arm_q, precision=3, floatmode="fixed"),
+                np.array2string(current_arm_q, precision=3, floatmode="fixed"),
+                np.array2string(smoothed_arm_q, precision=3, floatmode="fixed"),
+                np.array2string(target_error, precision=3, floatmode="fixed"),
+                np.array2string(cmd_error, precision=3, floatmode="fixed"),
+            )
+        )
 
     def _smooth_arm_command(self, target: np.ndarray) -> np.ndarray:
         target = np.asarray(target, dtype=np.float64)
