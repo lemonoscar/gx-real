@@ -50,6 +50,26 @@ if __name__ == "__main__":
     )
     parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument("--arm_pose", type=float, nargs=6, default=None)
+    parser.add_argument(
+        "--arm-command-mode",
+        choices=["joint", "cartesian"],
+        default="joint",
+        help="Use joint targets from --arm_pose or decode a TCP pose from --arm-tcp-pose.",
+    )
+    parser.add_argument(
+        "--arm-tcp-pose",
+        type=float,
+        nargs=7,
+        default=None,
+        metavar=("X", "Y", "Z", "QW", "QX", "QY", "QZ"),
+        help="Target TCP pose as x y z qw qx qy qz for cartesian arm command mode.",
+    )
+    parser.add_argument(
+        "--arm-tcp-frame",
+        choices=["base", "world"],
+        default="base",
+        help="Frame for --arm-tcp-pose.",
+    )
     parser.add_argument("--button-arm-pose", type=float, nargs=6, default=None)
     parser.add_argument(
         "--arm-reset-pose",

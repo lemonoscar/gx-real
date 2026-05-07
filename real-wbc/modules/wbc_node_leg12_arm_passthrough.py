@@ -16,6 +16,10 @@ from modules.common import (
     VEL_STOP_F,
     torque_limits,
 )
+from modules.arm_cartesian_decoder import (
+    ArmCartesianCommandDecoder,
+    ArmCartesianDecodeResult,
+)
 from transforms3d import affines, quaternions, euler
 
 MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -228,6 +232,9 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self,
         policy_path: str,
         arm_pose: Optional[List[float]] = None,
+        arm_command_mode: str = "joint",
+        arm_tcp_pose: Optional[List[float]] = None,
+        arm_tcp_frame: str = "base",
         cmd_vx: float = 0.0,
         cmd_vy: float = 0.0,
         cmd_yaw: float = 0.0,
@@ -262,6 +269,29 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.arm_enabled = not disable_arm
         self.require_arm = bool(require_arm)
         self.arm_init_error: Optional[str] = None
+        self.arm_command_mode = arm_command_mode.lower()
+        if self.arm_command_mode not in {"joint", "cartesian"}:
+            raise ValueError(
+                f"Invalid arm_command_mode={arm_command_mode!r}; expected joint or cartesian"
+            )
+        self.arm_tcp_frame = arm_tcp_frame.lower()
+        if self.arm_tcp_frame not in {"base", "world"}:
+            raise ValueError(
+                f"Invalid arm_tcp_frame={arm_tcp_frame!r}; expected base or world"
+            )
+        self.requested_arm_tcp_pose: Optional[np.ndarray]
+        if arm_tcp_pose is None:
+            self.requested_arm_tcp_pose = None
+        else:
+            parsed_tcp_pose = np.asarray(arm_tcp_pose, dtype=np.float64).reshape(-1)
+            if parsed_tcp_pose.shape[0] == 7 and np.isfinite(parsed_tcp_pose).all():
+                self.requested_arm_tcp_pose = parsed_tcp_pose.copy()
+            else:
+                self.requested_arm_tcp_pose = None
+                logging.warning(
+                    "Ignoring invalid --arm-tcp-pose: %s",
+                    parsed_tcp_pose,
+                )
         self.standup_mode = standup_mode
         self.allow_unknown_sport_mode = allow_unknown_sport_mode
         self.live_ready_pose_calibration = live_ready_pose_calibration
@@ -520,6 +550,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.quadruped_kd = np.zeros(12)
         self.init_arm_pos = np.zeros(6, dtype=np.float64)
         self.arx5_solver = None
+        self.arm_cartesian_decoder: Optional[ArmCartesianCommandDecoder] = None
         self.arx5_joint_controller = None
         self.arx5_robot_config = None
         self.arx5_controller_config = None
@@ -626,14 +657,30 @@ class WBCNodeLeg12ArmPassthrough(Node):
         else:
             logging.warning("Arm disabled; running body-only deployment")
         self.start_time = -1.0
-        if self.arm_enabled and self.pose_estimator in ["iphone", "mocap", "mocap_gripper"]:
+        if self.arm_enabled:
             self.arx5_solver = arx5.Arx5Solver(
                 os.path.join(ARX5_MODELS_DIR, "X5_umi.urdf"),
                 self.arx5_robot_config.joint_dof,
-                np.zeros(self.arx5_robot_config.joint_dof, dtype=np.float64),
-                np.zeros(self.arx5_robot_config.joint_dof, dtype=np.float64),
+                self.arx5_robot_config.joint_pos_min,
+                self.arx5_robot_config.joint_pos_max,
             )
             print("Arx5Solver initialized")
+            self.arm_cartesian_decoder = ArmCartesianCommandDecoder(
+                solver=self.arx5_solver,
+                joint_pos_min=self.arx5_robot_config.joint_pos_min,
+                joint_pos_max=self.arx5_robot_config.joint_pos_max,
+                arm2base=self.arm2base,
+                tcp2ee=self.tcp2ee,
+                max_joint_delta=0.75,
+                max_joint_velocity=self.arm_max_velocity,
+                smoothing_alpha=1.0,
+            )
+            self.apply_initial_cartesian_arm_command()
+        elif self.arm_command_mode == "cartesian":
+            logging.warning(
+                "Cartesian arm command mode requested, but arm is disabled; "
+                "keeping the joint hold target"
+            )
         # Reaching variables
         self.init_pos_err_tolerance = init_pos_err_tolerance
         self.init_orn_err_tolerance = init_orn_err_tolerance
@@ -666,6 +713,63 @@ class WBCNodeLeg12ArmPassthrough(Node):
 
     def reset_arm_passthrough_pose(self):
         self.arm_passthrough_pose = self.requested_arm_hold_pose.copy()
+
+    def apply_initial_cartesian_arm_command(self):
+        if self.arm_command_mode != "cartesian":
+            return
+        if self.requested_arm_tcp_pose is None:
+            logging.warning(
+                "Cartesian arm command mode requested without a valid --arm-tcp-pose; "
+                "keeping the joint hold target"
+            )
+            return
+        if (
+            not self.arm_enabled
+            or self.arx5_solver is None
+            or self.arm_cartesian_decoder is None
+        ):
+            logging.warning(
+                "Cartesian arm command mode requested, but ARX5 solver is unavailable; "
+                "keeping the joint hold target"
+            )
+            return
+
+        base_pose = None
+        if self.arm_tcp_frame == "world":
+            if self.pose_estimator == "none" or self.robot_pose_tick == -1:
+                logging.warning(
+                    "Cartesian world-frame target requires a current robot/base pose; "
+                    "keeping the joint hold target"
+                )
+                return
+            base_pose = self.robot_pose.copy()
+
+        arm_state = self.get_arm_joint_state()
+        current_arm_q = arm_state.pos().copy()
+        current_arm_vel = arm_state.vel().copy()
+        if not self.is_valid_arm_state(current_arm_q, current_arm_vel):
+            if self.latest_arm_state_valid:
+                current_arm_q = self.latest_arm_pos.copy()
+            else:
+                current_arm_q = self.arm_passthrough_pose.copy()
+
+        result = self.arm_cartesian_decoder.decode(
+            self.requested_arm_tcp_pose,
+            target_frame=self.arm_tcp_frame,
+            current_joint_pos=current_arm_q,
+            previous_command_joint_pos=self.arm_passthrough_pose,
+            base_pose=base_pose,
+        )
+        self.log_arm_cartesian_decode_result(result)
+
+        decoded_arm_q = result.joint_command.copy()
+        self.requested_arm_hold_pose = decoded_arm_q.copy()
+        self.internal_getup_arm_target = decoded_arm_q.copy()
+        self.set_arm_passthrough_pose(
+            decoded_arm_q,
+            "cartesian_cli" if result.success else "cartesian_cli_fallback",
+            log_update=False,
+        )
 
     def initialize_arm_controller(self):
         self.arx5_robot_config = arx5.RobotConfigFactory.get_instance().get_config("X5_umi")
@@ -736,7 +840,63 @@ class WBCNodeLeg12ArmPassthrough(Node):
             reason,
         )
 
-    def set_arm_passthrough_pose(self, arm_pose: np.ndarray, source: str) -> bool:
+    def log_arm_cartesian_decode_result(
+        self,
+        result: ArmCartesianDecodeResult,
+    ):
+        diag = result.diagnostics
+        log_fn = logging.info if result.success else logging.warning
+        log_fn(
+            "Arm Cartesian decode | frame=%s target_tcp_pose=%s target_tcp_pose_base=%s "
+            "ik_status=%s(%s) solver=%s decoded_joint_target=%s "
+            "fk_position_error=%.5f fk_orientation_error=%.5f "
+            "command_fk_position_error=%.5f command_fk_orientation_error=%.5f "
+            "fallback=%s fallback_reason=%s joint_limit_clipped=%s "
+            "delta_limited=%s smoothed=%s workspace_clipped=%s workspace_rejected=%s"
+            % (
+                diag.target_frame,
+                (
+                    "None"
+                    if diag.requested_tcp_pose is None
+                    else np.array2string(
+                        diag.requested_tcp_pose,
+                        precision=4,
+                        floatmode="fixed",
+                    )
+                ),
+                (
+                    "None"
+                    if diag.target_tcp_pose_base is None
+                    else np.array2string(
+                        diag.target_tcp_pose_base,
+                        precision=4,
+                        floatmode="fixed",
+                    )
+                ),
+                diag.ik_status,
+                diag.ik_status_name,
+                diag.solver_method,
+                np.array2string(result.joint_command, precision=4, floatmode="fixed"),
+                diag.fk_position_error,
+                diag.fk_orientation_error,
+                diag.command_fk_position_error,
+                diag.command_fk_orientation_error,
+                diag.used_fallback,
+                diag.fallback_reason,
+                diag.joint_limit_clipped,
+                diag.delta_limited,
+                diag.smoothed,
+                diag.workspace_clipped,
+                diag.workspace_rejected,
+            )
+        )
+
+    def set_arm_passthrough_pose(
+        self,
+        arm_pose: np.ndarray,
+        source: str,
+        log_update: bool = True,
+    ) -> bool:
         arm_pose = np.asarray(arm_pose, dtype=np.float64)
         if not self.arm_enabled:
             suffix = f": {self.arm_init_error}" if self.arm_init_error else ""
@@ -747,13 +907,16 @@ class WBCNodeLeg12ArmPassthrough(Node):
             return False
         self.arm_passthrough_pose = arm_pose.copy()
         self.last_arm_diag_log_time = -1.0
-        logging.info(
-            "Arm target update | source=%s target_arm_q=%s"
-            % (
-                source,
-                np.array2string(self.arm_passthrough_pose, precision=3, floatmode="fixed"),
+        if log_update:
+            logging.info(
+                "Arm target update | source=%s target_arm_q=%s"
+                % (
+                    source,
+                    np.array2string(
+                        self.arm_passthrough_pose, precision=3, floatmode="fixed"
+                    ),
+                )
             )
-        )
         return True
 
     def is_valid_arm_state(
