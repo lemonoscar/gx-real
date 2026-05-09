@@ -41,7 +41,26 @@ echo "[gx-real] model=${MODEL} interface=${CAN_IF}"
 echo "[gx-real] models=${GX_REAL_ARX5_MODELS_DIR}"
 echo "[gx-real] do not run run_leg12_real.sh at the same time"
 
-exec "${GX_REAL_PYTHON_BIN}" \
+set +e
+"${GX_REAL_PYTHON_BIN}" \
   "${GX_REAL_ROOT}/arx5-sdk/python/examples/spacemouse_teleop.py" \
   "${MODEL}" \
   "${CAN_IF}"
+status="$?"
+set -e
+
+if [[ "${status}" -ne 0 ]]; then
+  echo "[gx-real] arm-only SpaceMouse test exited with status ${status}" >&2
+  echo "[gx-real] if the error is 'None of the motors are initialized', ${CAN_IF} is up but X5 motors did not reply" >&2
+  echo "[gx-real] check arm power, e-stop, CAN-H/CAN-L/GND wiring, termination, CAN adapter selection, and bitrate" >&2
+  if command -v ip >/dev/null 2>&1; then
+    ip -s -d link show "${CAN_IF}" >&2 || true
+  fi
+  if command -v candump >/dev/null 2>&1; then
+    echo "[gx-real] passive probe: timeout 3s candump ${CAN_IF}" >&2
+  else
+    echo "[gx-real] install can-utils for candump/cansend: sudo apt install -y can-utils" >&2
+  fi
+fi
+
+exit "${status}"

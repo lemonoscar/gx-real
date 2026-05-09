@@ -557,7 +557,7 @@ ros2 topic echo lf/sportmodestate
 - 程序启动后机器人不动：看到 `Deploy node ready` 后还需要确认 sport mode 已关闭，按 `R1` 起身，等起身完成后按 `L2`。
 - `sport_mode state has not been received`：ROS2 sport state 链路不可用，优先查网络和消息包。只有受控诊断时才加 `--allow-unknown-sport-mode`。
 - `sport_mode is still active`：先运行 `scripts/disable_sports_mode_go2.sh eth0`。
-- `None of the motors are initialized`：`can0` 可能存在，但 X5 电机没有反馈。检查电源、CAN 线、电机初始化和是否误用 `--disable-arm`。
+- `None of the motors are initialized`：`can0` 可能存在，但 X5 电机没有反馈。检查电源、急停、CAN-H/CAN-L/GND、终端电阻、CANable 是否接到 X5 总线、波特率是否为 1Mbps，以及是否误用 `--disable-arm`。用 `ip -s -d link show can0` 看 SDK 运行后是否只有 TX 没有 RX。
 - `commands` 非零但狗不动：看 `Policy diag` 里的 `lowcmd_kp`、`lowcmd_leg_q_policy`、`current_leg_q` 和 `leg_q_error`，优先排查低层控制权、sport mode、力矩限制、电池和关节顺序。
 
 ## 12. 安全规则
