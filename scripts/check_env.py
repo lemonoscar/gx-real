@@ -92,6 +92,15 @@ def main() -> int:
                     "[gx-real] hint: conda is active; run 'conda deactivate' before building/running ROS2 on Jetson.",
                     file=sys.stderr,
                 )
+        if "PyCObject_AsVoidPtr" in exc_text:
+            print(
+                "[gx-real] hint: the PyPI 'spnav' package is incompatible with this Python3/aarch64 environment.",
+                file=sys.stderr,
+            )
+            print(
+                "[gx-real] hint: run '/usr/bin/python3 -m pip uninstall -y spnav' and install the pinned Cheng Chi fork from README.md.",
+                file=sys.stderr,
+            )
         return 1
 
     print("[gx-real] python imports OK")
