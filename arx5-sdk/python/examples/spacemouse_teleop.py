@@ -23,21 +23,27 @@ import time
 import click
 
 
-def start_teleop_recording(controller: Arx5CartesianController):
+def start_teleop_recording(
+    controller: Arx5CartesianController,
+    ori_speed: float,
+    pos_speed: float,
+    gripper_speed: float,
+    deadzone_threshold: float,
+    window_size: int,
+    cmd_dt: float,
+    preview_time: float,
+    workspace_xyz,
+    workspace_rpy,
+):
 
-    ori_speed = 1.5
-    pos_speed = 0.8
-    gripper_speed = 0.04
     # For earlier spacemouse versions (wired version), the readout might be not zero even after it is released
     # If you are using the wireless 3Dconnexion spacemouse, you can set the deadzone_threshold to 0.0 for better sensitivity
-    deadzone_threshold = 0.1
-    target_pose_6d = controller.get_home_pose()
+    home_pose_6d = controller.get_home_pose().copy()
+    target_pose_6d = home_pose_6d.copy()
+    workspace_xyz = np.asarray(workspace_xyz, dtype=float)
+    workspace_rpy = np.asarray(workspace_rpy, dtype=float)
 
     target_gripper_pos = 0.0
-
-    window_size = 3
-    cmd_dt = 0.01
-    preview_time = 0.05  # Each trajectory command is 0.15s ahead of the current time
 
     UPDATE_TRAJ = True
     # False: only override single points with position control
@@ -108,7 +114,8 @@ def start_teleop_recording(controller: Arx5CartesianController):
 
                     controller.reset_to_home()
                     config = controller.get_robot_config()
-                    target_pose_6d = controller.get_home_pose()
+                    home_pose_6d = controller.get_home_pose().copy()
+                    target_pose_6d = home_pose_6d.copy()
                     target_gripper_pos = 0.0
                     loop_cnt = 0
                     start_time = time.monotonic()
@@ -121,8 +128,19 @@ def start_teleop_recording(controller: Arx5CartesianController):
                 else:
                     gripper_cmd = 0
                 # print(state, target_gripper_pos)
-                target_pose_6d[:3] += state[:3] * pos_speed * cmd_dt
-                target_pose_6d[3:] += state[3:] * ori_speed * cmd_dt
+                proposed_pose_6d = target_pose_6d.copy()
+                proposed_pose_6d[:3] += state[:3] * pos_speed * cmd_dt
+                proposed_pose_6d[3:] += state[3:] * ori_speed * cmd_dt
+                target_pose_6d[:3] = np.clip(
+                    proposed_pose_6d[:3],
+                    home_pose_6d[:3] - workspace_xyz,
+                    home_pose_6d[:3] + workspace_xyz,
+                )
+                target_pose_6d[3:] = np.clip(
+                    proposed_pose_6d[3:],
+                    home_pose_6d[3:] - workspace_rpy,
+                    home_pose_6d[3:] + workspace_rpy,
+                )
                 target_gripper_pos += gripper_cmd * gripper_speed * cmd_dt
                 if target_gripper_pos >= robot_config.gripper_width:
                     target_gripper_pos = robot_config.gripper_width
@@ -159,7 +177,42 @@ def start_teleop_recording(controller: Arx5CartesianController):
 @click.command()
 @click.argument("model")  # ARX arm model: X5 or L5
 @click.argument("interface")  # can bus name (can0 etc.)
-def main(model: str, interface: str):
+@click.option("--pos-speed", default=0.02, show_default=True, help="Max Cartesian translation speed in m/s.")
+@click.option("--ori-speed", default=0.06, show_default=True, help="Max Cartesian rotation speed in rad/s.")
+@click.option("--gripper-speed", default=0.01, show_default=True, help="Gripper command speed in m/s.")
+@click.option("--deadzone", default=0.30, show_default=True, help="SpaceMouse normalized deadzone.")
+@click.option("--window-size", default=8, show_default=True, help="Moving-average filter window.")
+@click.option("--cmd-dt", default=0.02, show_default=True, help="Command loop period in seconds.")
+@click.option("--preview-time", default=0.08, show_default=True, help="Trajectory preview time in seconds.")
+@click.option(
+    "--workspace-xyz",
+    nargs=3,
+    type=float,
+    default=(0.05, 0.05, 0.04),
+    show_default=True,
+    help="XYZ limits around home pose in meters.",
+)
+@click.option(
+    "--workspace-rpy",
+    nargs=3,
+    type=float,
+    default=(0.15, 0.15, 0.15),
+    show_default=True,
+    help="RPY limits around home pose in radians.",
+)
+def main(
+    model: str,
+    interface: str,
+    pos_speed: float,
+    ori_speed: float,
+    gripper_speed: float,
+    deadzone: float,
+    window_size: int,
+    cmd_dt: float,
+    preview_time: float,
+    workspace_xyz,
+    workspace_rpy,
+):
 
     robot_config = RobotConfigFactory.get_instance().get_config(model)
     sdk_root = os.path.dirname(ROOT_DIR)
@@ -182,8 +235,24 @@ def main(model: str, interface: str):
     gain = Gain(robot_config.joint_dof)
     controller.set_log_level(LogLevel.DEBUG)
     np.set_printoptions(precision=4, suppress=True)
+    print(
+        "SpaceMouse safety limits: "
+        f"pos_speed={pos_speed}, ori_speed={ori_speed}, deadzone={deadzone}, "
+        f"workspace_xyz={workspace_xyz}, workspace_rpy={workspace_rpy}"
+    )
     try:
-        start_teleop_recording(controller)
+        start_teleop_recording(
+            controller,
+            ori_speed=ori_speed,
+            pos_speed=pos_speed,
+            gripper_speed=gripper_speed,
+            deadzone_threshold=deadzone,
+            window_size=window_size,
+            cmd_dt=cmd_dt,
+            preview_time=preview_time,
+            workspace_xyz=workspace_xyz,
+            workspace_rpy=workspace_rpy,
+        )
     except KeyboardInterrupt:
         print(f"Teleop recording is terminated. Resetting to home.")
         controller.reset_to_home()

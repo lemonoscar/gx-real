@@ -6,6 +6,13 @@ GX_REAL_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 MODEL="${1:-X5_umi}"
 CAN_IF="${2:-can0}"
+if [[ "$#" -gt 0 ]]; then
+  shift
+fi
+if [[ "$#" -gt 0 ]]; then
+  shift
+fi
+EXTRA_ARGS=("$@")
 
 if pgrep -af '[r]un_wbc_leg12.py|[r]un_leg12_real.sh|[r]un_wbc.py' >/dev/null; then
   echo "[gx-real] refusing to start arm-only SpaceMouse test while a WBC/deploy node is running" >&2
@@ -40,12 +47,16 @@ echo "[gx-real] starting arm-only SpaceMouse test"
 echo "[gx-real] model=${MODEL} interface=${CAN_IF}"
 echo "[gx-real] models=${GX_REAL_ARX5_MODELS_DIR}"
 echo "[gx-real] do not run run_leg12_real.sh at the same time"
+if [[ "${#EXTRA_ARGS[@]}" -gt 0 ]]; then
+  echo "[gx-real] extra args=${EXTRA_ARGS[*]}"
+fi
 
 set +e
 "${GX_REAL_PYTHON_BIN}" \
   "${GX_REAL_ROOT}/arx5-sdk/python/examples/spacemouse_teleop.py" \
   "${MODEL}" \
-  "${CAN_IF}"
+  "${CAN_IF}" \
+  "${EXTRA_ARGS[@]}"
 status="$?"
 set -e
 
