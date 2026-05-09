@@ -15,9 +15,15 @@ fi
 
 # shellcheck disable=SC1091
 source "${GX_REAL_ROOT}/scripts/setup_env.sh"
+export GX_REAL_ARX5_MODELS_DIR="${GX_REAL_ROOT}/arx5-sdk/models"
 
 if ! ip link show "${CAN_IF}" >/dev/null 2>&1; then
   echo "[gx-real] missing ${CAN_IF}; run scripts/setup_arx_can.sh first" >&2
+  exit 1
+fi
+
+if [[ ! -f "${GX_REAL_ARX5_MODELS_DIR}/${MODEL}.urdf" ]]; then
+  echo "[gx-real] missing ARX5 URDF: ${GX_REAL_ARX5_MODELS_DIR}/${MODEL}.urdf" >&2
   exit 1
 fi
 
@@ -32,6 +38,7 @@ fi
 
 echo "[gx-real] starting arm-only SpaceMouse test"
 echo "[gx-real] model=${MODEL} interface=${CAN_IF}"
+echo "[gx-real] models=${GX_REAL_ARX5_MODELS_DIR}"
 echo "[gx-real] do not run run_leg12_real.sh at the same time"
 
 exec "${GX_REAL_PYTHON_BIN}" \

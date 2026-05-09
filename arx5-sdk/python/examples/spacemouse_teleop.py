@@ -162,6 +162,14 @@ def start_teleop_recording(controller: Arx5CartesianController):
 def main(model: str, interface: str):
 
     robot_config = RobotConfigFactory.get_instance().get_config(model)
+    sdk_root = os.path.dirname(ROOT_DIR)
+    models_dir = os.environ.get("GX_REAL_ARX5_MODELS_DIR", os.path.join(sdk_root, "models"))
+    urdf_path = os.path.join(models_dir, f"{model}.urdf")
+    if os.path.isfile(urdf_path):
+        robot_config.urdf_path = urdf_path
+        print(f"Using ARX5 URDF: {robot_config.urdf_path}")
+    else:
+        print(f"Warning: ARX5 URDF not found at {urdf_path}; using SDK default.")
     controller_config = ControllerConfigFactory.get_instance().get_config(
         "cartesian_controller", robot_config.joint_dof
     )

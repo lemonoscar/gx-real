@@ -551,6 +551,7 @@ ros2 topic echo lf/sportmodestate
 - `Could not import 'rosidl_typesupport_c' for package 'robot_state'`：通常是 Jetson 上 `robot_state` 的生成消息还没按最新代码 clean rebuild，或当前 shell 还在 conda `base`。先 `conda deactivate`，再删除 `real-wbc/ros2/build/robot_state` 和 `real-wbc/ros2/install/robot_state` 后重新 `colcon build --packages-select robot_state`。
 - `check_env.sh --spacemouse` 失败在 `spnav` 或 `atomics`：安装 SpaceMouse Python 依赖；失败在 `spacenavd` 或 `libspnav`：安装/启动系统服务。
 - `undefined symbol: PyCObject_AsVoidPtr`：卸载 PyPI 版 `spnav`，安装 README 中固定的 Cheng Chi fork。
+- 单独机械臂测试失败在 `Error document empty` / `Failed to get chain from kdl tree`：ARX5 Python 扩展可能从 pip 安装目录加载，默认找不到仓库里的 URDF。更新到最新代码后，`scripts/run_arm_spacemouse_test.sh` 会显式把 `arx5-sdk/models` 传给示例。
 - SpaceMouse 没反应：确认接收器插在 Jetson 上，`spacenavd` 正在运行，且没有直接运行 ARX5 SDK 的 SpaceMouse 示例抢设备或抢 `can0`。
 - 单独机械臂测试前不要运行 `run_leg12_real.sh`。`scripts/run_arm_spacemouse_test.sh` 会直接控制 X5，和 WBC 主节点互斥。
 - 程序启动后机器人不动：看到 `Deploy node ready` 后还需要确认 sport mode 已关闭，按 `R1` 起身，等起身完成后按 `L2`。
