@@ -59,6 +59,12 @@ from unitree_go.msg import (
 import time
 from geometry_msgs.msg import PoseStamped
 from rclpy.time import Time
+from robot_state.msg import (
+    TeleopBaseCommand,
+    TeleopEEFDelta,
+    TeleopGripperCommand,
+    TeleopMode,
+)
 
 
 def quat_rotate_inv(q: np.ndarray, v: np.ndarray):
@@ -84,6 +90,10 @@ SPORT_API_ID_RECOVERYSTAND = 1006
 SPORT_MODE_IDLE = 0
 SPORT_MODE_BALANCE_STAND = 1
 SPORT_MODE_RECOVERY_STAND = 8
+TELEOP_MODE_ARM = 0
+TELEOP_MODE_BASE = 1
+GRIPPER_MIN = 0.0
+GRIPPER_MAX = 0.08
 
 INTERFACE_LEG_JOINT_NAMES = [
     "FR_hip_joint",
@@ -209,6 +219,10 @@ def _smoothstep(ratio: float) -> float:
 
 def _blend_arrays(start: np.ndarray, end: np.ndarray, ratio: float) -> np.ndarray:
     return start * (1.0 - ratio) + end * ratio
+
+
+def _wrap_to_pi(value: np.ndarray) -> np.ndarray:
+    return (value + np.pi) % (2.0 * np.pi) - np.pi
 
 
 class _ZeroArmState:
@@ -340,6 +354,37 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.policy_command_ramp_start_time = time.monotonic()
         self.policy_command_current_ramp_duration = self.policy_command_ramp_duration
         self.fixed_gripper_cmd = float(gripper_cmd)
+        self.teleop_mode = TELEOP_MODE_ARM
+        self.teleop_watchdog_timeout = 0.25
+        self.teleop_log_interval = 0.5
+        self.teleop_base_target = np.zeros(3, dtype=np.float64)
+        self.teleop_base_max_velocity = np.array([0.5, 0.35, 0.8], dtype=np.float64)
+        self.teleop_base_max_accel = np.array([1.0, 1.0, 1.6], dtype=np.float64)
+        self.teleop_base_last_time = -1.0
+        self.teleop_base_filter_time = time.monotonic()
+        self.teleop_eef_target_pose6d: Optional[np.ndarray] = None
+        self.teleop_eef_anchor_pose6d: Optional[np.ndarray] = None
+        self.teleop_eef_workspace_half_extent = np.array(
+            [0.35, 0.35, 0.25], dtype=np.float64
+        )
+        self.teleop_eef_rotation_half_extent = np.array(
+            [1.2, 1.2, 1.2], dtype=np.float64
+        )
+        self.teleop_eef_max_linear_velocity = np.array(
+            [0.12, 0.12, 0.12], dtype=np.float64
+        )
+        self.teleop_eef_max_angular_velocity = np.array(
+            [0.5, 0.5, 0.5], dtype=np.float64
+        )
+        self.teleop_eef_last_time = -1.0
+        self.teleop_eef_last_apply_time = -1.0
+        self.teleop_gripper_velocity = 0.0
+        self.teleop_gripper_max_velocity = 0.04
+        self.teleop_gripper_last_time = -1.0
+        self.teleop_gripper_update_time = time.monotonic()
+        self.last_teleop_watchdog_log_time = -1.0
+        self.last_teleop_ik_warn_time = -1.0
+        self.last_teleop_invalid_log_time = -1.0
         self.policy_diag_log_interval = 0.5
         self.last_policy_diag_log_time = -1.0
         self.arm_diag_log_interval = 0.5
@@ -461,6 +506,30 @@ class WBCNodeLeg12ArmPassthrough(Node):
             WirelessController,
             "wirelesscontroller",
             self.joy_stick_cb,
+            low_state_history_depth,
+        )
+        self.teleop_mode_sub = self.create_subscription(
+            TeleopMode,
+            "/teleop/mode",
+            self.teleop_mode_cb,
+            low_state_history_depth,
+        )
+        self.teleop_eef_delta_sub = self.create_subscription(
+            TeleopEEFDelta,
+            "/teleop/eef_delta",
+            self.teleop_eef_delta_cb,
+            low_state_history_depth,
+        )
+        self.teleop_base_cmd_sub = self.create_subscription(
+            TeleopBaseCommand,
+            "/teleop/base_cmd",
+            self.teleop_base_cmd_cb,
+            low_state_history_depth,
+        )
+        self.teleop_gripper_cmd_sub = self.create_subscription(
+            TeleopGripperCommand,
+            "/teleop/gripper_cmd",
+            self.teleop_gripper_cmd_cb,
             low_state_history_depth,
         )
         self.lowlevel_state_sub = self.create_subscription(
@@ -640,7 +709,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
             logging.info("Press L2 to start pose test and hold the policy stand target")
         else:
             logging.info("Press L2 to start policy after stand-up completes")
-        logging.info("Press A to send --button-arm-pose, X to reset arm, Y to zero base command")
+        logging.info("Press A to enable SpaceMouse arm teleop, X to reset arm, Y to zero base command")
+        logging.info("Press B to toggle SpaceMouse teleop Arm/Base mode")
         logging.info("Press L1 for emergency stop")
         self.key_is_pressed = False  # for key press event
 
@@ -1138,6 +1208,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.pose_test_arm_start = lowstate.pos().copy()
         self.reset_arm_passthrough_pose()
         self.sync_arm_command_filter(self.pose_test_arm_start, "pose_test_start")
+        self.teleop_eef_target_pose6d = None
+        self.teleop_eef_anchor_pose6d = None
         self.last_policy_diag_log_time = -1.0
         logging.info("Starting pose test toward policy stand target")
 
@@ -1160,6 +1232,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.align_to_policy_arm_start = lowstate.pos().copy()
         self.reset_arm_passthrough_pose()
         self.sync_arm_command_filter(self.align_to_policy_arm_start, "policy_alignment_start")
+        self.teleop_eef_target_pose6d = None
+        self.teleop_eef_anchor_pose6d = None
         self.fixed_commands[:] = self.policy_takeover_commands
         self.policy_command_start = self.policy_takeover_commands.copy()
         self.policy_command_target = self.policy_takeover_commands.copy()
@@ -1204,6 +1278,9 @@ class WBCNodeLeg12ArmPassthrough(Node):
     def update_policy_commands(self):
         if not self.start_policy:
             return
+        if self.teleop_mode == TELEOP_MODE_BASE:
+            self.update_teleop_base_command()
+            return
         ramp_ratio = float(
             np.clip(
                 (time.monotonic() - self.policy_command_ramp_start_time)
@@ -1245,6 +1322,316 @@ class WBCNodeLeg12ArmPassthrough(Node):
             )
         )
         return True
+
+    def teleop_mode_name(self) -> str:
+        return "base" if self.teleop_mode == TELEOP_MODE_BASE else "arm"
+
+    def set_teleop_mode(self, mode: int, source: str) -> bool:
+        if mode not in (TELEOP_MODE_ARM, TELEOP_MODE_BASE):
+            logging.warning("Ignoring invalid teleop mode from %s: %s", source, mode)
+            return False
+        if self.teleop_mode == mode:
+            return True
+        self.teleop_mode = int(mode)
+        self.teleop_base_target[:] = 0.0
+        self.teleop_base_last_time = -1.0
+        self.teleop_base_filter_time = time.monotonic()
+        self.teleop_eef_last_apply_time = -1.0
+        if self.teleop_mode == TELEOP_MODE_ARM:
+            self.reset_teleop_eef_target(source)
+            if self.start_policy:
+                self.set_policy_command_target(
+                    self.policy_takeover_commands,
+                    f"{source}_switch_arm_zero_base",
+                    self.policy_command_ramp_duration,
+                )
+        logging.info(
+            "Teleop mode update | source=%s mode=%s"
+            % (source, self.teleop_mode_name())
+        )
+        return True
+
+    def toggle_teleop_mode(self, source: str) -> bool:
+        next_mode = (
+            TELEOP_MODE_BASE
+            if self.teleop_mode == TELEOP_MODE_ARM
+            else TELEOP_MODE_ARM
+        )
+        return self.set_teleop_mode(next_mode, source)
+
+    def teleop_control_active(self) -> bool:
+        return self.start_policy
+
+    def reset_teleop_eef_target(self, source: str) -> bool:
+        if not self.arm_enabled or self.arx5_solver is None:
+            return False
+        arm_state = self.get_arm_joint_state()
+        arm_pos = arm_state.pos().copy()
+        arm_vel = arm_state.vel().copy()
+        if not self.is_valid_arm_state(arm_pos, arm_vel):
+            if self.latest_arm_state_valid:
+                arm_pos = self.latest_arm_pos.copy()
+            else:
+                logging.warning(
+                    "Cannot reset teleop EEF target from %s: invalid arm state",
+                    source,
+                )
+                return False
+        pose6d = np.asarray(
+            self.arx5_solver.forward_kinematics(arm_pos), dtype=np.float64
+        )
+        if pose6d.shape[0] != 6 or not np.isfinite(pose6d).all():
+            logging.warning(
+                "Cannot reset teleop EEF target from %s: invalid FK pose=%s",
+                source,
+                pose6d,
+            )
+            return False
+        self.teleop_eef_target_pose6d = pose6d.copy()
+        self.teleop_eef_anchor_pose6d = pose6d.copy()
+        self.teleop_eef_last_apply_time = time.monotonic()
+        return True
+
+    def clear_teleop_eef_target(self):
+        self.teleop_eef_target_pose6d = None
+        self.teleop_eef_anchor_pose6d = None
+        self.teleop_eef_last_apply_time = -1.0
+
+    def enable_spacemouse_arm_teleop(self, source: str) -> bool:
+        self.teleop_base_target[:] = 0.0
+        self.teleop_base_last_time = -1.0
+        self.teleop_base_filter_time = time.monotonic()
+        self.teleop_mode = TELEOP_MODE_ARM
+        if self.start_policy:
+            self.set_policy_command_target(
+                self.policy_takeover_commands,
+                f"{source}_zero_base",
+                self.policy_command_ramp_duration,
+            )
+        reset_ok = self.reset_teleop_eef_target(source)
+        if reset_ok:
+            logging.info(
+                "SpaceMouse arm teleop enabled | source=%s policy_active=%s"
+                % (source, self.start_policy)
+            )
+        else:
+            logging.warning(
+                "SpaceMouse arm teleop requested from %s, but current arm pose "
+                "could not be used as the EEF anchor",
+                source,
+            )
+        return reset_ok
+
+    def teleop_mode_cb(self, msg: TeleopMode):
+        if msg.toggle:
+            self.toggle_teleop_mode("spacemouse_mode_toggle")
+        else:
+            self.set_teleop_mode(int(msg.mode), "spacemouse_mode")
+
+    def teleop_base_cmd_cb(self, msg: TeleopBaseCommand):
+        now = time.monotonic()
+        raw_cmd = np.array([msg.vx, msg.vy, msg.yaw_rate], dtype=np.float64)
+        if raw_cmd.shape[0] != 3 or not np.isfinite(raw_cmd).all():
+            self.log_invalid_teleop("base_cmd", raw_cmd)
+            return
+        if msg.hold or self.teleop_mode != TELEOP_MODE_BASE:
+            raw_cmd[:] = 0.0
+        self.teleop_base_target = np.clip(
+            raw_cmd,
+            -self.teleop_base_max_velocity,
+            self.teleop_base_max_velocity,
+        )
+        self.teleop_base_last_time = now
+
+    def teleop_eef_delta_cb(self, msg: TeleopEEFDelta):
+        now = time.monotonic()
+        self.teleop_eef_last_time = now
+        if (
+            msg.hold
+            or self.teleop_mode != TELEOP_MODE_ARM
+            or not self.teleop_control_active()
+        ):
+            return
+        if not self.arm_enabled or self.arx5_solver is None:
+            return
+        translation = np.array(msg.translation, dtype=np.float64)
+        rotation = np.array(msg.rotation_rpy, dtype=np.float64)
+        if (
+            translation.shape[0] != 3
+            or rotation.shape[0] != 3
+            or not np.isfinite(translation).all()
+            or not np.isfinite(rotation).all()
+        ):
+            self.log_invalid_teleop(
+                "eef_delta",
+                np.concatenate((translation.reshape(-1), rotation.reshape(-1))),
+            )
+            return
+        self.apply_teleop_eef_delta(translation, rotation, now)
+
+    def teleop_gripper_cmd_cb(self, msg: TeleopGripperCommand):
+        velocity = float(msg.velocity)
+        if not np.isfinite(velocity):
+            self.log_invalid_teleop("gripper_cmd", np.array([velocity]))
+            return
+        self.teleop_gripper_velocity = float(
+            np.clip(
+                0.0 if msg.hold else velocity,
+                -self.teleop_gripper_max_velocity,
+                self.teleop_gripper_max_velocity,
+            )
+        )
+        self.teleop_gripper_last_time = time.monotonic()
+
+    def log_invalid_teleop(self, source: str, value: np.ndarray):
+        now = time.monotonic()
+        if (
+            self.last_teleop_invalid_log_time < 0.0
+            or (now - self.last_teleop_invalid_log_time) >= self.teleop_log_interval
+        ):
+            logging.warning("Ignoring invalid teleop %s: %s", source, value)
+            self.last_teleop_invalid_log_time = now
+
+    def apply_teleop_eef_delta(
+        self,
+        translation_delta: np.ndarray,
+        rotation_delta: np.ndarray,
+        now: float,
+    ):
+        if self.teleop_eef_target_pose6d is None:
+            if not self.reset_teleop_eef_target("teleop_eef_delta"):
+                return
+        assert self.teleop_eef_target_pose6d is not None
+        if self.teleop_eef_last_apply_time < 0.0:
+            dt = 1.0 / 50.0
+        else:
+            dt = min(max(now - self.teleop_eef_last_apply_time, 1e-3), 0.05)
+        self.teleop_eef_last_apply_time = now
+
+        clipped_translation = np.clip(
+            translation_delta,
+            -self.teleop_eef_max_linear_velocity * dt,
+            self.teleop_eef_max_linear_velocity * dt,
+        )
+        clipped_rotation = np.clip(
+            rotation_delta,
+            -self.teleop_eef_max_angular_velocity * dt,
+            self.teleop_eef_max_angular_velocity * dt,
+        )
+
+        prev_pose6d = self.teleop_eef_target_pose6d.copy()
+        target_pose6d = self.teleop_eef_target_pose6d.copy()
+        target_pose6d[:3] += clipped_translation
+        target_pose6d[3:] = _wrap_to_pi(target_pose6d[3:] + clipped_rotation)
+        if self.teleop_eef_anchor_pose6d is not None:
+            target_pose6d[:3] = np.clip(
+                target_pose6d[:3],
+                self.teleop_eef_anchor_pose6d[:3]
+                - self.teleop_eef_workspace_half_extent,
+                self.teleop_eef_anchor_pose6d[:3]
+                + self.teleop_eef_workspace_half_extent,
+            )
+            rotation_offset = _wrap_to_pi(
+                target_pose6d[3:] - self.teleop_eef_anchor_pose6d[3:]
+            )
+            target_pose6d[3:] = _wrap_to_pi(
+                self.teleop_eef_anchor_pose6d[3:]
+                + np.clip(
+                    rotation_offset,
+                    -self.teleop_eef_rotation_half_extent,
+                    self.teleop_eef_rotation_half_extent,
+                )
+            )
+
+        seed = (
+            self.arm_passthrough_pose.copy()
+            if self.is_valid_arm_state(self.arm_passthrough_pose)
+            else self.latest_arm_pos.copy()
+        )
+        ik_status, target_arm_q = self.arx5_solver.inverse_kinematics(
+            target_pose6d,
+            seed,
+        )
+        target_arm_q = np.asarray(target_arm_q, dtype=np.float64)
+        if ik_status != 0 or target_arm_q.shape[0] != 6 or not np.isfinite(target_arm_q).all():
+            self.teleop_eef_target_pose6d = prev_pose6d
+            now = time.monotonic()
+            if (
+                self.last_teleop_ik_warn_time < 0.0
+                or (now - self.last_teleop_ik_warn_time) >= self.teleop_log_interval
+            ):
+                status_name = (
+                    self.arx5_solver.get_ik_status_name(int(ik_status))
+                    if self.arx5_solver is not None
+                    else "solver_unavailable"
+                )
+                logging.warning(
+                    "Ignoring teleop EEF delta: IK failed status=%s(%s) target_pose=%s",
+                    ik_status,
+                    status_name,
+                    np.array2string(target_pose6d, precision=3, floatmode="fixed"),
+                )
+                self.last_teleop_ik_warn_time = now
+            return
+
+        self.teleop_eef_target_pose6d = target_pose6d
+        self.set_arm_passthrough_pose(
+            target_arm_q,
+            "teleop_eef_delta",
+            log_update=False,
+        )
+
+    def update_teleop_base_command(self):
+        now = time.monotonic()
+        if (
+            self.teleop_base_last_time < 0.0
+            or (now - self.teleop_base_last_time) > self.teleop_watchdog_timeout
+        ):
+            desired = self.policy_takeover_commands.copy()
+            if (
+                np.linalg.norm(self.fixed_commands) > 1e-3
+                and (
+                    self.last_teleop_watchdog_log_time < 0.0
+                    or (now - self.last_teleop_watchdog_log_time)
+                    >= self.teleop_log_interval
+                )
+            ):
+                logging.warning("Teleop base watchdog timeout; zeroing base command")
+                self.last_teleop_watchdog_log_time = now
+        else:
+            desired = self.teleop_base_target.copy()
+
+        dt = min(max(now - self.teleop_base_filter_time, 1e-3), 0.05)
+        self.teleop_base_filter_time = now
+        delta = np.clip(
+            desired - self.fixed_commands,
+            -self.teleop_base_max_accel * dt,
+            self.teleop_base_max_accel * dt,
+        )
+        self.fixed_commands[:] = np.clip(
+            self.fixed_commands + delta,
+            -self.teleop_base_max_velocity,
+            self.teleop_base_max_velocity,
+        )
+
+    def update_teleop_gripper(self):
+        now = time.monotonic()
+        if (
+            self.teleop_gripper_last_time < 0.0
+            or (now - self.teleop_gripper_last_time) > self.teleop_watchdog_timeout
+        ):
+            velocity = 0.0
+        else:
+            velocity = self.teleop_gripper_velocity
+        dt = min(max(now - self.teleop_gripper_update_time, 1e-3), 0.05)
+        self.teleop_gripper_update_time = now
+        self.gripper_pos_cmd = float(
+            np.clip(
+                self.gripper_pos_cmd + velocity * dt,
+                GRIPPER_MIN,
+                GRIPPER_MAX,
+            )
+        )
 
     def get_startup_kick_leg_delta(self) -> np.ndarray:
         if not self.start_policy:
@@ -1408,6 +1795,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
                 self.fixed_commands[:] = self.policy_takeover_commands
                 self.policy_command_start = self.policy_takeover_commands.copy()
                 self.policy_command_target = self.policy_takeover_commands.copy()
+                self.teleop_base_target[:] = 0.0
+                self.teleop_base_last_time = -1.0
                 self.last_policy_diag_log_time = -1.0
         if msg.keys == 2:  # L1: emergency stop
             logging.info("Emergency stop")
@@ -1451,21 +1840,22 @@ class WBCNodeLeg12ArmPassthrough(Node):
         # if msg.keys == int(2**15):  # Left # NOTE must map to another key, left already used in pose latency
         #     # pass
 
-        if msg.keys == int(2**8):  # A: move arm to launch-specified button pose
+        if msg.keys == int(2**8):  # A: hand arm control to SpaceMouse
             if not self.key_is_pressed:
-                if self.button_arm_pose is None:
-                    logging.warning("A pressed but --button-arm-pose was not provided")
-                else:
-                    self.set_arm_passthrough_pose(self.button_arm_pose, "button_A")
+                self.enable_spacemouse_arm_teleop("button_A")
             self.key_is_pressed = True
 
         if msg.keys == int(2**10):  # X: reset arm to configured reset pose
             if not self.key_is_pressed:
                 self.set_arm_passthrough_pose(self.arm_reset_pose, "button_X_reset")
+                self.clear_teleop_eef_target()
             self.key_is_pressed = True
 
         if msg.keys == int(2**11):  # Y: stop base motion while keeping policy alive
             if not self.key_is_pressed:
+                self.teleop_base_target[:] = 0.0
+                self.teleop_base_last_time = -1.0
+                self.set_teleop_mode(TELEOP_MODE_ARM, "button_Y_zero_base_command")
                 self.set_policy_command_target(
                     self.policy_takeover_commands,
                     "button_Y_zero_base_command",
@@ -1473,13 +1863,9 @@ class WBCNodeLeg12ArmPassthrough(Node):
                 )
             self.key_is_pressed = True
 
-        if msg.keys == int(2**9):  # B: start/stop dumping logs
+        if msg.keys == int(2**9):  # B: switch SpaceMouse teleop Arm/Base mode
             if not self.key_is_pressed:
-                if self.debug_log:
-                    # Dump all logs
-                    self.dump_logs()
-                logging.info(f"Setting debug_log to {not self.debug_log}")
-                self.debug_log = not self.debug_log
+                self.toggle_teleop_mode("button_B")
             self.key_is_pressed = True
 
         if self.key_is_pressed:
@@ -1798,6 +2184,9 @@ class WBCNodeLeg12ArmPassthrough(Node):
             and not self.pose_test_active
         ):
             return
+
+        if self.start_policy or self.align_to_policy_active or self.pose_test_active:
+            self.update_teleop_gripper()
 
         if self.pose_test_active and not self.start_policy:
             pose_elapsed = max(time.monotonic() - self.pose_test_start_time, 0.0)

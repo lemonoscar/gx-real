@@ -1,10 +1,24 @@
 #!/usr/bin/env python3
+import argparse
+import ctypes.util
 import os
+import shutil
 import sys
 import importlib.util
 
 
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--spacemouse",
+        action="store_true",
+        help="Also check optional SpaceMouse teleop Python dependencies.",
+    )
+    return parser.parse_args()
+
+
 def main() -> int:
+    args = parse_args()
     policy_path = os.environ.get("GX_REAL_POLICY_PATH", "")
     crc_module_path = os.environ.get("GX_REAL_CRC_MODULE_PATH", "")
     policy_env_path = (
@@ -40,14 +54,33 @@ def main() -> int:
                 f"unitree_go imported from wrong path: {unitree_go_file}"
             )
         from unitree_go.msg import LowCmd, LowState, WirelessController  # noqa: F401
+        from robot_state.msg import (  # noqa: F401
+            TeleopBaseCommand,
+            TeleopEEFDelta,
+            TeleopGripperCommand,
+            TeleopMode,
+        )
         LowCmd.__class__.__import_type_support__()
         LowState.__class__.__import_type_support__()
         WirelessController.__class__.__import_type_support__()
+        TeleopBaseCommand.__class__.__import_type_support__()
+        TeleopEEFDelta.__class__.__import_type_support__()
+        TeleopGripperCommand.__class__.__import_type_support__()
+        TeleopMode.__class__.__import_type_support__()
+        if args.spacemouse:
+            if shutil.which("spacenavd") is None:
+                raise ImportError("spacenavd command not found")
+            if ctypes.util.find_library("spnav") is None:
+                raise ImportError("libspnav shared library not found")
+            import atomics  # noqa: F401
+            import spnav  # noqa: F401
     except Exception as exc:
         print(f"[gx-real] import check failed: {exc}", file=sys.stderr)
         return 1
 
     print("[gx-real] python imports OK")
+    if args.spacemouse:
+        print("[gx-real] spacemouse imports OK")
     print(f"[gx-real] policy={policy_path}")
     print(f"[gx-real] policy_env={policy_env_path}")
     return 0

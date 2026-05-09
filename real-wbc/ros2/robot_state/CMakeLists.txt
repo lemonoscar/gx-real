@@ -17,6 +17,10 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   msg/EEFState.msg
   msg/EEFTraj.msg
   msg/PoseMultiStamped.msg
+  msg/TeleopBaseCommand.msg
+  msg/TeleopEEFDelta.msg
+  msg/TeleopGripperCommand.msg
+  msg/TeleopMode.msg
 )
 
 # uncomment the following section in order to fill in

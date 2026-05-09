@@ -70,7 +70,13 @@ if __name__ == "__main__":
         default="base",
         help="Frame for --arm-tcp-pose.",
     )
-    parser.add_argument("--button-arm-pose", type=float, nargs=6, default=None)
+    parser.add_argument(
+        "--button-arm-pose",
+        type=float,
+        nargs=6,
+        default=None,
+        help="Deprecated: A now enables SpaceMouse arm teleop instead of sending this pose.",
+    )
     parser.add_argument(
         "--arm-reset-pose",
         type=float,
