@@ -76,6 +76,22 @@ def main() -> int:
             import spnav  # noqa: F401
     except Exception as exc:
         print(f"[gx-real] import check failed: {exc}", file=sys.stderr)
+        exc_text = str(exc)
+        if "rosidl_typesupport_c" in exc_text and "robot_state" in exc_text:
+            ros2_ws = os.path.join(os.environ.get("GX_REAL_ROOT", ""), "real-wbc", "ros2")
+            print(
+                "[gx-real] hint: rebuild robot_state in a clean ROS2 shell, then source scripts/setup_env.sh again.",
+                file=sys.stderr,
+            )
+            print(
+                f"[gx-real] hint: cd {ros2_ws} && source /opt/ros/foxy/setup.bash && colcon build --packages-select robot_state",
+                file=sys.stderr,
+            )
+            if os.environ.get("CONDA_PREFIX"):
+                print(
+                    "[gx-real] hint: conda is active; run 'conda deactivate' before building/running ROS2 on Jetson.",
+                    file=sys.stderr,
+                )
         return 1
 
     print("[gx-real] python imports OK")

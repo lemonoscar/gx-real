@@ -546,6 +546,7 @@ ros2 topic echo lf/sportmodestate
 
 - `check_env.sh` 失败在 `onnxruntime`：确认是在 Jetson 的 `/usr/bin/python3` 下安装，而不是 conda。用 `/usr/bin/python3 -c "import onnxruntime"` 复查。
 - `robot_state.msg.Teleop*` import 失败：重新编译 `real-wbc/ros2`，然后重新 `source scripts/setup_env.sh`。
+- `Could not import 'rosidl_typesupport_c' for package 'robot_state'`：通常是 Jetson 上 `robot_state` 的生成消息还没按最新代码 clean rebuild，或当前 shell 还在 conda `base`。先 `conda deactivate`，再删除 `real-wbc/ros2/build/robot_state` 和 `real-wbc/ros2/install/robot_state` 后重新 `colcon build --packages-select robot_state`。
 - `check_env.sh --spacemouse` 失败在 `spnav` 或 `atomics`：安装 SpaceMouse Python 依赖；失败在 `spacenavd` 或 `libspnav`：安装/启动系统服务。
 - SpaceMouse 没反应：确认接收器插在 Jetson 上，`spacenavd` 正在运行，且没有直接运行 ARX5 SDK 的 SpaceMouse 示例抢设备或抢 `can0`。
 - 单独机械臂测试前不要运行 `run_leg12_real.sh`。`scripts/run_arm_spacemouse_test.sh` 会直接控制 X5，和 WBC 主节点互斥。
