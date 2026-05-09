@@ -324,10 +324,10 @@ scripts/run_arm_spacemouse_test.sh    # 默认 X5_umi can0
 scripts/run_arm_spacemouse_test.sh X5_umi can0
 ```
 
-单独机械臂测试的默认速度按保守验收设置：末端平移 `0.02 m/s`，旋转 `0.06 rad/s`，并限制在 home 附近的小工作空间内。首次测试只轻推 SpaceMouse，不要长时间顶住一个方向。如果还想更慢，可以透传参数：
+单独机械臂测试的默认速度按正常遥操作设置：末端平移 `0.10 m/s`，旋转 `0.30 rad/s`，夹爪 `0.03 m/s`。默认不再额外限制 home 附近工作空间，位置约束交给 ARX5 SDK 的 IK、关节限位和电流保护。首次测试仍然只轻推 SpaceMouse，不要长时间顶住一个方向。如果需要临时收窄，可以透传参数：
 
 ```bash
-scripts/run_arm_spacemouse_test.sh X5_umi can0 --pos-speed 0.01 --ori-speed 0.03
+scripts/run_arm_spacemouse_test.sh X5_umi can0 --workspace-xyz 0.08 0.08 0.06 --workspace-rpy 0.25 0.25 0.25
 ```
 
 看到：
@@ -558,7 +558,7 @@ ros2 topic echo lf/sportmodestate
 - `check_env.sh --spacemouse` 失败在 `spnav` 或 `atomics`：安装 SpaceMouse Python 依赖；失败在 `spacenavd` 或 `libspnav`：安装/启动系统服务。
 - `undefined symbol: PyCObject_AsVoidPtr`：卸载 PyPI 版 `spnav`，安装 README 中固定的 Cheng Chi fork。
 - 单独机械臂测试失败在 `Error document empty` / `Failed to get chain from kdl tree`：ARX5 Python 扩展可能从 pip 安装目录加载，默认找不到仓库里的 URDF。更新到最新代码后，`scripts/run_arm_spacemouse_test.sh` 会显式把 `arx5-sdk/models` 传给示例。
-- `Inverse kinematics failed: E_EXCEED_JOINT_LIMIT` 或 `Over current detected`：目标末端位姿太快或太远，已经触到 IK/关节/电流保护。立即松开 SpaceMouse 或 `Ctrl+C` 停止，重新运行时使用默认保守速度，必要时再加 `--pos-speed 0.01 --ori-speed 0.03`。
+- `Inverse kinematics failed: E_EXCEED_JOINT_LIMIT` 或 `Over current detected`：目标末端位姿太快或太远，已经触到 IK/关节/电流保护。立即松开 SpaceMouse 或 `Ctrl+C` 停止；必要时临时降低速度 `--pos-speed 0.03 --ori-speed 0.10`，或加 home 附近工作空间限制。
 - SpaceMouse 没反应：确认接收器插在 Jetson 上，`spacenavd` 正在运行，且没有直接运行 ARX5 SDK 的 SpaceMouse 示例抢设备或抢 `can0`。
 - 单独机械臂测试前不要运行 `run_leg12_real.sh`。`scripts/run_arm_spacemouse_test.sh` 会直接控制 X5，和 WBC 主节点互斥。
 - 程序启动后机器人不动：看到 `Deploy node ready` 后还需要确认 sport mode 已关闭，按 `R1` 起身，等起身完成后按 `L2`。

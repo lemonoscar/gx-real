@@ -40,8 +40,10 @@ def start_teleop_recording(
     # If you are using the wireless 3Dconnexion spacemouse, you can set the deadzone_threshold to 0.0 for better sensitivity
     home_pose_6d = controller.get_home_pose().copy()
     target_pose_6d = home_pose_6d.copy()
-    workspace_xyz = np.asarray(workspace_xyz, dtype=float)
-    workspace_rpy = np.asarray(workspace_rpy, dtype=float)
+    if workspace_xyz is not None:
+        workspace_xyz = np.asarray(workspace_xyz, dtype=float)
+    if workspace_rpy is not None:
+        workspace_rpy = np.asarray(workspace_rpy, dtype=float)
 
     target_gripper_pos = 0.0
 
@@ -131,16 +133,22 @@ def start_teleop_recording(
                 proposed_pose_6d = target_pose_6d.copy()
                 proposed_pose_6d[:3] += state[:3] * pos_speed * cmd_dt
                 proposed_pose_6d[3:] += state[3:] * ori_speed * cmd_dt
-                target_pose_6d[:3] = np.clip(
-                    proposed_pose_6d[:3],
-                    home_pose_6d[:3] - workspace_xyz,
-                    home_pose_6d[:3] + workspace_xyz,
-                )
-                target_pose_6d[3:] = np.clip(
-                    proposed_pose_6d[3:],
-                    home_pose_6d[3:] - workspace_rpy,
-                    home_pose_6d[3:] + workspace_rpy,
-                )
+                if workspace_xyz is None:
+                    target_pose_6d[:3] = proposed_pose_6d[:3]
+                else:
+                    target_pose_6d[:3] = np.clip(
+                        proposed_pose_6d[:3],
+                        home_pose_6d[:3] - workspace_xyz,
+                        home_pose_6d[:3] + workspace_xyz,
+                    )
+                if workspace_rpy is None:
+                    target_pose_6d[3:] = proposed_pose_6d[3:]
+                else:
+                    target_pose_6d[3:] = np.clip(
+                        proposed_pose_6d[3:],
+                        home_pose_6d[3:] - workspace_rpy,
+                        home_pose_6d[3:] + workspace_rpy,
+                    )
                 target_gripper_pos += gripper_cmd * gripper_speed * cmd_dt
                 if target_gripper_pos >= robot_config.gripper_width:
                     target_gripper_pos = robot_config.gripper_width
@@ -177,9 +185,9 @@ def start_teleop_recording(
 @click.command()
 @click.argument("model")  # ARX arm model: X5 or L5
 @click.argument("interface")  # can bus name (can0 etc.)
-@click.option("--pos-speed", default=0.02, show_default=True, help="Max Cartesian translation speed in m/s.")
-@click.option("--ori-speed", default=0.06, show_default=True, help="Max Cartesian rotation speed in rad/s.")
-@click.option("--gripper-speed", default=0.01, show_default=True, help="Gripper command speed in m/s.")
+@click.option("--pos-speed", default=0.10, show_default=True, help="Max Cartesian translation speed in m/s.")
+@click.option("--ori-speed", default=0.30, show_default=True, help="Max Cartesian rotation speed in rad/s.")
+@click.option("--gripper-speed", default=0.03, show_default=True, help="Gripper command speed in m/s.")
 @click.option("--deadzone", default=0.30, show_default=True, help="SpaceMouse normalized deadzone.")
 @click.option("--window-size", default=8, show_default=True, help="Moving-average filter window.")
 @click.option("--cmd-dt", default=0.02, show_default=True, help="Command loop period in seconds.")
@@ -188,16 +196,14 @@ def start_teleop_recording(
     "--workspace-xyz",
     nargs=3,
     type=float,
-    default=(0.05, 0.05, 0.04),
-    show_default=True,
+    default=None,
     help="XYZ limits around home pose in meters.",
 )
 @click.option(
     "--workspace-rpy",
     nargs=3,
     type=float,
-    default=(0.15, 0.15, 0.15),
-    show_default=True,
+    default=None,
     help="RPY limits around home pose in radians.",
 )
 def main(
@@ -235,10 +241,12 @@ def main(
     gain = Gain(robot_config.joint_dof)
     controller.set_log_level(LogLevel.DEBUG)
     np.set_printoptions(precision=4, suppress=True)
+    workspace_xyz_text = "system" if workspace_xyz is None else workspace_xyz
+    workspace_rpy_text = "system" if workspace_rpy is None else workspace_rpy
     print(
-        "SpaceMouse safety limits: "
+        "SpaceMouse settings: "
         f"pos_speed={pos_speed}, ori_speed={ori_speed}, deadzone={deadzone}, "
-        f"workspace_xyz={workspace_xyz}, workspace_rpy={workspace_rpy}"
+        f"workspace_xyz={workspace_xyz_text}, workspace_rpy={workspace_rpy_text}"
     )
     try:
         start_teleop_recording(
