@@ -330,6 +330,12 @@ scripts/run_arm_spacemouse_test.sh X5_umi can0
 scripts/run_arm_spacemouse_test.sh X5_umi can0 --workspace-xyz 0.08 0.08 0.06 --workspace-rpy 0.25 0.25 0.25
 ```
 
+如果只想看 warning/error，减少 SDK 的周期 debug 输出：
+
+```bash
+scripts/run_arm_spacemouse_test.sh X5_umi can0 --log-level warning
+```
+
 看到：
 
 ```text
@@ -558,6 +564,7 @@ ros2 topic echo lf/sportmodestate
 - `check_env.sh --spacemouse` 失败在 `spnav` 或 `atomics`：安装 SpaceMouse Python 依赖；失败在 `spacenavd` 或 `libspnav`：安装/启动系统服务。
 - `undefined symbol: PyCObject_AsVoidPtr`：卸载 PyPI 版 `spnav`，安装 README 中固定的 Cheng Chi fork。
 - 单独机械臂测试失败在 `Error document empty` / `Failed to get chain from kdl tree`：ARX5 Python 扩展可能从 pip 安装目录加载，默认找不到仓库里的 URDF。更新到最新代码后，`scripts/run_arm_spacemouse_test.sh` 会显式把 `arx5-sdk/models` 传给示例。
+- `Background send_recv task is running too slow`：这是 ARX5 SDK 的 DEBUG 级通信周期提示。偶发 `2-4 ms` 且机械臂运动平滑、无 `warning/error` 时可以忽略；默认日志级别已改为 `info`，需要排查底层周期时再加 `--log-level debug`。
 - `Inverse kinematics failed: E_EXCEED_JOINT_LIMIT` 或 `Over current detected`：目标末端位姿太快或太远，已经触到 IK/关节/电流保护。立即松开 SpaceMouse 或 `Ctrl+C` 停止；必要时临时降低速度 `--pos-speed 0.03 --ori-speed 0.10`，或加 home 附近工作空间限制。
 - SpaceMouse 没反应：确认接收器插在 Jetson 上，`spacenavd` 正在运行，且没有直接运行 ARX5 SDK 的 SpaceMouse 示例抢设备或抢 `can0`。
 - 单独机械臂测试前不要运行 `run_leg12_real.sh`。`scripts/run_arm_spacemouse_test.sh` 会直接控制 X5，和 WBC 主节点互斥。

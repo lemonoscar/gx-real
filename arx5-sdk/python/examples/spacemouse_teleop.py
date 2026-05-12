@@ -23,6 +23,17 @@ import time
 import click
 
 
+LOG_LEVELS = {
+    "trace": LogLevel.TRACE,
+    "debug": LogLevel.DEBUG,
+    "info": LogLevel.INFO,
+    "warning": LogLevel.WARNING,
+    "error": LogLevel.ERROR,
+    "critical": LogLevel.CRITICAL,
+    "off": LogLevel.OFF,
+}
+
+
 def start_teleop_recording(
     controller: Arx5CartesianController,
     ori_speed: float,
@@ -193,6 +204,13 @@ def start_teleop_recording(
 @click.option("--cmd-dt", default=0.02, show_default=True, help="Command loop period in seconds.")
 @click.option("--preview-time", default=0.08, show_default=True, help="Trajectory preview time in seconds.")
 @click.option(
+    "--log-level",
+    type=click.Choice(sorted(LOG_LEVELS.keys())),
+    default="info",
+    show_default=True,
+    help="ARX5 SDK log verbosity.",
+)
+@click.option(
     "--workspace-xyz",
     nargs=3,
     type=float,
@@ -216,6 +234,7 @@ def main(
     window_size: int,
     cmd_dt: float,
     preview_time: float,
+    log_level: str,
     workspace_xyz,
     workspace_rpy,
 ):
@@ -239,14 +258,15 @@ def main(
 
     robot_config = controller.get_robot_config()
     gain = Gain(robot_config.joint_dof)
-    controller.set_log_level(LogLevel.DEBUG)
+    controller.set_log_level(LOG_LEVELS[log_level])
     np.set_printoptions(precision=4, suppress=True)
     workspace_xyz_text = "system" if workspace_xyz is None else workspace_xyz
     workspace_rpy_text = "system" if workspace_rpy is None else workspace_rpy
     print(
         "SpaceMouse settings: "
         f"pos_speed={pos_speed}, ori_speed={ori_speed}, deadzone={deadzone}, "
-        f"workspace_xyz={workspace_xyz_text}, workspace_rpy={workspace_rpy_text}"
+        f"workspace_xyz={workspace_xyz_text}, workspace_rpy={workspace_rpy_text}, "
+        f"log_level={log_level}"
     )
     try:
         start_teleop_recording(
