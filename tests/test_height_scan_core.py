@@ -110,8 +110,39 @@ def test_height_map_noncritical_sentinel_is_reported_but_allowed():
     assert diag["ok"] is True
     assert diag["sentinel_cells"] == 1
     assert diag["critical_sentinel_cells"] == 0
+    assert diag["footprint_sentinel_cells"] == 0
+    assert diag["footprint_filled_cells"] == 0
+    assert diag["noncritical_sentinel_cells"] == 1
     assert diag["valid_ratio"] < 1.0
     assert diag["critical_valid_ratio"] == 1.0
+
+
+def test_height_map_footprint_sentinel_is_filled_and_not_clean():
+    contract = _contract()
+    data, origin, resolution = _flat_height_map(value=0.1)
+    _set_map_cell(data, origin, resolution, (0.0, 0.0), 1.0e9)
+
+    scan, diag = height_map_to_height_scan(
+        data.reshape(-1),
+        data.shape[1],
+        data.shape[0],
+        resolution,
+        origin,
+        (0.0, 0.0, 0.0, contract.offset),
+        contract,
+    )
+
+    assert diag["ok"] is True
+    assert diag["height_scan_ok"] is True
+    assert diag["height_scan_clean"] is False
+    assert diag["sentinel_cells"] == 1
+    assert diag["footprint_sentinel_cells"] == 1
+    assert diag["footprint_filled_cells"] == 1
+    assert diag["critical_sentinel_cells"] == 0
+    assert diag["noncritical_sentinel_cells"] == 0
+    assert diag["valid_ratio"] == 1.0
+    assert diag["raw_valid_ratio"] < 1.0
+    assert np.isclose(scan[np.argmin(np.linalg.norm(contract.grid_xy, axis=1))], -0.1)
 
 
 def test_height_map_critical_sentinel_fails_closed():
@@ -132,4 +163,5 @@ def test_height_map_critical_sentinel_fails_closed():
     assert diag["ok"] is False
     assert diag["height_scan_ok"] is False
     assert diag["critical_sentinel_cells"] == 1
+    assert diag["footprint_sentinel_cells"] == 0
     assert diag["failure_reason"] == "sentinel_critical"

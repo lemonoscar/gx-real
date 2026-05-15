@@ -46,7 +46,8 @@ class HeightScanMonitor(Node):
         self.get_logger().info(
             "shape=%d ok=%s fallback=%s height_source=%s fallback_source=%s reason=%s "
             "age_s=%.3f last_valid_age_s=%.3f "
-            "valid_ratio=%.3f critical_ratio=%.3f points=%d cells=%d sentinel=%d critical_sentinel=%d "
+            "valid_ratio=%.3f raw_valid_ratio=%.3f critical_ratio=%.3f points=%d cells=%d "
+            "sentinel=%d footprint_sentinel=%d footprint_filled=%d critical_sentinel=%d noncritical_sentinel=%d "
             "min=%.3f max=%.3f mean=%.3f transform=%s map_frame=%s pose_frame=%s"
             % (
                 scan.shape[0],
@@ -58,11 +59,15 @@ class HeightScanMonitor(Node):
                 float(diag.get("age_s", float("inf"))),
                 float(diag.get("last_valid_age_s", float("inf"))),
                 float(diag.get("valid_ratio", 0.0)),
+                float(diag.get("raw_valid_ratio", diag.get("valid_ratio", 0.0))),
                 float(diag.get("critical_valid_ratio", 0.0)),
                 int(diag.get("num_points", 0)),
                 int(diag.get("num_valid_cells", 0)),
                 int(diag.get("sentinel_cells", 0)),
+                int(diag.get("footprint_sentinel_cells", 0)),
+                int(diag.get("footprint_filled_cells", 0)),
                 int(diag.get("critical_sentinel_cells", 0)),
+                int(diag.get("noncritical_sentinel_cells", 0)),
                 float(diag.get("min", 0.0)),
                 float(diag.get("max", 0.0)),
                 float(diag.get("mean", 0.0)),

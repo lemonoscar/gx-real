@@ -228,7 +228,11 @@ class HeightScanProvider:
             "pose_topic": self.pose_topic if hasattr(self, "pose_topic") else "",
             "critical_valid_ratio": 0.0,
             "sentinel_cells": 0,
+            "footprint_sentinel_cells": 0,
+            "footprint_filled_cells": 0,
             "critical_sentinel_cells": 0,
+            "noncritical_sentinel_cells": 0,
+            "height_scan_clean": False,
             "height_scan_ok": False,
         }
 

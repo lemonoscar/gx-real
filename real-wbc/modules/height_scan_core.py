@@ -122,6 +122,12 @@ def _height_map_critical_mask(grid_xy: np.ndarray) -> np.ndarray:
     return body | front
 
 
+def _height_map_footprint_unknown_mask(grid_xy: np.ndarray) -> np.ndarray:
+    x = np.asarray(grid_xy[:, 0], dtype=np.float32)
+    y = np.asarray(grid_xy[:, 1], dtype=np.float32)
+    return (x >= -0.35) & (x <= 0.25) & (y >= -0.25) & (y <= 0.25)
+
+
 def height_map_to_height_scan(
     data: np.ndarray,
     width: int,
@@ -201,14 +207,33 @@ def height_map_to_height_scan(
         valid_cells[index] = True
 
     critical_mask = _height_map_critical_mask(contract.grid_xy)
+    footprint_mask = _height_map_footprint_unknown_mask(contract.grid_xy)
+    footprint_sentinel_mask = sentinel_cells & footprint_mask
+    footprint_filled_cells = np.zeros((contract.height_scan_dim,), dtype=bool)
+    if np.any(footprint_sentinel_mask):
+        fill_source = valid_cells & ~footprint_mask
+        if not np.any(fill_source):
+            fill_source = valid_cells
+        fill_scan_value = float(np.median(scan[fill_source])) if np.any(fill_source) else float(fill_value)
+        scan[footprint_sentinel_mask] = float(
+            np.clip(fill_scan_value, contract.clip[0], contract.clip[1])
+        )
+        valid_cells[footprint_sentinel_mask] = True
+        footprint_filled_cells[footprint_sentinel_mask] = True
+
     num_valid_cells = int(np.count_nonzero(valid_cells))
+    num_raw_valid_cells = int(np.count_nonzero(valid_cells & ~footprint_filled_cells))
     num_critical_cells = int(np.count_nonzero(critical_mask))
     num_critical_valid_cells = int(np.count_nonzero(valid_cells & critical_mask))
     valid_ratio = float(num_valid_cells / contract.height_scan_dim) if contract.height_scan_dim else 0.0
+    raw_valid_ratio = float(num_raw_valid_cells / contract.height_scan_dim) if contract.height_scan_dim else 0.0
     critical_valid_ratio = float(num_critical_valid_cells / num_critical_cells) if num_critical_cells else 0.0
 
     sentinel_count = int(np.count_nonzero(sentinel_cells))
-    critical_sentinel_count = int(np.count_nonzero(sentinel_cells & critical_mask))
+    footprint_sentinel_count = int(np.count_nonzero(footprint_sentinel_mask))
+    footprint_filled_count = int(np.count_nonzero(footprint_filled_cells))
+    critical_sentinel_count = int(np.count_nonzero(sentinel_cells & critical_mask & ~footprint_mask))
+    noncritical_sentinel_count = int(sentinel_count - footprint_sentinel_count - critical_sentinel_count)
     out_of_bounds_count = int(np.count_nonzero(out_of_bounds_cells))
     critical_out_of_bounds_count = int(np.count_nonzero(out_of_bounds_cells & critical_mask))
     ground_band_reject_count = int(np.count_nonzero(ground_band_reject_cells))
@@ -241,17 +266,23 @@ def height_map_to_height_scan(
         "ok": ok,
         "height_scan_ok": ok,
         "valid_ratio": valid_ratio,
+        "raw_valid_ratio": raw_valid_ratio,
         "critical_valid_ratio": critical_valid_ratio,
         "num_points": int(width * height),
         "num_valid_cells": num_valid_cells,
+        "num_raw_valid_cells": num_raw_valid_cells,
         "num_critical_cells": num_critical_cells,
         "num_critical_valid_cells": num_critical_valid_cells,
         "sentinel_cells": sentinel_count,
+        "footprint_sentinel_cells": footprint_sentinel_count,
+        "footprint_filled_cells": footprint_filled_count,
         "critical_sentinel_cells": critical_sentinel_count,
+        "noncritical_sentinel_cells": noncritical_sentinel_count,
         "out_of_bounds_cells": out_of_bounds_count,
         "critical_out_of_bounds_cells": critical_out_of_bounds_count,
         "ground_band_reject_cells": ground_band_reject_count,
         "critical_ground_band_reject_cells": critical_ground_band_reject_count,
+        "height_scan_clean": bool(sentinel_count == 0 and out_of_bounds_count == 0 and ground_band_reject_count == 0),
         "min": float(np.min(scan)) if scan.size else 0.0,
         "max": float(np.max(scan)) if scan.size else 0.0,
         "mean": float(np.mean(scan)) if scan.size else 0.0,

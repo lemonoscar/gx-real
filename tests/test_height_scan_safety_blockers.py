@@ -269,7 +269,30 @@ def test_height_map_array_noncritical_sentinel_is_reported_but_accepted():
     assert diag["height_scan_ok"] is True
     assert diag["sentinel_cells"] == 1
     assert diag["critical_sentinel_cells"] == 0
+    assert diag["footprint_sentinel_cells"] == 0
+    assert diag["footprint_filled_cells"] == 0
+    assert diag["noncritical_sentinel_cells"] == 1
     assert diag["critical_valid_ratio"] == 1.0
+
+
+def test_height_map_array_footprint_sentinel_is_filled_not_fallback():
+    provider = _height_map_provider()
+    data = _flat_height_map(value=0.1)
+    _set_height_map_cell(data, (0.0, 0.0), 1.0e9)
+
+    provider._pose_callback(_pose_msg())
+    provider._height_map_callback(_height_map_msg(data))
+    _, diag = provider.get_scan()
+
+    assert diag["height_scan_ok"] is True
+    assert diag["used_fallback"] is False
+    assert diag["height_scan_clean"] is False
+    assert diag["sentinel_cells"] == 1
+    assert diag["footprint_sentinel_cells"] == 1
+    assert diag["footprint_filled_cells"] == 1
+    assert diag["critical_sentinel_cells"] == 0
+    assert diag["noncritical_sentinel_cells"] == 0
+    assert diag["raw_valid_ratio"] < diag["valid_ratio"]
 
 
 def test_height_map_array_critical_sentinel_fails_closed():
@@ -287,6 +310,7 @@ def test_height_map_array_critical_sentinel_fails_closed():
     assert diag["fallback_source"] == "zero"
     assert "sentinel_critical" in diag["fallback_reason"]
     assert diag["critical_sentinel_cells"] == 1
+    assert diag["footprint_sentinel_cells"] == 0
 
 
 def test_height_map_array_frame_mismatch_fails_closed():

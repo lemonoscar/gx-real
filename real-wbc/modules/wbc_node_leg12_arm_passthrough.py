@@ -1164,8 +1164,9 @@ class WBCNodeLeg12ArmPassthrough(Node):
         ):
             logging.info(
                 "Height scan diag | ok=%s fallback=%s source=%s reason=%s age_s=%.3f "
-                "valid_ratio=%.3f critical_ratio=%.3f points=%d cells=%d sentinel=%d "
-                "critical_sentinel=%d min=%.3f max=%.3f mean=%.3f"
+                "valid_ratio=%.3f raw_valid_ratio=%.3f critical_ratio=%.3f points=%d cells=%d "
+                "sentinel=%d footprint_sentinel=%d footprint_filled=%d critical_sentinel=%d "
+                "noncritical_sentinel=%d min=%.3f max=%.3f mean=%.3f"
                 % (
                     bool(diag.get("height_scan_ok", diag.get("ok", False))),
                     bool(diag.get("used_fallback", False)),
@@ -1173,11 +1174,15 @@ class WBCNodeLeg12ArmPassthrough(Node):
                     diag.get("fallback_reason", "none"),
                     float(diag.get("age_s", float("inf"))),
                     float(diag.get("valid_ratio", 0.0)),
+                    float(diag.get("raw_valid_ratio", diag.get("valid_ratio", 0.0))),
                     float(diag.get("critical_valid_ratio", 0.0)),
                     int(diag.get("num_points", 0)),
                     int(diag.get("num_valid_cells", 0)),
                     int(diag.get("sentinel_cells", 0)),
+                    int(diag.get("footprint_sentinel_cells", 0)),
+                    int(diag.get("footprint_filled_cells", 0)),
                     int(diag.get("critical_sentinel_cells", 0)),
+                    int(diag.get("noncritical_sentinel_cells", 0)),
                     float(diag.get("min", 0.0)),
                     float(diag.get("max", 0.0)),
                     float(diag.get("mean", 0.0)),
