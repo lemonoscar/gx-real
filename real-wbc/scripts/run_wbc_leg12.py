@@ -95,7 +95,13 @@ if __name__ == "__main__":
         type=str,
         default=DEFAULT_HEIGHT_SCAN_CONTRACT,
     )
+    parser.add_argument(
+        "--height-scan-source",
+        choices=["pointcloud2", "height_map_array"],
+        default="pointcloud2",
+    )
     parser.add_argument("--height-scan-topic", type=str, default="/unilidar/cloud")
+    parser.add_argument("--height-scan-pose-topic", type=str, default="/utlidar/robot_pose")
     parser.add_argument("--height-scan-base-frame", type=str, default="base")
     parser.add_argument("--height-scan-lidar-frame", type=str, default="unilidar_lidar")
     parser.add_argument(
@@ -105,6 +111,8 @@ if __name__ == "__main__":
     )
     parser.add_argument("--height-scan-timeout", type=float, default=0.25)
     parser.add_argument("--height-scan-min-valid-ratio", type=float, default=0.60)
+    parser.add_argument("--height-scan-min-critical-valid-ratio", type=float, default=0.95)
+    parser.add_argument("--height-scan-sentinel-abs-threshold", type=float, default=5.0)
     parser.add_argument(
         "--height-scan-fallback",
         choices=["last_valid_then_zero", "zero"],

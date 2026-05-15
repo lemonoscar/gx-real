@@ -294,12 +294,16 @@ class WBCNodeLeg12ArmPassthrough(Node):
         leg_kd: float = 10.0,
         enable_height_scan: bool = False,
         height_scan_contract: str = "policies/height_scan_contract.yaml",
+        height_scan_source: str = "pointcloud2",
         height_scan_topic: str = "/unilidar/cloud",
+        height_scan_pose_topic: str = "/utlidar/robot_pose",
         height_scan_base_frame: str = "base",
         height_scan_lidar_frame: str = "unilidar_lidar",
         height_scan_extrinsic: Optional[str] = None,
         height_scan_timeout: float = 0.25,
         height_scan_min_valid_ratio: float = 0.60,
+        height_scan_min_critical_valid_ratio: float = 0.95,
+        height_scan_sentinel_abs_threshold: float = 5.0,
         height_scan_fallback: str = "last_valid_then_zero",
         height_scan_max_last_valid_age: float = 0.5,
     ):
@@ -422,12 +426,16 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.last_height_scan_diag_log_time = -1.0
         self.enable_height_scan = bool(enable_height_scan)
         self.height_scan_contract_path = height_scan_contract
+        self.height_scan_source = height_scan_source
         self.height_scan_topic = height_scan_topic
+        self.height_scan_pose_topic = height_scan_pose_topic
         self.height_scan_base_frame = height_scan_base_frame
         self.height_scan_lidar_frame = height_scan_lidar_frame
         self.height_scan_extrinsic = height_scan_extrinsic
         self.height_scan_timeout = float(height_scan_timeout)
         self.height_scan_min_valid_ratio = float(height_scan_min_valid_ratio)
+        self.height_scan_min_critical_valid_ratio = float(height_scan_min_critical_valid_ratio)
+        self.height_scan_sentinel_abs_threshold = float(height_scan_sentinel_abs_threshold)
         self.height_scan_fallback = height_scan_fallback
         self.height_scan_max_last_valid_age = float(height_scan_max_last_valid_age)
         self.height_scan_provider: Optional[HeightScanProvider] = None
@@ -817,12 +825,16 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.height_scan_provider = HeightScanProvider(
             self,
             contract_path=contract_path,
+            source=self.height_scan_source,
             topic=self.height_scan_topic,
+            pose_topic=self.height_scan_pose_topic,
             base_frame=self.height_scan_base_frame,
             lidar_frame=self.height_scan_lidar_frame,
             extrinsic_path=self.height_scan_extrinsic,
             timeout_s=self.height_scan_timeout,
             min_valid_ratio=self.height_scan_min_valid_ratio,
+            min_critical_valid_ratio=self.height_scan_min_critical_valid_ratio,
+            sentinel_abs_threshold=self.height_scan_sentinel_abs_threshold,
             fallback=self.height_scan_fallback,
             max_last_valid_age_s=self.height_scan_max_last_valid_age,
         )
@@ -839,13 +851,16 @@ class WBCNodeLeg12ArmPassthrough(Node):
                 f"height-scan contract slice must be [66, 253], got {contract.observation_slices.get('height_scan')}"
             )
         logging.info(
-            "Height scan provider enabled | topic=%s contract=%s timeout=%.3f min_valid_ratio=%.2f "
-            "fallback=%s max_last_valid_age=%.3f"
+            "Height scan provider enabled | source=%s topic=%s pose_topic=%s contract=%s timeout=%.3f "
+            "min_valid_ratio=%.2f min_critical_valid_ratio=%.2f fallback=%s max_last_valid_age=%.3f"
             % (
+                self.height_scan_source,
                 self.height_scan_topic,
+                self.height_scan_pose_topic,
                 contract_path,
                 self.height_scan_timeout,
                 self.height_scan_min_valid_ratio,
+                self.height_scan_min_critical_valid_ratio,
                 self.height_scan_fallback,
                 self.height_scan_max_last_valid_age,
             )
@@ -1148,16 +1163,21 @@ class WBCNodeLeg12ArmPassthrough(Node):
             or (now - self.last_height_scan_diag_log_time) >= self.height_scan_diag_log_interval
         ):
             logging.info(
-                "Height scan diag | ok=%s fallback=%s reason=%s age_s=%.3f valid_ratio=%.3f "
-                "points=%d cells=%d min=%.3f max=%.3f mean=%.3f"
+                "Height scan diag | ok=%s fallback=%s source=%s reason=%s age_s=%.3f "
+                "valid_ratio=%.3f critical_ratio=%.3f points=%d cells=%d sentinel=%d "
+                "critical_sentinel=%d min=%.3f max=%.3f mean=%.3f"
                 % (
                     bool(diag.get("height_scan_ok", diag.get("ok", False))),
                     bool(diag.get("used_fallback", False)),
+                    diag.get("height_scan_source", diag.get("source", "none")),
                     diag.get("fallback_reason", "none"),
                     float(diag.get("age_s", float("inf"))),
                     float(diag.get("valid_ratio", 0.0)),
+                    float(diag.get("critical_valid_ratio", 0.0)),
                     int(diag.get("num_points", 0)),
                     int(diag.get("num_valid_cells", 0)),
+                    int(diag.get("sentinel_cells", 0)),
+                    int(diag.get("critical_sentinel_cells", 0)),
                     float(diag.get("min", 0.0)),
                     float(diag.get("max", 0.0)),
                     float(diag.get("mean", 0.0)),

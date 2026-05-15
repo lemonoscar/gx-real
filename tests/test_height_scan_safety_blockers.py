@@ -32,6 +32,20 @@ def fake_ros_modules(monkeypatch):
     monkeypatch.setitem(sys.modules, "sensor_msgs", sensor_msgs)
     monkeypatch.setitem(sys.modules, "sensor_msgs.msg", sensor_msgs_msg)
 
+    unitree_go = types.ModuleType("unitree_go")
+    unitree_go_msg = types.ModuleType("unitree_go.msg")
+    unitree_go_msg.HeightMap = type("HeightMap", (), {})
+    unitree_go.msg = unitree_go_msg
+    monkeypatch.setitem(sys.modules, "unitree_go", unitree_go)
+    monkeypatch.setitem(sys.modules, "unitree_go.msg", unitree_go_msg)
+
+    geometry_msgs = types.ModuleType("geometry_msgs")
+    geometry_msgs_msg = types.ModuleType("geometry_msgs.msg")
+    geometry_msgs_msg.PoseStamped = type("PoseStamped", (), {})
+    geometry_msgs.msg = geometry_msgs_msg
+    monkeypatch.setitem(sys.modules, "geometry_msgs", geometry_msgs)
+    monkeypatch.setitem(sys.modules, "geometry_msgs.msg", geometry_msgs_msg)
+
     rclpy = types.ModuleType("rclpy")
     rclpy.time = SimpleNamespace(Time=lambda: object())
     monkeypatch.setitem(sys.modules, "rclpy", rclpy)
@@ -44,6 +58,9 @@ def fake_ros_modules(monkeypatch):
 
 class FakeNode:
     def create_subscription(self, msg_type, topic, callback, qos_profile):
+        subscriptions = getattr(self, "subscriptions", [])
+        subscriptions.append((msg_type, topic, callback, qos_profile))
+        self.subscriptions = subscriptions
         self.subscription = (msg_type, topic, callback, qos_profile)
         return object()
 
@@ -83,6 +100,22 @@ def _provider(**kwargs):
     )
 
 
+def _height_map_provider(**kwargs):
+    return HeightScanProvider(
+        FakeNode(),
+        contract_path=str(CONTRACT_PATH),
+        source="height_map_array",
+        topic="/height_map",
+        pose_topic="/pose",
+        timeout_s=kwargs.pop("timeout_s", 0.25),
+        min_valid_ratio=kwargs.pop("min_valid_ratio", 0.90),
+        min_critical_valid_ratio=kwargs.pop("min_critical_valid_ratio", 0.95),
+        fallback=kwargs.pop("fallback", "last_valid_then_zero"),
+        max_last_valid_age_s=kwargs.pop("max_last_valid_age_s", 0.5),
+        **kwargs,
+    )
+
+
 def _cloud(points, frame_id):
     points = np.asarray(points, dtype="<f4").reshape(-1, 3)
     return SimpleNamespace(
@@ -106,6 +139,41 @@ def _valid_points(height=0.10):
         height=height,
         points_per_cell=2,
         jitter=0.0,
+    )
+
+
+def _height_map_msg(data, *, frame_id="odom", origin=(-2.0, -2.0), resolution=0.1):
+    array = np.asarray(data, dtype=np.float32)
+    if array.ndim != 2:
+        raise ValueError("height map test data must be 2-D")
+    return SimpleNamespace(
+        frame_id=frame_id,
+        resolution=float(resolution),
+        width=int(array.shape[1]),
+        height=int(array.shape[0]),
+        origin=[float(origin[0]), float(origin[1])],
+        data=array.reshape(-1).tolist(),
+    )
+
+
+def _flat_height_map(width=41, height=41, value=0.0):
+    return np.full((height, width), float(value), dtype=np.float32)
+
+
+def _set_height_map_cell(data, xy, value, *, origin=(-2.0, -2.0), resolution=0.1):
+    ix = int(round((float(xy[0]) - origin[0]) / resolution))
+    iy = int(round((float(xy[1]) - origin[1]) / resolution))
+    data[iy, ix] = float(value)
+
+
+def _pose_msg(*, frame_id="odom", x=0.0, y=0.0, z=0.5, yaw=0.0):
+    half_yaw = 0.5 * float(yaw)
+    return SimpleNamespace(
+        header=SimpleNamespace(frame_id=frame_id),
+        pose=SimpleNamespace(
+            position=SimpleNamespace(x=float(x), y=float(y), z=float(z)),
+            orientation=SimpleNamespace(x=0.0, y=0.0, z=float(np.sin(half_yaw)), w=float(np.cos(half_yaw))),
+        ),
     )
 
 
@@ -171,6 +239,83 @@ def test_lidar_frame_cloud_without_transform_is_rejected_not_used_raw():
     assert "transform_unavailable" in diag["transform_status"]
 
 
+def test_height_map_array_all_valid_is_accepted():
+    provider = _height_map_provider()
+    data = _flat_height_map()
+
+    provider._pose_callback(_pose_msg())
+    provider._height_map_callback(_height_map_msg(data))
+    scan, diag = provider.get_scan()
+
+    assert scan.shape == (187,)
+    assert diag["height_scan_ok"] is True
+    assert diag["height_scan_source"] == "height_map_array"
+    assert diag["map_frame"] == "odom"
+    assert diag["pose_frame"] == "odom"
+    assert diag["valid_ratio"] == 1.0
+    assert diag["critical_valid_ratio"] == 1.0
+    assert diag["sentinel_cells"] == 0
+
+
+def test_height_map_array_noncritical_sentinel_is_reported_but_accepted():
+    provider = _height_map_provider()
+    data = _flat_height_map()
+    _set_height_map_cell(data, (-0.8, -0.5), 1.0e9)
+
+    provider._pose_callback(_pose_msg())
+    provider._height_map_callback(_height_map_msg(data))
+    _, diag = provider.get_scan()
+
+    assert diag["height_scan_ok"] is True
+    assert diag["sentinel_cells"] == 1
+    assert diag["critical_sentinel_cells"] == 0
+    assert diag["critical_valid_ratio"] == 1.0
+
+
+def test_height_map_array_critical_sentinel_fails_closed():
+    provider = _height_map_provider()
+    data = _flat_height_map()
+    _set_height_map_cell(data, (0.4, 0.0), 1.0e9)
+
+    provider._pose_callback(_pose_msg())
+    provider._height_map_callback(_height_map_msg(data))
+    scan, diag = provider.get_scan()
+
+    assert scan.shape == (187,)
+    assert provider.last_scan is None
+    assert diag["height_scan_ok"] is False
+    assert diag["fallback_source"] == "zero"
+    assert "sentinel_critical" in diag["fallback_reason"]
+    assert diag["critical_sentinel_cells"] == 1
+
+
+def test_height_map_array_frame_mismatch_fails_closed():
+    provider = _height_map_provider()
+    data = _flat_height_map()
+
+    provider._pose_callback(_pose_msg(frame_id="map"))
+    provider._height_map_callback(_height_map_msg(data, frame_id="odom"))
+    _, diag = provider.get_scan()
+
+    assert diag["height_scan_ok"] is False
+    assert diag["fallback_source"] == "zero"
+    assert "frame_mismatch" in diag["fallback_reason"]
+    assert diag["map_frame"] == "odom"
+    assert diag["pose_frame"] == "map"
+
+
+def test_height_map_array_missing_pose_fails_closed():
+    provider = _height_map_provider()
+    data = _flat_height_map()
+
+    provider._height_map_callback(_height_map_msg(data))
+    _, diag = provider.get_scan()
+
+    assert diag["height_scan_ok"] is False
+    assert diag["fallback_source"] == "zero"
+    assert "missing_pose" in diag["fallback_reason"]
+
+
 def test_short_invalid_gap_may_reuse_last_valid_scan(monkeypatch):
     now = [100.0]
     monkeypatch.setattr(height_scan_provider_module.time, "monotonic", lambda: now[0])
@@ -207,3 +352,50 @@ def test_stale_last_valid_scan_is_not_reused(monkeypatch):
     assert "stale_last_valid" in diag["fallback_reason"]
     assert diag["last_valid_age_s"] > provider.max_last_valid_age_s
     assert diag["stale_last_valid_age_s"] == diag["last_valid_age_s"]
+
+
+def test_height_map_critical_unknown_short_gap_may_reuse_last_valid(monkeypatch):
+    now = [300.0]
+    monkeypatch.setattr(height_scan_provider_module.time, "monotonic", lambda: now[0])
+    provider = _height_map_provider(timeout_s=0.25, max_last_valid_age_s=0.5)
+    valid_data = _flat_height_map(value=0.1)
+    provider._pose_callback(_pose_msg())
+    provider._height_map_callback(_height_map_msg(valid_data))
+    valid_scan = provider.last_valid_scan.copy()
+
+    invalid_data = _flat_height_map()
+    _set_height_map_cell(invalid_data, (0.4, 0.0), 1.0e9)
+    now[0] += 0.10
+    provider._pose_callback(_pose_msg())
+    provider._height_map_callback(_height_map_msg(invalid_data))
+    scan, diag = provider.get_scan()
+
+    assert np.allclose(scan, valid_scan)
+    assert diag["height_scan_ok"] is False
+    assert diag["fallback_source"] == "last_valid"
+    assert "sentinel_critical" in diag["fallback_reason"]
+    assert diag["critical_sentinel_cells"] == 1
+
+
+def test_height_map_critical_unknown_stale_last_valid_is_not_reused(monkeypatch):
+    now = [400.0]
+    monkeypatch.setattr(height_scan_provider_module.time, "monotonic", lambda: now[0])
+    provider = _height_map_provider(timeout_s=0.25, max_last_valid_age_s=0.5)
+    valid_data = _flat_height_map(value=0.1)
+    provider._pose_callback(_pose_msg())
+    provider._height_map_callback(_height_map_msg(valid_data))
+    valid_scan = provider.last_valid_scan.copy()
+
+    invalid_data = _flat_height_map()
+    _set_height_map_cell(invalid_data, (0.4, 0.0), 1.0e9)
+    now[0] += 0.70
+    provider._pose_callback(_pose_msg())
+    provider._height_map_callback(_height_map_msg(invalid_data))
+    scan, diag = provider.get_scan()
+
+    assert not np.allclose(scan, valid_scan)
+    assert np.allclose(scan, np.zeros_like(scan))
+    assert diag["height_scan_ok"] is False
+    assert diag["fallback_source"] == "zero"
+    assert "stale_last_valid" in diag["fallback_reason"]
+    assert diag["critical_sentinel_cells"] == 1

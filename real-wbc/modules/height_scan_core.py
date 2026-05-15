@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from pathlib import Path
 from typing import Any
 
@@ -111,6 +112,153 @@ def _diagnostics(scan: np.ndarray, *, ok: bool, num_points: int, num_valid_cells
         "mean": float(np.mean(finite_scan)) if finite_scan.size else 0.0,
         "used_fallback": bool(used_fallback),
     }
+
+
+def _height_map_critical_mask(grid_xy: np.ndarray) -> np.ndarray:
+    x = np.asarray(grid_xy[:, 0], dtype=np.float32)
+    y = np.asarray(grid_xy[:, 1], dtype=np.float32)
+    body = (np.abs(x) <= 0.35) & (np.abs(y) <= 0.35)
+    front = x >= -0.05
+    return body | front
+
+
+def height_map_to_height_scan(
+    data: np.ndarray,
+    width: int,
+    height: int,
+    resolution: float,
+    origin_xy: list[float] | tuple[float, float] | np.ndarray,
+    robot_xy_yaw_z: list[float] | tuple[float, float, float, float] | np.ndarray,
+    contract: HeightScanContract,
+    *,
+    sentinel_abs_threshold: float = 5.0,
+    min_valid_ratio: float = 0.60,
+    min_critical_valid_ratio: float = 0.95,
+    ground_band: tuple[float, float] = (-0.85, 0.15),
+    fill_value: float = 0.0,
+) -> tuple[np.ndarray, dict]:
+    """Convert an odom-frame elevation grid into an Isaac-style height scan.
+
+    Unitree's height map marks unknown cells with large finite sentinels such as
+    1e9. Those cells are treated as invalid terrain, not as high obstacles.
+    """
+
+    width = int(width)
+    height = int(height)
+    resolution = float(resolution)
+    if width <= 0 or height <= 0:
+        raise ValueError(f"height map width/height must be positive, got {width}x{height}")
+    if resolution <= 0.0 or not np.isfinite(resolution):
+        raise ValueError(f"height map resolution must be positive and finite, got {resolution}")
+    if sentinel_abs_threshold <= 0.0 or not np.isfinite(sentinel_abs_threshold):
+        raise ValueError(f"sentinel_abs_threshold must be positive and finite, got {sentinel_abs_threshold}")
+    if len(ground_band) != 2 or ground_band[0] >= ground_band[1]:
+        raise ValueError(f"invalid ground_band: {ground_band}")
+
+    raw = np.asarray(data, dtype=np.float32)
+    if raw.size != width * height:
+        raise ValueError(f"height map data size must be {width * height}, got {raw.size}")
+    grid = raw.reshape((height, width))
+    origin = np.asarray(origin_xy, dtype=np.float64)
+    if origin.shape != (2,):
+        raise ValueError(f"origin_xy must have shape (2,), got {origin.shape}")
+    robot = np.asarray(robot_xy_yaw_z, dtype=np.float64)
+    if robot.shape != (4,):
+        raise ValueError(f"robot_xy_yaw_z must have shape (4,), got {robot.shape}")
+
+    scan = np.full((contract.height_scan_dim,), float(fill_value), dtype=np.float32)
+    scan = np.clip(scan, contract.clip[0], contract.clip[1]).astype(np.float32)
+    valid_cells = np.zeros((contract.height_scan_dim,), dtype=bool)
+    sentinel_cells = np.zeros((contract.height_scan_dim,), dtype=bool)
+    out_of_bounds_cells = np.zeros((contract.height_scan_dim,), dtype=bool)
+    ground_band_reject_cells = np.zeros((contract.height_scan_dim,), dtype=bool)
+
+    robot_x, robot_y, yaw, robot_z = robot
+    cos_yaw = math.cos(float(yaw))
+    sin_yaw = math.sin(float(yaw))
+    ground_min, ground_max = float(ground_band[0]), float(ground_band[1])
+
+    for index, (base_x, base_y) in enumerate(contract.grid_xy.astype(np.float64)):
+        map_x = robot_x + cos_yaw * base_x - sin_yaw * base_y
+        map_y = robot_y + sin_yaw * base_x + cos_yaw * base_y
+        ix = int(round((map_x - origin[0]) / resolution))
+        iy = int(round((map_y - origin[1]) / resolution))
+        if ix < 0 or ix >= width or iy < 0 or iy >= height:
+            out_of_bounds_cells[index] = True
+            continue
+
+        map_height = float(grid[iy, ix])
+        if not math.isfinite(map_height) or abs(map_height) >= sentinel_abs_threshold:
+            sentinel_cells[index] = True
+            continue
+
+        z_base = map_height - robot_z
+        if z_base < ground_min or z_base > ground_max:
+            ground_band_reject_cells[index] = True
+            continue
+
+        scan[index] = float(np.clip((-z_base - contract.offset) * contract.scale, contract.clip[0], contract.clip[1]))
+        valid_cells[index] = True
+
+    critical_mask = _height_map_critical_mask(contract.grid_xy)
+    num_valid_cells = int(np.count_nonzero(valid_cells))
+    num_critical_cells = int(np.count_nonzero(critical_mask))
+    num_critical_valid_cells = int(np.count_nonzero(valid_cells & critical_mask))
+    valid_ratio = float(num_valid_cells / contract.height_scan_dim) if contract.height_scan_dim else 0.0
+    critical_valid_ratio = float(num_critical_valid_cells / num_critical_cells) if num_critical_cells else 0.0
+
+    sentinel_count = int(np.count_nonzero(sentinel_cells))
+    critical_sentinel_count = int(np.count_nonzero(sentinel_cells & critical_mask))
+    out_of_bounds_count = int(np.count_nonzero(out_of_bounds_cells))
+    critical_out_of_bounds_count = int(np.count_nonzero(out_of_bounds_cells & critical_mask))
+    ground_band_reject_count = int(np.count_nonzero(ground_band_reject_cells))
+    critical_ground_band_reject_count = int(np.count_nonzero(ground_band_reject_cells & critical_mask))
+
+    has_critical_reject = bool(
+        critical_sentinel_count > 0
+        or critical_out_of_bounds_count > 0
+        or critical_ground_band_reject_count > 0
+    )
+    ok = bool(
+        valid_ratio >= min_valid_ratio
+        and critical_valid_ratio >= min_critical_valid_ratio
+        and not has_critical_reject
+    )
+    failure_reason = "none"
+    if not ok:
+        if critical_sentinel_count > 0:
+            failure_reason = "sentinel_critical"
+        elif critical_out_of_bounds_count > 0:
+            failure_reason = "out_of_bounds_critical"
+        elif critical_ground_band_reject_count > 0:
+            failure_reason = "ground_band_critical"
+        elif critical_valid_ratio < min_critical_valid_ratio:
+            failure_reason = "sparse_critical"
+        elif valid_ratio < min_valid_ratio:
+            failure_reason = "sparse_height_map"
+
+    diag = {
+        "ok": ok,
+        "height_scan_ok": ok,
+        "valid_ratio": valid_ratio,
+        "critical_valid_ratio": critical_valid_ratio,
+        "num_points": int(width * height),
+        "num_valid_cells": num_valid_cells,
+        "num_critical_cells": num_critical_cells,
+        "num_critical_valid_cells": num_critical_valid_cells,
+        "sentinel_cells": sentinel_count,
+        "critical_sentinel_cells": critical_sentinel_count,
+        "out_of_bounds_cells": out_of_bounds_count,
+        "critical_out_of_bounds_cells": critical_out_of_bounds_count,
+        "ground_band_reject_cells": ground_band_reject_count,
+        "critical_ground_band_reject_cells": critical_ground_band_reject_count,
+        "min": float(np.min(scan)) if scan.size else 0.0,
+        "max": float(np.max(scan)) if scan.size else 0.0,
+        "mean": float(np.mean(scan)) if scan.size else 0.0,
+        "used_fallback": False,
+        "failure_reason": failure_reason,
+    }
+    return scan.astype(np.float32), diag
 
 
 def points_to_height_scan(

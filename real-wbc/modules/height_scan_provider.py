@@ -1,4 +1,4 @@
-"""ROS2 PointCloud2 provider for opt-in LiDAR height scans."""
+"""ROS2 provider for opt-in terrain height scans."""
 
 from __future__ import annotations
 
@@ -11,7 +11,12 @@ from typing import Any, Optional
 import numpy as np
 import yaml
 
-from modules.height_scan_core import HeightScanContract, load_height_scan_contract, points_to_height_scan
+from modules.height_scan_core import (
+    HeightScanContract,
+    height_map_to_height_scan,
+    load_height_scan_contract,
+    points_to_height_scan,
+)
 
 
 @dataclass
@@ -48,6 +53,14 @@ def _transform_from_ros_msg(msg: Any) -> StaticTransform:
         translation=np.array([t.x, t.y, t.z], dtype=np.float64),
         rotation_xyzw=np.array([r.x, r.y, r.z, r.w], dtype=np.float64),
     )
+
+
+def _yaw_from_ros_quat(quat: Any) -> float:
+    x = float(quat.x)
+    y = float(quat.y)
+    z = float(quat.z)
+    w = float(quat.w)
+    return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
 
 
 def load_static_transform(path: str | None) -> Optional[StaticTransform]:
@@ -121,23 +134,29 @@ def pointcloud2_to_xyz(msg: Any) -> np.ndarray:
 
 
 class HeightScanProvider:
-    """Subscribe to PointCloud2 and expose a safe 187-D height scan."""
+    """Subscribe to terrain observations and expose a safe 187-D height scan."""
 
     def __init__(
         self,
         node: Any,
         *,
         contract_path: str,
+        source: str = "pointcloud2",
         topic: str = "/unilidar/cloud",
+        pose_topic: str = "/utlidar/robot_pose",
         base_frame: str = "base",
         lidar_frame: str = "unilidar_lidar",
         extrinsic_path: str | None = None,
         timeout_s: float = 0.25,
         min_valid_ratio: float = 0.60,
+        min_critical_valid_ratio: float = 0.95,
+        sentinel_abs_threshold: float = 5.0,
         fallback: str = "last_valid_then_zero",
         max_last_valid_age_s: float = 0.5,
         qos_profile: int = 10,
     ):
+        if source not in {"pointcloud2", "height_map_array"}:
+            raise ValueError(f"unsupported height-scan source: {source}")
         if fallback not in {"last_valid_then_zero", "zero"}:
             raise ValueError(f"unsupported height-scan fallback mode: {fallback}")
         max_last_valid_age_s = float(max_last_valid_age_s)
@@ -145,11 +164,15 @@ class HeightScanProvider:
             raise ValueError(f"max_last_valid_age_s must be finite and non-negative, got {max_last_valid_age_s}")
         self.node = node
         self.contract: HeightScanContract = load_height_scan_contract(contract_path)
+        self.source = source
         self.topic = topic
+        self.pose_topic = pose_topic
         self.base_frame = base_frame
         self.lidar_frame = lidar_frame
         self.timeout_s = float(timeout_s)
         self.min_valid_ratio = float(min_valid_ratio)
+        self.min_critical_valid_ratio = float(min_critical_valid_ratio)
+        self.sentinel_abs_threshold = float(sentinel_abs_threshold)
         self.fallback = fallback
         self.max_last_valid_age_s = max_last_valid_age_s
         self.static_transform = load_static_transform(extrinsic_path)
@@ -158,6 +181,8 @@ class HeightScanProvider:
         self.last_diag: dict[str, Any] = self._base_diag("no_cloud")
         self.last_msg_time: float | None = None
         self.last_valid_monotonic_time: float | None = None
+        self.last_pose_msg: Any | None = None
+        self.last_pose_time: float | None = None
 
         self.tf_buffer = None
         self.tf_listener = None
@@ -169,9 +194,17 @@ class HeightScanProvider:
         except Exception as exc:
             self.last_diag["tf_status"] = f"unavailable: {exc}"
 
-        from sensor_msgs.msg import PointCloud2
+        self.pose_subscription = None
+        if self.source == "pointcloud2":
+            from sensor_msgs.msg import PointCloud2
 
-        self.subscription = node.create_subscription(PointCloud2, topic, self._cloud_callback, qos_profile)
+            self.subscription = node.create_subscription(PointCloud2, topic, self._cloud_callback, qos_profile)
+        else:
+            from geometry_msgs.msg import PoseStamped
+            from unitree_go.msg import HeightMap
+
+            self.subscription = node.create_subscription(HeightMap, topic, self._height_map_callback, qos_profile)
+            self.pose_subscription = node.create_subscription(PoseStamped, pose_topic, self._pose_callback, qos_profile)
 
     def _base_diag(self, fallback_reason: str) -> dict[str, Any]:
         return {
@@ -190,6 +223,12 @@ class HeightScanProvider:
             "last_valid_age_s": float("inf"),
             "stale_last_valid_age_s": float("inf"),
             "topic": self.topic if hasattr(self, "topic") else "",
+            "source": self.source if hasattr(self, "source") else "",
+            "height_scan_source": self.source if hasattr(self, "source") else "",
+            "pose_topic": self.pose_topic if hasattr(self, "pose_topic") else "",
+            "critical_valid_ratio": 0.0,
+            "sentinel_cells": 0,
+            "critical_sentinel_cells": 0,
             "height_scan_ok": False,
         }
 
@@ -228,6 +267,8 @@ class HeightScanProvider:
                     {
                         "age_s": 0.0,
                         "topic": self.topic,
+                        "source": self.source,
+                        "height_scan_source": self.source,
                         "source_frame": source_frame,
                         "base_frame": self.base_frame,
                         "transform_status": transform_status,
@@ -243,6 +284,8 @@ class HeightScanProvider:
                 {
                     "age_s": 0.0,
                     "topic": self.topic,
+                    "source": self.source,
+                    "height_scan_source": self.source,
                     "source_frame": source_frame,
                     "base_frame": self.base_frame,
                     "transform_status": transform_status,
@@ -257,7 +300,132 @@ class HeightScanProvider:
                 self.last_valid_monotonic_time = now
         except Exception as exc:
             diag = self._base_diag("invalid_cloud")
-            diag.update({"error": str(exc), "age_s": 0.0, "source_frame": source_frame, "failure_reason": "invalid_cloud"})
+            diag.update(
+                {
+                    "error": str(exc),
+                    "age_s": 0.0,
+                    "topic": self.topic,
+                    "source": self.source,
+                    "height_scan_source": self.source,
+                    "source_frame": source_frame,
+                    "failure_reason": "invalid_cloud",
+                }
+            )
+            self.last_msg_time = now
+            self.last_diag = diag
+
+    def _pose_callback(self, msg: Any) -> None:
+        self.last_pose_msg = msg
+        self.last_pose_time = time.monotonic()
+
+    def _height_map_pose(self, now: float) -> tuple[tuple[float, float, float, float] | None, str, str, float]:
+        if self.last_pose_msg is None or self.last_pose_time is None:
+            return None, "", "missing_pose", float("inf")
+        pose_age_s = float(now - self.last_pose_time)
+        if pose_age_s > self.timeout_s:
+            return None, getattr(self.last_pose_msg.header, "frame_id", ""), "stale_pose", pose_age_s
+        pose = self.last_pose_msg.pose
+        frame_id = getattr(self.last_pose_msg.header, "frame_id", "")
+        return (
+            (
+                float(pose.position.x),
+                float(pose.position.y),
+                _yaw_from_ros_quat(pose.orientation),
+                float(pose.position.z),
+            ),
+            frame_id,
+            "ok",
+            pose_age_s,
+        )
+
+    def _height_map_callback(self, msg: Any) -> None:
+        now = time.monotonic()
+        map_frame = getattr(msg, "frame_id", "")
+        robot_pose, pose_frame, pose_status, pose_age_s = self._height_map_pose(now)
+        if robot_pose is None:
+            diag = self._base_diag(pose_status)
+            diag.update(
+                {
+                    "age_s": 0.0,
+                    "topic": self.topic,
+                    "source": self.source,
+                    "height_scan_source": self.source,
+                    "map_frame": map_frame,
+                    "pose_frame": pose_frame,
+                    "pose_age_s": pose_age_s,
+                    "height_scan_ok": False,
+                    "failure_reason": pose_status,
+                }
+            )
+            self.last_msg_time = now
+            self.last_diag = diag
+            return
+        if not map_frame or not pose_frame or map_frame != pose_frame:
+            diag = self._base_diag("frame_mismatch")
+            diag.update(
+                {
+                    "age_s": 0.0,
+                    "topic": self.topic,
+                    "source": self.source,
+                    "height_scan_source": self.source,
+                    "map_frame": map_frame,
+                    "pose_frame": pose_frame,
+                    "pose_age_s": pose_age_s,
+                    "height_scan_ok": False,
+                    "failure_reason": "frame_mismatch",
+                }
+            )
+            self.last_msg_time = now
+            self.last_diag = diag
+            return
+        try:
+            scan, diag = height_map_to_height_scan(
+                np.asarray(msg.data, dtype=np.float32),
+                int(msg.width),
+                int(msg.height),
+                float(msg.resolution),
+                msg.origin,
+                robot_pose,
+                self.contract,
+                sentinel_abs_threshold=self.sentinel_abs_threshold,
+                min_valid_ratio=self.min_valid_ratio,
+                min_critical_valid_ratio=self.min_critical_valid_ratio,
+            )
+            diag.update(
+                {
+                    "age_s": 0.0,
+                    "topic": self.topic,
+                    "source": self.source,
+                    "height_scan_source": self.source,
+                    "map_frame": map_frame,
+                    "pose_frame": pose_frame,
+                    "pose_topic": self.pose_topic,
+                    "pose_age_s": pose_age_s,
+                    "height_scan_ok": bool(diag["ok"]),
+                    "transform_status": "height_map_pose",
+                }
+            )
+            self.last_msg_time = now
+            self.last_diag = diag
+            if diag["height_scan_ok"]:
+                self.last_scan = scan.copy()
+                self.last_valid_scan = scan.copy()
+                self.last_valid_monotonic_time = now
+        except Exception as exc:
+            diag = self._base_diag("invalid_height_map")
+            diag.update(
+                {
+                    "error": str(exc),
+                    "age_s": 0.0,
+                    "topic": self.topic,
+                    "source": self.source,
+                    "height_scan_source": self.source,
+                    "map_frame": map_frame,
+                    "pose_frame": pose_frame,
+                    "pose_age_s": pose_age_s,
+                    "failure_reason": "invalid_height_map",
+                }
+            )
             self.last_msg_time = now
             self.last_diag = diag
 
