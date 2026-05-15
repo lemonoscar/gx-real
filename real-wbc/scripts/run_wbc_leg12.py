@@ -1,17 +1,19 @@
 import argparse
 import datetime
 import logging
-from rich.logging import RichHandler
 import numpy as np
 import os
 
-import rclpy
-from modules.wbc_node_leg12_arm_passthrough import WBCNodeLeg12ArmPassthrough
+try:
+    from rich.logging import RichHandler
+except ImportError:
+    RichHandler = logging.StreamHandler
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REAL_WBC_DIR = os.path.dirname(SCRIPT_DIR)
 GX_REAL_ROOT = os.path.dirname(REAL_WBC_DIR)
 DEFAULT_POLICY_PATH = os.path.join(GX_REAL_ROOT, "policies", "policy.onnx")
+DEFAULT_HEIGHT_SCAN_CONTRACT = os.path.join(GX_REAL_ROOT, "policies", "height_scan_contract.yaml")
 DEFAULT_LOG_DIR = os.path.join(GX_REAL_ROOT, "logs")
 
 
@@ -87,6 +89,28 @@ if __name__ == "__main__":
     parser.add_argument("--cmd-vy", type=float, default=0.0)
     parser.add_argument("--cmd-yaw", type=float, default=0.0)
     parser.add_argument("--gripper-cmd", type=float, default=0.0)
+    parser.add_argument("--enable-height-scan", action="store_true")
+    parser.add_argument(
+        "--height-scan-contract",
+        type=str,
+        default=DEFAULT_HEIGHT_SCAN_CONTRACT,
+    )
+    parser.add_argument("--height-scan-topic", type=str, default="/unilidar/cloud")
+    parser.add_argument("--height-scan-base-frame", type=str, default="base")
+    parser.add_argument("--height-scan-lidar-frame", type=str, default="unilidar_lidar")
+    parser.add_argument(
+        "--height-scan-extrinsic",
+        type=str,
+        default=None,
+    )
+    parser.add_argument("--height-scan-timeout", type=float, default=0.25)
+    parser.add_argument("--height-scan-min-valid-ratio", type=float, default=0.60)
+    parser.add_argument(
+        "--height-scan-fallback",
+        choices=["last_valid_then_zero", "zero"],
+        default="last_valid_then_zero",
+    )
+    parser.add_argument("--height-scan-max-last-valid-age", type=float, default=0.5)
     parser.add_argument(
         "--leg-kp",
         type=float,
@@ -144,6 +168,9 @@ if __name__ == "__main__":
     run_log_dir = configure_logging(args.logging_dir)
     args.logging_dir = run_log_dir
     logging.info(f"Run logs: {run_log_dir}")
+
+    import rclpy
+    from modules.wbc_node_leg12_arm_passthrough import WBCNodeLeg12ArmPassthrough
 
     rclpy.init(args=None)
     wbc_node = WBCNodeLeg12ArmPassthrough(**vars(args))

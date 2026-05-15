@@ -20,6 +20,12 @@ from modules.arm_cartesian_decoder import (
     ArmCartesianCommandDecoder,
     ArmCartesianDecodeResult,
 )
+from modules.height_scan_provider import HeightScanProvider
+from modules.height_scan_policy_validation import (
+    HEIGHT_SCAN_POLICY_FUNCS,
+    ZERO_HEIGHT_SCAN_FUNC,
+    validate_height_scan_runtime_mode,
+)
 from transforms3d import affines, quaternions, euler
 
 MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -117,10 +123,11 @@ EXPECTED_POLICY_OBS_FUNCS = {
     "joint_pos": "isaaclab.envs.mdp.observations:joint_pos_rel",
     "joint_vel": "isaaclab.envs.mdp.observations:joint_vel_rel",
     "actions": "robot_lab.tasks.manager_based.locomotion.velocity.mdp.observations:last_action_with_padding",
-    "height_scan": "robot_lab.tasks.manager_based.locomotion.velocity.config.quadruped.go2_x5.train_route_env_cfg:_zero_height_scan",
+    "height_scan": ZERO_HEIGHT_SCAN_FUNC,
     "arm_joint_command": "isaaclab.envs.mdp.observations:generated_commands",
     "gripper_command": "robot_lab.tasks.manager_based.locomotion.velocity.mdp.observations:constant_observation",
 }
+ALLOWED_HEIGHT_SCAN_FUNCS = HEIGHT_SCAN_POLICY_FUNCS
 
 
 class _PolicyConfigLoader(yaml.SafeLoader):
@@ -184,7 +191,14 @@ def _build_joint_gain_array(
     return joint_values
 
 
-def _validate_policy_config(config: Dict, leg_joint_names: List[str], joint_names: List[str]):
+def _validate_policy_config(
+    config: Dict,
+    leg_joint_names: List[str],
+    joint_names: List[str],
+    *,
+    enable_height_scan: bool,
+    config_path: Optional[str] = None,
+):
     if len(leg_joint_names) != LEG_DOF:
         raise RuntimeError(
             f"expected {LEG_DOF} dog joints, got {len(leg_joint_names)}: {leg_joint_names}"
@@ -206,6 +220,13 @@ def _validate_policy_config(config: Dict, leg_joint_names: List[str], joint_name
         raise RuntimeError(f"policy observation is missing required terms: {missing_terms}")
     for term_name, expected_func in EXPECTED_POLICY_OBS_FUNCS.items():
         actual_func = policy_obs_cfg[term_name].get("func")
+        if term_name == "height_scan":
+            validate_height_scan_runtime_mode(
+                actual_func,
+                enable_height_scan,
+                config_path=config_path,
+            )
+            continue
         if actual_func != expected_func:
             raise RuntimeError(
                 f"unsupported observation func for {term_name}: expected {expected_func}, got {actual_func}"
@@ -271,6 +292,16 @@ class WBCNodeLeg12ArmPassthrough(Node):
         live_ready_pose_calibration: bool = True,
         leg_kp: float = 200.0,
         leg_kd: float = 10.0,
+        enable_height_scan: bool = False,
+        height_scan_contract: str = "policies/height_scan_contract.yaml",
+        height_scan_topic: str = "/unilidar/cloud",
+        height_scan_base_frame: str = "base",
+        height_scan_lidar_frame: str = "unilidar_lidar",
+        height_scan_extrinsic: Optional[str] = None,
+        height_scan_timeout: float = 0.25,
+        height_scan_min_valid_ratio: float = 0.60,
+        height_scan_fallback: str = "last_valid_then_zero",
+        height_scan_max_last_valid_age: float = 0.5,
     ):
         super().__init__("deploy_node")  # type: ignore
         self.replay_speed = replay_speed
@@ -387,6 +418,24 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.last_teleop_invalid_log_time = -1.0
         self.policy_diag_log_interval = 0.5
         self.last_policy_diag_log_time = -1.0
+        self.height_scan_diag_log_interval = 0.5
+        self.last_height_scan_diag_log_time = -1.0
+        self.enable_height_scan = bool(enable_height_scan)
+        self.height_scan_contract_path = height_scan_contract
+        self.height_scan_topic = height_scan_topic
+        self.height_scan_base_frame = height_scan_base_frame
+        self.height_scan_lidar_frame = height_scan_lidar_frame
+        self.height_scan_extrinsic = height_scan_extrinsic
+        self.height_scan_timeout = float(height_scan_timeout)
+        self.height_scan_min_valid_ratio = float(height_scan_min_valid_ratio)
+        self.height_scan_fallback = height_scan_fallback
+        self.height_scan_max_last_valid_age = float(height_scan_max_last_valid_age)
+        self.height_scan_provider: Optional[HeightScanProvider] = None
+        self.latest_height_scan_diag: Dict[str, object] = {
+            "height_scan_ok": False,
+            "used_fallback": True,
+            "fallback_reason": "disabled_zero",
+        }
         self.arm_diag_log_interval = 0.5
         self.last_arm_diag_log_time = -1.0
         self.align_to_policy_active = False
@@ -637,6 +686,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.default_dof_pos: np.ndarray
         self.device = device
         self.init_policy(policy_path=policy_path)
+        self.init_height_scan_provider()
         self.reset_arm_passthrough_pose()
         self.stand_target_leg_pos = self._build_internal_stand_leg_pos(self.leg_action_offset)
         self.pre_getup_leg_pos = self._build_pre_getup_leg_pos(self.stand_target_leg_pos)
@@ -756,6 +806,50 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.init_orn_err_tolerance = init_orn_err_tolerance
 
         self.target_input_mode = "passthrough"
+
+    def init_height_scan_provider(self):
+        if not self.enable_height_scan:
+            logging.info("Height scan provider disabled; using zero height_scan observation")
+            return
+        contract_path = self.height_scan_contract_path
+        if not os.path.isabs(contract_path):
+            contract_path = os.path.join(GX_REAL_ROOT, contract_path)
+        self.height_scan_provider = HeightScanProvider(
+            self,
+            contract_path=contract_path,
+            topic=self.height_scan_topic,
+            base_frame=self.height_scan_base_frame,
+            lidar_frame=self.height_scan_lidar_frame,
+            extrinsic_path=self.height_scan_extrinsic,
+            timeout_s=self.height_scan_timeout,
+            min_valid_ratio=self.height_scan_min_valid_ratio,
+            fallback=self.height_scan_fallback,
+            max_last_valid_age_s=self.height_scan_max_last_valid_age,
+        )
+        contract = self.height_scan_provider.contract
+        if contract.obs_dim != self.obs_dim:
+            raise RuntimeError(f"height-scan contract obs_dim={contract.obs_dim} does not match policy input {self.obs_dim}")
+        if contract.height_scan_dim != self.height_scan_default.shape[0]:
+            raise RuntimeError(
+                f"height-scan contract dim={contract.height_scan_dim} does not match policy slice "
+                f"{self.height_scan_default.shape[0]}"
+            )
+        if contract.observation_slices.get("height_scan") != [66, 253]:
+            raise RuntimeError(
+                f"height-scan contract slice must be [66, 253], got {contract.observation_slices.get('height_scan')}"
+            )
+        logging.info(
+            "Height scan provider enabled | topic=%s contract=%s timeout=%.3f min_valid_ratio=%.2f "
+            "fallback=%s max_last_valid_age=%.3f"
+            % (
+                self.height_scan_topic,
+                contract_path,
+                self.height_scan_timeout,
+                self.height_scan_min_valid_ratio,
+                self.height_scan_fallback,
+                self.height_scan_max_last_valid_age,
+            )
+        )
 
     def _build_internal_stand_leg_pos(self, policy_leg_pos: np.ndarray) -> np.ndarray:
         del policy_leg_pos
@@ -1023,6 +1117,54 @@ class WBCNodeLeg12ArmPassthrough(Node):
                 np.array2string(self.arm_passthrough_pose, precision=3, floatmode="fixed"),
             )
         )
+
+    def get_height_scan_observation(self) -> np.ndarray:
+        if not self.enable_height_scan or self.height_scan_provider is None:
+            return self.height_scan_default.copy()
+        scan, diag = self.height_scan_provider.get_scan()
+        scan = np.asarray(scan, dtype=np.float64).reshape(-1)
+        if scan.shape[0] != self.height_scan_default.shape[0]:
+            logging.error(
+                "Invalid height_scan provider shape: got %s expected %s; using zero fallback",
+                scan.shape,
+                self.height_scan_default.shape,
+            )
+            scan = self.height_scan_default.copy()
+            diag = dict(diag)
+            diag.update(
+                {
+                    "height_scan_ok": False,
+                    "used_fallback": True,
+                    "fallback_reason": "shape_mismatch_zero",
+                }
+            )
+        clip = self.height_scan_provider.contract.clip
+        scan = np.nan_to_num(scan, nan=0.0, posinf=clip[1], neginf=clip[0])
+        scan = np.clip(scan, clip[0], clip[1])
+        self.latest_height_scan_diag = dict(diag)
+        now = time.monotonic()
+        if (
+            self.last_height_scan_diag_log_time < 0.0
+            or (now - self.last_height_scan_diag_log_time) >= self.height_scan_diag_log_interval
+        ):
+            logging.info(
+                "Height scan diag | ok=%s fallback=%s reason=%s age_s=%.3f valid_ratio=%.3f "
+                "points=%d cells=%d min=%.3f max=%.3f mean=%.3f"
+                % (
+                    bool(diag.get("height_scan_ok", diag.get("ok", False))),
+                    bool(diag.get("used_fallback", False)),
+                    diag.get("fallback_reason", "none"),
+                    float(diag.get("age_s", float("inf"))),
+                    float(diag.get("valid_ratio", 0.0)),
+                    int(diag.get("num_points", 0)),
+                    int(diag.get("num_valid_cells", 0)),
+                    float(diag.get("min", 0.0)),
+                    float(diag.get("max", 0.0)),
+                    float(diag.get("mean", 0.0)),
+                )
+            )
+            self.last_height_scan_diag_log_time = now
+        return scan
 
     def set_runtime_leg_offset(self, leg_offset: np.ndarray, source: str):
         leg_offset = np.asarray(leg_offset, dtype=np.float64)
@@ -1948,7 +2090,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         base_lin_vel = self.estimated_linear_velocity.copy()
         commands = self.fixed_commands.copy()
         last_actions = self.prev_action.copy()
-        height_scan = self.height_scan_default.copy()
+        height_scan = self.get_height_scan_observation()
         arm_joint_command = self.arm_passthrough_pose.copy()
         gripper_command = np.array([self.fixed_gripper_cmd], dtype=np.float64)
 
@@ -2001,6 +2143,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
                 "foot_contact": foot_contact.copy(),
                 "arm_joint_command": arm_joint_command.copy(),
                 "height_scan": height_scan.copy(),
+                "height_scan_diag": dict(self.latest_height_scan_diag),
                 "obs": obs.copy(),
                 "time_since_policy_started": time.monotonic() - self.start_policy_time,
                 "time_monotonic": time.monotonic(),
@@ -2628,7 +2771,13 @@ class WBCNodeLeg12ArmPassthrough(Node):
 
         joint_names = list(config["joint_names"])
         leg_joint_names = list(config["dog_joint_names"])
-        _validate_policy_config(config, leg_joint_names, joint_names)
+        _validate_policy_config(
+            config,
+            leg_joint_names,
+            joint_names,
+            enable_height_scan=self.enable_height_scan,
+            config_path=config_path,
+        )
         self.policy_leg_joint_names = leg_joint_names.copy()
         self.policy_leg_indices_from_interface = np.array(
             [INTERFACE_LEG_JOINT_NAMES.index(name) for name in leg_joint_names],
@@ -2734,6 +2883,11 @@ class WBCNodeLeg12ArmPassthrough(Node):
             raise RuntimeError(
                 f"invalid observation dimension: {self.obs_dim} < {known_obs_dim}"
             )
+        if self.obs_dim != 260:
+            raise RuntimeError(f"expected DogOnly policy input_dim=260, got {self.obs_dim}")
+        if height_scan_dim != 187:
+            raise RuntimeError(f"expected DogOnly height_scan_dim=187, got {height_scan_dim}")
+        self.height_scan_slice = (66, 253)
         self.height_scan_default = np.zeros(height_scan_dim, dtype=np.float64)
         placeholder_obs = np.zeros((1, self.obs_dim), dtype=np.float32)
         self.ort_session.run([self.ort_output_name], {self.ort_input_name: placeholder_obs})

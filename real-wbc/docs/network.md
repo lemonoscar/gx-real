@@ -1,110 +1,191 @@
-# Network Setup for Fully Untethered Development 
-The network setup procedure should be the same for most of the Unitree robots, not only Go2. Having a good internet connection will be extremely beneficial for reproducing our robot pipeline (attaching VSCode editors, downloading checkpoints, building docker containers, etc.). We highly recommend carefully setting-up the wireless internet connection to get fully untethered deployment.
+# 网络与通信配置
 
-## Local Network Configuration
-Unitree robots use a same local network segment: `192.168.123.xxx`. Thus, after using an ethernet cable to connect your computer to a unitree robot, you need to set your ip address to the same segment.
+这份文档覆盖 Go2 局域网、机器人外网、ROS2 通信和 ARX5 `can0`。当前上机流程里，网络问题通常会表现为：
 
-Please check out the unitree official [documentation](https://support.unitree.com/home/en/developer/ROS2_service) and follow the *Connect to Unitree robot* section.
+- 收不到 `lowstate`。
+- `sport_mode` 状态不可用。
+- `disable_sports_mode_go2` 找不到机器人。
+- ARX5 初始化失败，或者 `can0` 不存在。
 
+## 1. Go2 局域网
 
+Unitree Go2 默认使用 `192.168.123.xxx` 网段。连接方式通常是：
 
-## Internet Connection
+```text
+开发电脑/Jetson 网口 <-> Go2 机身网络
+```
 
-Since the net port on the unitree jetson is already assigned with the local network segment, directly connecting it to a router or a net port in your office may not work. To have internet access, you can either use a usb-ethernet adapter or a usb-wifi module.
+检查网卡：
 
-After connecting a usb-ethernet adapter to your Unitree jetson and then use an ethernet cable to connect it to the internet net port (in your lab/office), it may still unable to connect to the internet. This is because the default route with the highest priority is the local network: after typing `ip a`, you may find `default via 192.168.123.1` on top of all other routes. You can delete this route so that the other route (through the adapter to the internet) has the highest priority:
+```bash
+ip a
+ip route
+```
 
-```sh
+你需要确认连接 Go2 的网卡处于同一网段，例如：
+
+```text
+192.168.123.10/24
+```
+
+如果无法发现机器人，先确认：
+
+- 网线连接正确。
+- 网卡 IP 在 `192.168.123.xxx`。
+- 没有被 WiFi/其他网卡路由覆盖。
+- ROS2 使用的是 Unitree 对应的 CycloneDDS 配置。
+
+## 2. ROS2 环境
+
+进入仓库后：
+
+```bash
+cd ~/gx-real
+source scripts/setup_env.sh
+scripts/check_env.sh
+```
+
+如果 ROS2 消息正常，`check_env.sh` 应该能通过 `unitree_go` 和 `unitree_api` 的 import/type support 检查。
+
+常用检查：
+
+```bash
+ros2 topic list
+ros2 topic echo /lowstate
+ros2 topic echo /wirelesscontroller
+```
+
+如果 topic 不存在或没有数据：
+
+- 先检查 Go2 局域网连接。
+- 确认 `unitree_ros2/cyclonedds_ws/install/setup.bash` 已被加载。
+- 确认没有错误地从 `unitree_sdk2/python` 导入旧消息包。
+
+## 3. 关闭 sport mode
+
+Go2 原厂高层控制和低层 `lowcmd` 不能同时控制电机。真机上机前先执行：
+
+```bash
+scripts/disable_sports_mode_go2.sh eth0
+```
+
+`eth0` 要换成连接 Go2 的实际网卡。脚本会：
+
+- 检查 `unitree_sdk2`。
+- 如果缺少 `build/disable_sports_mode_go2`，自动编译。
+- 设置 SDK 动态库路径。
+- 调用 Unitree SDK 工具关闭 sport mode。
+
+如果失败，优先检查：
+
+- 网卡名是否正确。
+- Go2 是否在 `192.168.123.xxx` 链路上。
+- `unitree_sdk2/build` 是否能正常编译。
+- 机器人是否已经进入可通信状态。
+
+## 4. 外网连接
+
+Go2 的机身网络经常占用默认路由，例如：
+
+```text
+default via 192.168.123.1
+```
+
+如果同时接了实验室网线或 USB WiFi，但仍然不能访问外网，可以临时删除 Go2 局域网默认路由：
+
+```bash
 sudo route del -net 0.0.0.0 netmask 0.0.0.0 gw 192.168.123.1
 ```
 
-To run this code automatically every time you turn on your robot, you can create a system service that automatically runs it.
+确认外网：
 
-First write a script and save it to `/home/unitree/delete_route.sh`.
-
-```sh
-#!/bin/bash
-
-while true;
-   do
-    if ip route | head -n 1 | grep -q "default via 192.168.123.1"; then
-        # Delete the route if it exists
-        sudo route del -net 0.0.0.0 netmask 0.0.0.0 gw 192.168.123.1
-    fi 
-    sleep 10s
-   done
+```bash
+ip route
+ping 8.8.8.8
 ```
 
-Then create this service file and save it into the systemd directory `/etc/systemd/system/delete_route.service`
-```
-[Unit]
-Description=Disable the default LAN route 
-After=network.target
+如果需要每次开机自动处理，可以把删除路由逻辑放到 systemd 服务里。生产上机前建议先手动确认，避免误删实际需要的路由。
 
-[Service]
-ExecStart=/home/unitree/delete_route.sh
-type=simple
-Restart=on-failure
-RestartSec=5
+## 5. ARX5 SocketCAN
 
-[Install]
-WantedBy=multi-user.target
+X5 机械臂通过 USB-CAN 转接到 SocketCAN。当前代码默认使用：
+
+```text
+can0
 ```
 
+推荐配置：
 
-Finally enable the system service
-
-```sh
-sudo systemctl daemon-reload
-sudo systemctl enable delete_route.service
-sudo systemctl start delete_route.service
+```bash
+scripts/setup_arx_can.sh
 ```
 
-## Wifi Module Setup
+如果自动识别失败，显式指定设备：
 
-We tested two wifi modules:
-
-- [A USB2.0 module](https://a.co/d/0ciXDmGC): Low speed, but doesn't require additional driver.
-- [A USB3.0 module](https://a.co/d/0hogevhr): High speed, but requires additional driver
-
-We recommend that you buy both modules because you may need internet to install the driver for the faster module. 
-
-Note that it may take some time (~1min) for the wifi module to be recognized by the linux system. Therefore, it is normal if the wifi is not connected right after the system boots up.
-
-### AC1300 Wifi driver installation guide
-
-If you already have Internet access on your Jetson module, directly clone the following repository. If not, you can download it to your laptop and use the local network to synchronize the repository to Jetson.
-```sh
-git clone https://github.com/cilynx/rtl88x2bu.git
-cd rtl88x2bu
-vim Makefile
+```bash
+scripts/setup_arx_can.sh /dev/ttyACM0 can0 8
+scripts/setup_arx_can.sh /dev/serial/by-id/usb-XXXX can0 8
 ```
-Then configure the target platform in the `Makefile`: find the following config options 
-```Makefile
-CONFIG_PLATFORM_I386_PC = y
-...
-CONFIG_PLATFORM_ARM_NV_NANO = n
+
+检查 `can0`：
+
+```bash
+ip -details link show can0
 ```
-and modify it to
-```Makefile
-CONFIG_PLATFORM_I386_PC = n
-...
-CONFIG_PLATFORM_ARM_NV_NANO = y
+
+正常情况下应该能看到 `can0` 已经 `UP`。如果不存在：
+
+- USB-CAN 没插好。
+- 设备名不是 `/dev/ttyACM0` 或 `/dev/ttyUSB0`。
+- `slcand` 没启动成功。
+- 当前用户没有足够权限执行 `sudo modprobe` / `sudo ip link`。
+
+## 6. 机械臂初始化错误
+
+如果启动时出现：
+
+```text
+None of the motors are initialized. Please check the connection or power of the arm.
 ```
-The driver works for other NV Jetson modules as well (not only Jetson Nano).
 
-Finally, build the driver and install it to your jetson:
-```sh
-make -j
-sudo make install
-sudo modprobe 88x2bu
+含义是：
+
+- `can0` 已经被 ARX5 SDK 打开。
+- 但是 SDK 没有收到任何 X5 电机初始化反馈。
+
+优先检查：
+
+- X5 是否供电。
+- X5 急停/开关是否处于可用状态。
+- CAN 线是否连接到 X5。
+- `can0` 是否对应正确的 USB-CAN。
+- 机械臂电机是否完成初始化。
+
+当前代码默认会继续 body-only 运行。若希望机械臂不在线就直接中止，启动时加：
+
+```bash
+--require-arm
 ```
-Reboot, then connect your TP-link AC1300 adapter. Wifi connection should be available in ~1 minute.
 
-Reference: https://forums.developer.nvidia.com/t/wifi-adapter-tplink-ac1300/243480
+## 7. 常见问题
 
-## Trouble Shooting
+### `ros2 topic list` 没有 Unitree topic
 
-### Q1: The wifi module works under my personal hotspot, but I have trouble connecting it to the university wifi.
-This happens when there is an authentication process to connect to a university wifi (e.g. Stanford). You can first follow the [previous section](#internet-connection) and make sure the default route is correct. If the authentication page still doesn't show up, you can try to connect your wifi adapter to your own computer where you should be able to successfully register it to your university network. Make sure you have turned off all the other network interfaces in your computer and the wifi adapter is the only valid interface.
+处理顺序：
 
+1. `source scripts/setup_env.sh`
+2. 检查 Go2 网卡 IP。
+3. 检查 CycloneDDS 配置。
+4. 重启 ROS2 shell 后重试。
+
+### `sport_mode` 状态没收到
+
+当前控制器默认会拒绝低层 rollout。先修复状态链路；只有受控诊断时才使用：
+
+```bash
+--allow-unknown-sport-mode
+```
+
+### ARX5 的 `can0` 正常但机械臂不动
+
+`can0 UP` 只代表 SocketCAN 接口存在，不代表电机已经在线。继续检查 X5 电源、电机初始化和 CAN 线。
