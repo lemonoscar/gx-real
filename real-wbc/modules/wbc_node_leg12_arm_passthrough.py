@@ -1338,6 +1338,14 @@ class WBCNodeLeg12ArmPassthrough(Node):
         if self.start_policy:
             logging.warning("Policy is running; stop it with R2 before restarting stand-up")
             return
+        if self.start_time != -1.0:
+            remaining = self.active_getup_total_time - (time.monotonic() - self.start_time)
+            if remaining > 0.0:
+                logging.warning(
+                    "Internal stand-up is already active; wait %.1fs before pressing R1 again"
+                    % remaining
+                )
+                return
         self.init_leg_pos = self.interface_to_policy_leg_order(self.quadruped_q).copy()
         ready_error = float(np.max(np.abs(self.leg_action_offset - self.init_leg_pos)))
         crouch_error = float(np.max(np.abs(self.pre_getup_leg_pos - self.init_leg_pos)))
@@ -1402,9 +1410,15 @@ class WBCNodeLeg12ArmPassthrough(Node):
         if self.start_policy:
             logging.info("Policy is already running")
             return
+        current_leg_q = self.interface_to_policy_leg_order(self.quadruped_q).copy()
+        if (
+            self.standup_mode == "manual"
+            and self.live_ready_pose_calibration
+        ):
+            self.set_runtime_leg_offset(current_leg_q, "l2_current_standing_pose")
         self.align_to_policy_active = True
         self.align_to_policy_start_time = time.monotonic()
-        self.align_to_policy_leg_start = self.interface_to_policy_leg_order(self.quadruped_q).copy()
+        self.align_to_policy_leg_start = current_leg_q.copy()
         lowstate = self.get_arm_joint_state()
         self.align_to_policy_arm_start = lowstate.pos().copy()
         self.reset_arm_passthrough_pose()
