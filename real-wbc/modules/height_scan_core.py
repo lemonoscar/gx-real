@@ -134,13 +134,16 @@ def _add_critical_coverage_diag(diag: dict, grid_xy: np.ndarray, valid_cells: np
     critical_mask = _height_scan_critical_mask(grid_xy)
     num_critical_cells = int(np.count_nonzero(critical_mask))
     num_critical_valid_cells = int(np.count_nonzero(valid_cells & critical_mask))
+    critical_valid_ratio = (
+        float(num_critical_valid_cells / num_critical_cells) if num_critical_cells else 0.0
+    )
     diag.update(
         {
-            "critical_valid_ratio": (
-                float(num_critical_valid_cells / num_critical_cells) if num_critical_cells else 0.0
-            ),
+            "critical_valid_ratio": critical_valid_ratio,
+            "critical_accepted_ratio": critical_valid_ratio,
             "num_critical_cells": num_critical_cells,
             "num_critical_valid_cells": num_critical_valid_cells,
+            "num_critical_accepted_cells": num_critical_valid_cells,
         }
     )
     return diag
@@ -158,6 +161,7 @@ def height_map_to_height_scan(
     sentinel_abs_threshold: float = 5.0,
     min_valid_ratio: float = 0.60,
     min_critical_valid_ratio: float = 0.95,
+    max_critical_sentinel_cells: int = 0,
     ground_band: tuple[float, float] = (-0.85, 0.15),
     fill_value: float = 0.0,
 ) -> tuple[np.ndarray, dict]:
@@ -176,6 +180,9 @@ def height_map_to_height_scan(
         raise ValueError(f"height map resolution must be positive and finite, got {resolution}")
     if sentinel_abs_threshold <= 0.0 or not np.isfinite(sentinel_abs_threshold):
         raise ValueError(f"sentinel_abs_threshold must be positive and finite, got {sentinel_abs_threshold}")
+    max_critical_sentinel_cells = int(max_critical_sentinel_cells)
+    if max_critical_sentinel_cells < 0:
+        raise ValueError(f"max_critical_sentinel_cells must be non-negative, got {max_critical_sentinel_cells}")
     if len(ground_band) != 2 or ground_band[0] >= ground_band[1]:
         raise ValueError(f"invalid ground_band: {ground_band}")
 
@@ -252,30 +259,34 @@ def height_map_to_height_scan(
     footprint_filled_count = int(np.count_nonzero(footprint_filled_cells))
     critical_sentinel_count = int(np.count_nonzero(sentinel_cells & critical_mask & ~footprint_mask))
     noncritical_sentinel_count = int(sentinel_count - footprint_sentinel_count - critical_sentinel_count)
+    tolerated_critical_sentinel_count = min(critical_sentinel_count, max_critical_sentinel_cells)
+    critical_sentinel_over_limit_count = max(0, critical_sentinel_count - max_critical_sentinel_cells)
+    num_critical_accepted_cells = num_critical_valid_cells + tolerated_critical_sentinel_count
+    critical_accepted_ratio = float(num_critical_accepted_cells / num_critical_cells) if num_critical_cells else 0.0
     out_of_bounds_count = int(np.count_nonzero(out_of_bounds_cells))
     critical_out_of_bounds_count = int(np.count_nonzero(out_of_bounds_cells & critical_mask))
     ground_band_reject_count = int(np.count_nonzero(ground_band_reject_cells))
     critical_ground_band_reject_count = int(np.count_nonzero(ground_band_reject_cells & critical_mask))
 
     has_critical_reject = bool(
-        critical_sentinel_count > 0
+        critical_sentinel_over_limit_count > 0
         or critical_out_of_bounds_count > 0
         or critical_ground_band_reject_count > 0
     )
     ok = bool(
         raw_valid_ratio >= min_valid_ratio
-        and critical_valid_ratio >= min_critical_valid_ratio
+        and critical_accepted_ratio >= min_critical_valid_ratio
         and not has_critical_reject
     )
     failure_reason = "none"
     if not ok:
-        if critical_sentinel_count > 0:
+        if critical_sentinel_over_limit_count > 0:
             failure_reason = "sentinel_critical"
         elif critical_out_of_bounds_count > 0:
             failure_reason = "out_of_bounds_critical"
         elif critical_ground_band_reject_count > 0:
             failure_reason = "ground_band_critical"
-        elif critical_valid_ratio < min_critical_valid_ratio:
+        elif critical_accepted_ratio < min_critical_valid_ratio:
             failure_reason = "sparse_critical"
         elif raw_valid_ratio < min_valid_ratio:
             failure_reason = "sparse_height_map"
@@ -286,15 +297,20 @@ def height_map_to_height_scan(
         "valid_ratio": valid_ratio,
         "raw_valid_ratio": raw_valid_ratio,
         "critical_valid_ratio": critical_valid_ratio,
+        "critical_accepted_ratio": critical_accepted_ratio,
         "num_points": int(width * height),
         "num_valid_cells": num_valid_cells,
         "num_raw_valid_cells": num_raw_valid_cells,
         "num_critical_cells": num_critical_cells,
         "num_critical_valid_cells": num_critical_valid_cells,
+        "num_critical_accepted_cells": num_critical_accepted_cells,
         "sentinel_cells": sentinel_count,
         "footprint_sentinel_cells": footprint_sentinel_count,
         "footprint_filled_cells": footprint_filled_count,
         "critical_sentinel_cells": critical_sentinel_count,
+        "critical_sentinel_tolerated_cells": tolerated_critical_sentinel_count,
+        "critical_sentinel_over_limit_cells": critical_sentinel_over_limit_count,
+        "max_critical_sentinel_cells": max_critical_sentinel_cells,
         "noncritical_sentinel_cells": noncritical_sentinel_count,
         "out_of_bounds_cells": out_of_bounds_count,
         "critical_out_of_bounds_cells": critical_out_of_bounds_count,

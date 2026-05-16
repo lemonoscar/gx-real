@@ -150,6 +150,7 @@ class HeightScanProvider:
         timeout_s: float = 0.25,
         min_valid_ratio: float = 0.60,
         min_critical_valid_ratio: float = 0.95,
+        max_critical_sentinel_cells: int = 10,
         sentinel_abs_threshold: float = 5.0,
         fallback: str = "last_valid_then_zero",
         max_last_valid_age_s: float = 0.5,
@@ -162,6 +163,11 @@ class HeightScanProvider:
         max_last_valid_age_s = float(max_last_valid_age_s)
         if max_last_valid_age_s < 0.0 or not math.isfinite(max_last_valid_age_s):
             raise ValueError(f"max_last_valid_age_s must be finite and non-negative, got {max_last_valid_age_s}")
+        max_critical_sentinel_cells = int(max_critical_sentinel_cells)
+        if max_critical_sentinel_cells < 0:
+            raise ValueError(
+                f"max_critical_sentinel_cells must be non-negative, got {max_critical_sentinel_cells}"
+            )
         self.node = node
         self.contract: HeightScanContract = load_height_scan_contract(contract_path)
         self.source = source
@@ -172,6 +178,7 @@ class HeightScanProvider:
         self.timeout_s = float(timeout_s)
         self.min_valid_ratio = float(min_valid_ratio)
         self.min_critical_valid_ratio = float(min_critical_valid_ratio)
+        self.max_critical_sentinel_cells = max_critical_sentinel_cells
         self.sentinel_abs_threshold = float(sentinel_abs_threshold)
         self.fallback = fallback
         self.max_last_valid_age_s = max_last_valid_age_s
@@ -227,10 +234,16 @@ class HeightScanProvider:
             "height_scan_source": self.source if hasattr(self, "source") else "",
             "pose_topic": self.pose_topic if hasattr(self, "pose_topic") else "",
             "critical_valid_ratio": 0.0,
+            "critical_accepted_ratio": 0.0,
             "sentinel_cells": 0,
             "footprint_sentinel_cells": 0,
             "footprint_filled_cells": 0,
             "critical_sentinel_cells": 0,
+            "critical_sentinel_tolerated_cells": 0,
+            "critical_sentinel_over_limit_cells": 0,
+            "max_critical_sentinel_cells": (
+                self.max_critical_sentinel_cells if hasattr(self, "max_critical_sentinel_cells") else 0
+            ),
             "noncritical_sentinel_cells": 0,
             "height_scan_clean": False,
             "height_scan_ok": False,
@@ -403,6 +416,7 @@ class HeightScanProvider:
                 sentinel_abs_threshold=self.sentinel_abs_threshold,
                 min_valid_ratio=self.min_valid_ratio,
                 min_critical_valid_ratio=self.min_critical_valid_ratio,
+                max_critical_sentinel_cells=self.max_critical_sentinel_cells,
             )
             diag.update(
                 {

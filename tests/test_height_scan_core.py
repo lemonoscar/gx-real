@@ -207,3 +207,28 @@ def test_height_map_critical_sentinel_fails_closed():
     assert diag["critical_sentinel_cells"] == 1
     assert diag["footprint_sentinel_cells"] == 0
     assert diag["failure_reason"] == "sentinel_critical"
+
+
+def test_height_map_bounded_critical_sentinel_can_be_tolerated():
+    contract = _contract()
+    data, origin, resolution = _flat_height_map()
+    _set_map_cell(data, origin, resolution, (0.4, 0.0), 1.0e9)
+
+    _, diag = height_map_to_height_scan(
+        data.reshape(-1),
+        data.shape[1],
+        data.shape[0],
+        resolution,
+        origin,
+        (0.0, 0.0, 0.0, contract.offset),
+        contract,
+        max_critical_sentinel_cells=1,
+    )
+
+    assert diag["ok"] is True
+    assert diag["height_scan_clean"] is False
+    assert diag["critical_sentinel_cells"] == 1
+    assert diag["critical_sentinel_tolerated_cells"] == 1
+    assert diag["critical_sentinel_over_limit_cells"] == 0
+    assert diag["critical_accepted_ratio"] >= 0.95
+    assert diag["failure_reason"] == "none"

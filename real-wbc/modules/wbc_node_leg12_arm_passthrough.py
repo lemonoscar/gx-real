@@ -303,6 +303,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         height_scan_timeout: float = 0.25,
         height_scan_min_valid_ratio: float = 0.60,
         height_scan_min_critical_valid_ratio: float = 0.95,
+        height_scan_max_critical_sentinel_cells: int = 10,
         height_scan_sentinel_abs_threshold: float = 5.0,
         height_scan_fallback: str = "last_valid_then_zero",
         height_scan_max_last_valid_age: float = 0.5,
@@ -435,6 +436,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.height_scan_timeout = float(height_scan_timeout)
         self.height_scan_min_valid_ratio = float(height_scan_min_valid_ratio)
         self.height_scan_min_critical_valid_ratio = float(height_scan_min_critical_valid_ratio)
+        self.height_scan_max_critical_sentinel_cells = int(height_scan_max_critical_sentinel_cells)
         self.height_scan_sentinel_abs_threshold = float(height_scan_sentinel_abs_threshold)
         self.height_scan_fallback = height_scan_fallback
         self.height_scan_max_last_valid_age = float(height_scan_max_last_valid_age)
@@ -834,6 +836,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
             timeout_s=self.height_scan_timeout,
             min_valid_ratio=self.height_scan_min_valid_ratio,
             min_critical_valid_ratio=self.height_scan_min_critical_valid_ratio,
+            max_critical_sentinel_cells=self.height_scan_max_critical_sentinel_cells,
             sentinel_abs_threshold=self.height_scan_sentinel_abs_threshold,
             fallback=self.height_scan_fallback,
             max_last_valid_age_s=self.height_scan_max_last_valid_age,
@@ -852,7 +855,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
             )
         logging.info(
             "Height scan provider enabled | source=%s topic=%s pose_topic=%s contract=%s timeout=%.3f "
-            "min_valid_ratio=%.2f min_critical_valid_ratio=%.2f fallback=%s max_last_valid_age=%.3f"
+            "min_valid_ratio=%.2f min_critical_valid_ratio=%.2f max_critical_sentinel_cells=%d "
+            "fallback=%s max_last_valid_age=%.3f"
             % (
                 self.height_scan_source,
                 self.height_scan_topic,
@@ -861,6 +865,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
                 self.height_scan_timeout,
                 self.height_scan_min_valid_ratio,
                 self.height_scan_min_critical_valid_ratio,
+                self.height_scan_max_critical_sentinel_cells,
                 self.height_scan_fallback,
                 self.height_scan_max_last_valid_age,
             )
@@ -1164,9 +1169,10 @@ class WBCNodeLeg12ArmPassthrough(Node):
         ):
             logging.info(
                 "Height scan diag | ok=%s fallback=%s source=%s reason=%s age_s=%.3f "
-                "valid_ratio=%.3f raw_valid_ratio=%.3f critical_ratio=%.3f points=%d cells=%d "
-                "sentinel=%d footprint_sentinel=%d footprint_filled=%d critical_sentinel=%d "
-                "noncritical_sentinel=%d min=%.3f max=%.3f mean=%.3f"
+                "valid_ratio=%.3f raw_valid_ratio=%.3f critical_ratio=%.3f critical_accept_ratio=%.3f "
+                "points=%d cells=%d sentinel=%d footprint_sentinel=%d footprint_filled=%d "
+                "critical_sentinel=%d critical_sentinel_limit=%d critical_sentinel_over_limit=%d "
+                "noncritical_sentinel=%d clean=%s min=%.3f max=%.3f mean=%.3f"
                 % (
                     bool(diag.get("height_scan_ok", diag.get("ok", False))),
                     bool(diag.get("used_fallback", False)),
@@ -1176,13 +1182,17 @@ class WBCNodeLeg12ArmPassthrough(Node):
                     float(diag.get("valid_ratio", 0.0)),
                     float(diag.get("raw_valid_ratio", diag.get("valid_ratio", 0.0))),
                     float(diag.get("critical_valid_ratio", 0.0)),
+                    float(diag.get("critical_accepted_ratio", diag.get("critical_valid_ratio", 0.0))),
                     int(diag.get("num_points", 0)),
                     int(diag.get("num_valid_cells", 0)),
                     int(diag.get("sentinel_cells", 0)),
                     int(diag.get("footprint_sentinel_cells", 0)),
                     int(diag.get("footprint_filled_cells", 0)),
                     int(diag.get("critical_sentinel_cells", 0)),
+                    int(diag.get("max_critical_sentinel_cells", 0)),
+                    int(diag.get("critical_sentinel_over_limit_cells", 0)),
                     int(diag.get("noncritical_sentinel_cells", 0)),
+                    bool(diag.get("height_scan_clean", False)),
                     float(diag.get("min", 0.0)),
                     float(diag.get("max", 0.0)),
                     float(diag.get("mean", 0.0)),

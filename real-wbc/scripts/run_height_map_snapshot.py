@@ -139,6 +139,7 @@ def _sample_grid(msg, pose_msg, contract, args: argparse.Namespace) -> dict:
         sentinel_abs_threshold=args.sentinel_abs_threshold,
         min_valid_ratio=args.min_raw_valid_ratio,
         min_critical_valid_ratio=args.min_critical_valid_ratio,
+        max_critical_sentinel_cells=args.max_critical_sentinel_cells,
     )
     del scan
 
@@ -189,8 +190,12 @@ def _print_snapshot(msg, pose_msg, contract, sample: dict, args: argparse.Namesp
         "raw_valid_ratio=%.3f" % float(diag.get("raw_valid_ratio", 0.0)),
         "valid_ratio=%.3f" % float(diag.get("valid_ratio", 0.0)),
         "critical_ratio=%.3f" % float(diag.get("critical_valid_ratio", 0.0)),
+        "critical_accept_ratio=%.3f" % float(diag.get("critical_accepted_ratio", 0.0)),
         "critical_sentinel=%d" % int(diag.get("critical_sentinel_cells", 0)),
+        "critical_sentinel_limit=%d" % int(diag.get("max_critical_sentinel_cells", 0)),
+        "critical_sentinel_over_limit=%d" % int(diag.get("critical_sentinel_over_limit_cells", 0)),
         "footprint_filled=%d" % int(diag.get("footprint_filled_cells", 0)),
+        "clean=%s" % bool(diag.get("height_scan_clean", False)),
         "reason=%s" % diag.get("failure_reason", "none"),
     )
 
@@ -227,8 +232,9 @@ def _print_snapshot(msg, pose_msg, contract, sample: dict, args: argparse.Namesp
     print(
         "flat_ground_check:",
         "raw_valid_ratio_ok=%s" % (float(diag.get("raw_valid_ratio", 0.0)) >= args.min_raw_valid_ratio),
-        "critical_ok=%s" % (float(diag.get("critical_valid_ratio", 0.0)) >= args.min_critical_valid_ratio),
-        "critical_sentinel_ok=%s" % (int(diag.get("critical_sentinel_cells", 0)) == 0),
+        "critical_ok=%s" % (float(diag.get("critical_accepted_ratio", 0.0)) >= args.min_critical_valid_ratio),
+        "critical_sentinel_ok=%s"
+        % (int(diag.get("critical_sentinel_cells", 0)) <= args.max_critical_sentinel_cells),
         "flatness_ok=%s" % (flatness <= args.max_flatness),
     )
 
@@ -242,6 +248,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sentinel-abs-threshold", type=float, default=5.0)
     parser.add_argument("--min-raw-valid-ratio", type=float, default=0.85)
     parser.add_argument("--min-critical-valid-ratio", type=float, default=0.95)
+    parser.add_argument("--max-critical-sentinel-cells", type=int, default=10)
     parser.add_argument("--max-flatness", type=float, default=0.08)
     parser.add_argument("--footprint-x-min", type=float, default=-0.35)
     parser.add_argument("--footprint-x-max", type=float, default=0.25)

@@ -112,6 +112,7 @@ if __name__ == "__main__":
     parser.add_argument("--height-scan-timeout", type=float, default=0.25)
     parser.add_argument("--height-scan-min-valid-ratio", type=float, default=0.60)
     parser.add_argument("--height-scan-min-critical-valid-ratio", type=float, default=0.95)
+    parser.add_argument("--height-scan-max-critical-sentinel-cells", type=int, default=10)
     parser.add_argument("--height-scan-sentinel-abs-threshold", type=float, default=5.0)
     parser.add_argument(
         "--height-scan-fallback",

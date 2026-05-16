@@ -110,6 +110,7 @@ def _height_map_provider(**kwargs):
         timeout_s=kwargs.pop("timeout_s", 0.25),
         min_valid_ratio=kwargs.pop("min_valid_ratio", 0.90),
         min_critical_valid_ratio=kwargs.pop("min_critical_valid_ratio", 0.95),
+        max_critical_sentinel_cells=kwargs.pop("max_critical_sentinel_cells", 10),
         fallback=kwargs.pop("fallback", "last_valid_then_zero"),
         max_last_valid_age_s=kwargs.pop("max_last_valid_age_s", 0.5),
         **kwargs,
@@ -312,7 +313,7 @@ def test_height_map_array_footprint_sentinel_is_filled_not_fallback():
 
 
 def test_height_map_array_critical_sentinel_fails_closed():
-    provider = _height_map_provider()
+    provider = _height_map_provider(max_critical_sentinel_cells=0)
     data = _flat_height_map()
     _set_height_map_cell(data, (0.4, 0.0), 1.0e9)
 
@@ -327,6 +328,25 @@ def test_height_map_array_critical_sentinel_fails_closed():
     assert "sentinel_critical" in diag["fallback_reason"]
     assert diag["critical_sentinel_cells"] == 1
     assert diag["footprint_sentinel_cells"] == 0
+
+
+def test_height_map_array_bounded_critical_sentinel_can_be_tolerated():
+    provider = _height_map_provider(max_critical_sentinel_cells=1)
+    data = _flat_height_map()
+    _set_height_map_cell(data, (0.4, 0.0), 1.0e9)
+
+    provider._pose_callback(_pose_msg())
+    provider._height_map_callback(_height_map_msg(data))
+    _, diag = provider.get_scan()
+
+    assert provider.last_scan is not None
+    assert diag["height_scan_ok"] is True
+    assert diag["used_fallback"] is False
+    assert diag["height_scan_clean"] is False
+    assert diag["critical_sentinel_cells"] == 1
+    assert diag["critical_sentinel_tolerated_cells"] == 1
+    assert diag["critical_sentinel_over_limit_cells"] == 0
+    assert diag["critical_accepted_ratio"] >= provider.min_critical_valid_ratio
 
 
 def test_height_map_array_frame_mismatch_fails_closed():
@@ -397,7 +417,11 @@ def test_stale_last_valid_scan_is_not_reused(monkeypatch):
 def test_height_map_critical_unknown_short_gap_may_reuse_last_valid(monkeypatch):
     now = [300.0]
     monkeypatch.setattr(height_scan_provider_module.time, "monotonic", lambda: now[0])
-    provider = _height_map_provider(timeout_s=0.25, max_last_valid_age_s=0.5)
+    provider = _height_map_provider(
+        timeout_s=0.25,
+        max_last_valid_age_s=0.5,
+        max_critical_sentinel_cells=0,
+    )
     valid_data = _flat_height_map(value=0.1)
     provider._pose_callback(_pose_msg())
     provider._height_map_callback(_height_map_msg(valid_data))
@@ -420,7 +444,11 @@ def test_height_map_critical_unknown_short_gap_may_reuse_last_valid(monkeypatch)
 def test_height_map_critical_unknown_stale_last_valid_is_not_reused(monkeypatch):
     now = [400.0]
     monkeypatch.setattr(height_scan_provider_module.time, "monotonic", lambda: now[0])
-    provider = _height_map_provider(timeout_s=0.25, max_last_valid_age_s=0.5)
+    provider = _height_map_provider(
+        timeout_s=0.25,
+        max_last_valid_age_s=0.5,
+        max_critical_sentinel_cells=0,
+    )
     valid_data = _flat_height_map(value=0.1)
     provider._pose_callback(_pose_msg())
     provider._height_map_callback(_height_map_msg(valid_data))
