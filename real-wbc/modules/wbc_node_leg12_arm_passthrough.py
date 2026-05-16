@@ -98,6 +98,14 @@ SPORT_MODE_BALANCE_STAND = 1
 SPORT_MODE_RECOVERY_STAND = 8
 TELEOP_MODE_ARM = 0
 TELEOP_MODE_BASE = 1
+BUTTON_R1 = 1
+BUTTON_L1 = 2
+BUTTON_R2 = 16
+BUTTON_L2 = 32
+BUTTON_A = int(2**8)
+BUTTON_B = int(2**9)
+BUTTON_X = int(2**10)
+BUTTON_Y = int(2**11)
 GRIPPER_MIN = 0.0
 GRIPPER_MAX = 0.08
 
@@ -772,7 +780,9 @@ class WBCNodeLeg12ArmPassthrough(Node):
         logging.info("Press A to enable SpaceMouse arm teleop, X to reset arm, Y to zero base command")
         logging.info("Press B to toggle SpaceMouse teleop Arm/Base mode")
         logging.info("Press L1 for emergency stop")
-        self.key_is_pressed = False  # for key press event
+        self.button_debounce_s = 0.5
+        self.button_prev_pressed: Dict[int, bool] = {}
+        self.button_last_trigger_time: Dict[int, float] = {}
 
         # Set up Arm
         self.gripper_pos_cmd = self.fixed_gripper_cmd
@@ -1963,105 +1973,103 @@ class WBCNodeLeg12ArmPassthrough(Node):
             return (time.monotonic() - self.start_time) >= self.active_getup_total_time
         return self.latest_tick != -1
 
-    def joy_stick_cb(self, msg):
-        if msg.keys == 1:  # R1: start pipeline
-            if not self.key_is_pressed:
-                if self.uses_unitree_standup:
-                    logging.info("standing up")
-                    self.start_unitree_standup()
-                elif self.uses_internal_standup:
-                    logging.info("standing up")
-                    self.start()
-                else:
-                    logging.info("Manual stand-up mode: use the controller to stand the robot up, then press L2")
-            self.key_is_pressed = True
+    def button_pressed_once(self, keys: int, button: int, now: float) -> bool:
+        pressed = bool(keys & button)
+        was_pressed = self.button_prev_pressed.get(button, False)
+        self.button_prev_pressed[button] = pressed
+        if not pressed or was_pressed:
+            return False
+        last_trigger_time = self.button_last_trigger_time.get(button, -float("inf"))
+        if now - last_trigger_time < self.button_debounce_s:
+            return False
+        self.button_last_trigger_time[button] = now
+        return True
 
-        if msg.keys == 16:  # R2: stop policy
-            if not self.key_is_pressed:
-                logging.info("Stop policy")
-                self.start_policy = False
-                self.align_to_policy_active = False
-                self.pose_test_active = False
-                self.policy_motion_started = False
-                self.fixed_commands[:] = self.policy_takeover_commands
-                self.policy_command_start = self.policy_takeover_commands.copy()
-                self.policy_command_target = self.policy_takeover_commands.copy()
-                self.teleop_base_target[:] = 0.0
-                self.teleop_base_last_time = -1.0
-                self.last_policy_diag_log_time = -1.0
-        if msg.keys == 2:  # L1: emergency stop
+    def joy_stick_cb(self, msg):
+        keys = int(msg.keys)
+        now = time.monotonic()
+
+        if self.button_pressed_once(keys, BUTTON_L1, now):
             logging.info("Emergency stop")
             self.emergency_stop()
-        if msg.keys == 32:  # L2: start policy
-            if not self.key_is_pressed:
-                if self.start_policy:
-                    self.set_policy_command_target(
-                        self.policy_move_commands,
-                        "l2_resume_move_command",
-                        self.policy_command_ramp_duration,
-                    )
-                elif self.pose_test_active:
-                    logging.info("Pose test is already running")
-                elif self.align_to_policy_active:
-                    logging.info("Policy stand alignment is already running")
-                elif self.uses_pose_test:
-                    self.start_pose_test()
-                elif self.ready_to_start_policy:
-                    self.start_policy_alignment()
-                elif self.uses_unitree_standup and self.awaiting_unitree_stand:
-                    elapsed = time.monotonic() - self.unitree_stand_request_time
-                    remaining = max(self.unitree_stand_min_wait - elapsed, 0.0)
-                    logging.warning(
-                        f"Unitree {self.standup_label} is still running; wait {remaining:.1f}s and try L2 again"
-                    )
-                elif self.uses_unitree_standup and self.unitree_stand_request_time == -1.0:
-                    logging.warning(f"Press R1 first to trigger Unitree {self.standup_label}")
-                elif self.uses_unitree_standup:
-                    logging.warning(
-                        f"Unitree {self.standup_label} has not completed yet; wait until the robot returns to a stable stand"
-                    )
-                elif self.uses_internal_standup and self.start_time == -1.0:
-                    logging.warning("Press R1 first to start the stand-up sequence")
-                elif self.uses_internal_standup:
-                    remaining = max(self.active_getup_total_time - (time.monotonic() - self.start_time), 0.0)
-                    logging.warning(f"Stand-up is not finished yet; wait {remaining:.1f}s before pressing L2")
-                else:
-                    logging.warning("Low-state is not ready yet; wait for robot state before pressing L2")
-            self.key_is_pressed = True
-        # if msg.keys == int(2**15):  # Left # NOTE must map to another key, left already used in pose latency
-        #     # pass
 
-        if msg.keys == int(2**8):  # A: hand arm control to SpaceMouse
-            if not self.key_is_pressed:
-                self.enable_spacemouse_arm_teleop("button_A")
-            self.key_is_pressed = True
+        if self.button_pressed_once(keys, BUTTON_R1, now):
+            if self.uses_unitree_standup:
+                logging.info("standing up")
+                self.start_unitree_standup()
+            elif self.uses_internal_standup:
+                logging.info("standing up")
+                self.start()
+            else:
+                logging.info("Manual stand-up mode: use the controller to stand the robot up, then press L2")
 
-        if msg.keys == int(2**10):  # X: reset arm to configured reset pose
-            if not self.key_is_pressed:
-                self.set_arm_passthrough_pose(self.arm_reset_pose, "button_X_reset")
-                self.clear_teleop_eef_target()
-            self.key_is_pressed = True
+        if self.button_pressed_once(keys, BUTTON_R2, now):
+            logging.info("Stop policy")
+            self.start_policy = False
+            self.align_to_policy_active = False
+            self.pose_test_active = False
+            self.policy_motion_started = False
+            self.fixed_commands[:] = self.policy_takeover_commands
+            self.policy_command_start = self.policy_takeover_commands.copy()
+            self.policy_command_target = self.policy_command_target.copy()
+            self.teleop_base_target[:] = 0.0
+            self.teleop_base_last_time = -1.0
+            self.last_policy_diag_log_time = -1.0
 
-        if msg.keys == int(2**11):  # Y: stop base motion while keeping policy alive
-            if not self.key_is_pressed:
-                self.teleop_base_target[:] = 0.0
-                self.teleop_base_last_time = -1.0
-                self.set_teleop_mode(TELEOP_MODE_ARM, "button_Y_zero_base_command")
+        if self.button_pressed_once(keys, BUTTON_L2, now):
+            if self.start_policy:
                 self.set_policy_command_target(
-                    self.policy_takeover_commands,
-                    "button_Y_zero_base_command",
+                    self.policy_move_commands,
+                    "l2_resume_move_command",
                     self.policy_command_ramp_duration,
                 )
-            self.key_is_pressed = True
+            elif self.pose_test_active:
+                logging.info("Pose test is already running")
+            elif self.align_to_policy_active:
+                logging.info("Policy stand alignment is already running")
+            elif self.uses_pose_test:
+                self.start_pose_test()
+            elif self.ready_to_start_policy:
+                self.start_policy_alignment()
+            elif self.uses_unitree_standup and self.awaiting_unitree_stand:
+                elapsed = time.monotonic() - self.unitree_stand_request_time
+                remaining = max(self.unitree_stand_min_wait - elapsed, 0.0)
+                logging.warning(
+                    f"Unitree {self.standup_label} is still running; wait {remaining:.1f}s and try L2 again"
+                )
+            elif self.uses_unitree_standup and self.unitree_stand_request_time == -1.0:
+                logging.warning(f"Press R1 first to trigger Unitree {self.standup_label}")
+            elif self.uses_unitree_standup:
+                logging.warning(
+                    f"Unitree {self.standup_label} has not completed yet; wait until the robot returns to a stable stand"
+                )
+            elif self.uses_internal_standup and self.start_time == -1.0:
+                logging.warning("Press R1 first to start the stand-up sequence")
+            elif self.uses_internal_standup:
+                remaining = max(self.active_getup_total_time - (time.monotonic() - self.start_time), 0.0)
+                logging.warning(f"Stand-up is not finished yet; wait {remaining:.1f}s before pressing L2")
+            else:
+                logging.warning("Low-state is not ready yet; wait for robot state before pressing L2")
 
-        if msg.keys == int(2**9):  # B: switch SpaceMouse teleop Arm/Base mode
-            if not self.key_is_pressed:
-                self.toggle_teleop_mode("button_B")
-            self.key_is_pressed = True
+        if self.button_pressed_once(keys, BUTTON_A, now):
+            self.enable_spacemouse_arm_teleop("button_A")
 
-        if self.key_is_pressed:
-            if msg.keys == 0:
-                self.key_is_pressed = False
+        if self.button_pressed_once(keys, BUTTON_X, now):
+            self.set_arm_passthrough_pose(self.arm_reset_pose, "button_X_reset")
+            self.clear_teleop_eef_target()
+
+        if self.button_pressed_once(keys, BUTTON_Y, now):
+            self.teleop_base_target[:] = 0.0
+            self.teleop_base_last_time = -1.0
+            self.set_teleop_mode(TELEOP_MODE_ARM, "button_Y_zero_base_command")
+            self.set_policy_command_target(
+                self.policy_takeover_commands,
+                "button_Y_zero_base_command",
+                self.policy_command_ramp_duration,
+            )
+
+        if self.button_pressed_once(keys, BUTTON_B, now):
+            self.toggle_teleop_mode("button_B")
 
     # @profile
     def lowlevel_state_cb(self, msg: LowState):
