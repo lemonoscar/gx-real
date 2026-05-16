@@ -105,8 +105,10 @@ def _diagnostics(scan: np.ndarray, *, ok: bool, num_points: int, num_valid_cells
     return {
         "ok": bool(ok),
         "valid_ratio": float(num_valid_cells / finite_scan.size) if finite_scan.size else 0.0,
+        "raw_valid_ratio": float(num_valid_cells / finite_scan.size) if finite_scan.size else 0.0,
         "num_points": int(num_points),
         "num_valid_cells": int(num_valid_cells),
+        "num_raw_valid_cells": int(num_valid_cells),
         "min": float(np.min(finite_scan)) if finite_scan.size else 0.0,
         "max": float(np.max(finite_scan)) if finite_scan.size else 0.0,
         "mean": float(np.mean(finite_scan)) if finite_scan.size else 0.0,
@@ -114,7 +116,7 @@ def _diagnostics(scan: np.ndarray, *, ok: bool, num_points: int, num_valid_cells
     }
 
 
-def _height_map_critical_mask(grid_xy: np.ndarray) -> np.ndarray:
+def _height_scan_critical_mask(grid_xy: np.ndarray) -> np.ndarray:
     x = np.asarray(grid_xy[:, 0], dtype=np.float32)
     y = np.asarray(grid_xy[:, 1], dtype=np.float32)
     body = (np.abs(x) <= 0.35) & (np.abs(y) <= 0.35)
@@ -126,6 +128,22 @@ def _height_map_footprint_unknown_mask(grid_xy: np.ndarray) -> np.ndarray:
     x = np.asarray(grid_xy[:, 0], dtype=np.float32)
     y = np.asarray(grid_xy[:, 1], dtype=np.float32)
     return (x >= -0.35) & (x <= 0.25) & (y >= -0.25) & (y <= 0.25)
+
+
+def _add_critical_coverage_diag(diag: dict, grid_xy: np.ndarray, valid_cells: np.ndarray) -> dict:
+    critical_mask = _height_scan_critical_mask(grid_xy)
+    num_critical_cells = int(np.count_nonzero(critical_mask))
+    num_critical_valid_cells = int(np.count_nonzero(valid_cells & critical_mask))
+    diag.update(
+        {
+            "critical_valid_ratio": (
+                float(num_critical_valid_cells / num_critical_cells) if num_critical_cells else 0.0
+            ),
+            "num_critical_cells": num_critical_cells,
+            "num_critical_valid_cells": num_critical_valid_cells,
+        }
+    )
+    return diag
 
 
 def height_map_to_height_scan(
@@ -206,7 +224,7 @@ def height_map_to_height_scan(
         scan[index] = float(np.clip((-z_base - contract.offset) * contract.scale, contract.clip[0], contract.clip[1]))
         valid_cells[index] = True
 
-    critical_mask = _height_map_critical_mask(contract.grid_xy)
+    critical_mask = _height_scan_critical_mask(contract.grid_xy)
     footprint_mask = _height_map_footprint_unknown_mask(contract.grid_xy)
     footprint_sentinel_mask = sentinel_cells & footprint_mask
     footprint_filled_cells = np.zeros((contract.height_scan_dim,), dtype=bool)
@@ -245,7 +263,7 @@ def height_map_to_height_scan(
         or critical_ground_band_reject_count > 0
     )
     ok = bool(
-        valid_ratio >= min_valid_ratio
+        raw_valid_ratio >= min_valid_ratio
         and critical_valid_ratio >= min_critical_valid_ratio
         and not has_critical_reject
     )
@@ -259,7 +277,7 @@ def height_map_to_height_scan(
             failure_reason = "ground_band_critical"
         elif critical_valid_ratio < min_critical_valid_ratio:
             failure_reason = "sparse_critical"
-        elif valid_ratio < min_valid_ratio:
+        elif raw_valid_ratio < min_valid_ratio:
             failure_reason = "sparse_height_map"
 
     diag = {
@@ -368,22 +386,24 @@ def points_to_height_scan(
 
     num_valid_cells = int(np.count_nonzero(valid_cells))
     if num_valid_cells == 0:
-        return fallback, _diagnostics(
+        diag = _diagnostics(
             fallback,
             ok=False,
             num_points=int(points.shape[0]),
             num_valid_cells=0,
             used_fallback=True,
         )
+        return fallback, _add_critical_coverage_diag(diag, contract.grid_xy, valid_cells)
     scan = np.nan_to_num(scan, nan=float(fill_value), posinf=contract.clip[1], neginf=contract.clip[0])
     scan = np.clip(scan, contract.clip[0], contract.clip[1]).astype(np.float32)
-    return scan, _diagnostics(
+    diag = _diagnostics(
         scan,
         ok=True,
         num_points=int(points.shape[0]),
         num_valid_cells=num_valid_cells,
         used_fallback=False,
     )
+    return scan, _add_critical_coverage_diag(diag, contract.grid_xy, valid_cells)
 
 
 def _points_around_grid(

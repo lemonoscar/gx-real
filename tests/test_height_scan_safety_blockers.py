@@ -239,6 +239,22 @@ def test_lidar_frame_cloud_without_transform_is_rejected_not_used_raw():
     assert "transform_unavailable" in diag["transform_status"]
 
 
+def test_pointcloud_missing_forward_critical_cells_is_rejected():
+    provider = _provider(min_valid_ratio=0.60)
+    points = _valid_points()
+    rear_and_side_points = points[points[:, 0] < 0.3]
+
+    provider._cloud_callback(_cloud(rear_and_side_points, "base"))
+    _, diag = provider.get_scan()
+
+    assert provider.last_scan is None
+    assert diag["height_scan_ok"] is False
+    assert diag["fallback_source"] == "zero"
+    assert "sparse_critical" in diag["fallback_reason"]
+    assert diag["valid_ratio"] >= provider.min_valid_ratio
+    assert diag["critical_valid_ratio"] < provider.min_critical_valid_ratio
+
+
 def test_height_map_array_all_valid_is_accepted():
     provider = _height_map_provider()
     data = _flat_height_map()

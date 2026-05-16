@@ -293,9 +293,18 @@ class HeightScanProvider:
                     "source_frame": source_frame,
                     "base_frame": self.base_frame,
                     "transform_status": transform_status,
-                    "height_scan_ok": bool(diag["ok"] and diag["valid_ratio"] >= self.min_valid_ratio),
+                    "height_scan_ok": bool(
+                        diag["ok"]
+                        and diag["valid_ratio"] >= self.min_valid_ratio
+                        and diag.get("critical_valid_ratio", 0.0) >= self.min_critical_valid_ratio
+                    ),
                 }
             )
+            if not diag["height_scan_ok"]:
+                if diag.get("critical_valid_ratio", 0.0) < self.min_critical_valid_ratio:
+                    diag["failure_reason"] = "sparse_critical"
+                elif diag.get("valid_ratio", 0.0) < self.min_valid_ratio:
+                    diag["failure_reason"] = "sparse_pointcloud"
             self.last_msg_time = now
             self.last_diag = diag
             if diag["height_scan_ok"]:

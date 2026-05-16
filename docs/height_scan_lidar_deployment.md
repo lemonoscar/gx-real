@@ -37,10 +37,16 @@ Perception acceptance:
 
 Only after perception passes:
 
+Use a policy/export pair whose `env.yaml` declares a real `height_scan`
+observation function. Do not enable height scan with the default
+`policies/policy.onnx` / `policies/env.yaml` bundle, which is the flat
+zero-height-scan policy.
+
 ```bash
 scripts/run_leg12_real.sh \
+  --policy_path policies/rough/policy.onnx \
   --enable-height-scan \
-  --height-scan-contract policies/height_scan_contract.yaml \
+  --height-scan-contract policies/rough/height_scan_contract.yaml \
   --height-scan-topic /unilidar/cloud \
   --cmd-vx 0.0 \
   --cmd-vy 0.0 \
@@ -64,8 +70,9 @@ Only after zero-speed policy tests pass:
 
 ```bash
 scripts/run_leg12_real.sh \
+  --policy_path policies/rough/policy.onnx \
   --enable-height-scan \
-  --height-scan-contract policies/height_scan_contract.yaml \
+  --height-scan-contract policies/rough/height_scan_contract.yaml \
   --height-scan-topic /unilidar/cloud \
   --cmd-vx 0.05 \
   --cmd-vy 0.0 \

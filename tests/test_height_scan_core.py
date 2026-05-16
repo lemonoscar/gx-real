@@ -69,6 +69,18 @@ def test_clips_to_contract_range():
     assert np.max(scan) == contract.clip[1]
 
 
+def test_pointcloud_reports_sparse_critical_coverage():
+    contract = _contract()
+    points = make_plane_points(contract.grid_xy, base_height=contract.offset, points_per_cell=1, jitter=0.0)
+    rear_and_side_points = points[points[:, 0] < 0.3]
+
+    _, diag = points_to_height_scan(rear_and_side_points, contract, base_height=contract.offset)
+
+    assert diag["ok"] is True
+    assert diag["valid_ratio"] >= 0.60
+    assert diag["critical_valid_ratio"] < 0.95
+
+
 def test_height_map_all_valid_converts_to_height_scan():
     contract = _contract()
     data, origin, resolution = _flat_height_map()
@@ -143,6 +155,36 @@ def test_height_map_footprint_sentinel_is_filled_and_not_clean():
     assert diag["valid_ratio"] == 1.0
     assert diag["raw_valid_ratio"] < 1.0
     assert np.isclose(scan[np.argmin(np.linalg.norm(contract.grid_xy, axis=1))], -0.1)
+
+
+def test_height_map_footprint_fill_does_not_inflate_coverage_gate():
+    contract = _contract()
+    data, origin, resolution = _flat_height_map(value=0.1)
+    x = contract.grid_xy[:, 0]
+    y = contract.grid_xy[:, 1]
+    footprint = (x >= -0.35) & (x <= 0.25) & (y >= -0.25) & (y <= 0.25)
+    noncritical = (x < -0.05) & ~((np.abs(x) <= 0.35) & (np.abs(y) <= 0.35))
+    sentinel_indices = np.flatnonzero(footprint).tolist() + np.flatnonzero(noncritical)[:50].tolist()
+    for index in sentinel_indices:
+        _set_map_cell(data, origin, resolution, contract.grid_xy[index], 1.0e9)
+
+    _, diag = height_map_to_height_scan(
+        data.reshape(-1),
+        data.shape[1],
+        data.shape[0],
+        resolution,
+        origin,
+        (0.0, 0.0, 0.0, contract.offset),
+        contract,
+        min_valid_ratio=0.60,
+    )
+
+    assert diag["ok"] is False
+    assert diag["failure_reason"] == "sparse_height_map"
+    assert diag["raw_valid_ratio"] < 0.60
+    assert diag["valid_ratio"] >= 0.60
+    assert diag["footprint_filled_cells"] > 0
+    assert diag["critical_sentinel_cells"] == 0
 
 
 def test_height_map_critical_sentinel_fails_closed():
