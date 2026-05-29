@@ -425,6 +425,8 @@ class SpaceMouseArmNode:
                 continue
             if now - motion_time > self.sm_watchdog_sec:
                 continue
+            if not self._motion_sample_active(candidate):
+                continue
             return candidate
         return latest_sample
 
@@ -440,6 +442,25 @@ class SpaceMouseArmNode:
         dead = (-deadzone < raw) & (raw < deadzone)
         raw[dead] = 0.0
         return raw
+
+    def _motion_sample_active(self, sample) -> bool:
+        raw = self._motion_from_spacemouse_sample(sample)
+        if self.sm_use_raw_frame:
+            motion = raw
+        else:
+            tx_zup_spnav = np.asarray(
+                getattr(
+                    self.spacemouse,
+                    "tx_zup_spnav",
+                    np.array([[0, 0, -1], [1, 0, 0], [0, 1, 0]], dtype=np.float64),
+                ),
+                dtype=np.float64,
+            )
+            motion = np.zeros_like(raw)
+            motion[:3] = tx_zup_spnav @ raw[:3]
+            motion[3:] = tx_zup_spnav @ raw[3:]
+        translation, rotation = map_spacemouse_motion(motion, self.mapping, dt=1.0)
+        return _has_nonzero_command(translation, rotation)
 
     def _should_apply_motion_command(
         self,

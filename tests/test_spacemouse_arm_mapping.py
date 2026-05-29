@@ -102,6 +102,44 @@ def test_spacemouse_motion_reads_recent_event_before_latest_zero_heartbeat():
     assert spacemouse_input.motion_sequence == 1
 
 
+def test_spacemouse_motion_prefers_recent_nonzero_event_over_newer_zero_event():
+    node = _make_arm_node_for_unit_tests(
+        [
+            _spacemouse_sample(
+                motion_event=np.array([0, 0, 0, 0, 0, 0, 0], dtype=np.int64),
+                button_state=np.array([False, False]),
+                receive_timestamp=10.00,
+                motion_timestamp=10.00,
+                motion_sequence=1,
+            ),
+            _spacemouse_sample(
+                motion_event=np.array([50, -100, 0, 25, 0, -50, 0], dtype=np.int64),
+                button_state=np.array([False, False]),
+                receive_timestamp=10.01,
+                motion_timestamp=10.01,
+                motion_sequence=2,
+            ),
+            _spacemouse_sample(
+                motion_event=np.zeros(7, dtype=np.int64),
+                button_state=np.array([False, False]),
+                receive_timestamp=10.02,
+                motion_timestamp=10.02,
+                motion_sequence=3,
+            ),
+        ]
+    )
+    node.spacemouse_motion_armed = True
+    node.last_spacemouse_motion_sequence = 1
+
+    spacemouse_input = node._read_spacemouse_input(now=10.03)
+
+    np.testing.assert_allclose(
+        spacemouse_input.motion,
+        [0.1, -0.2, 0.0, 0.05, 0.0, -0.1],
+    )
+    assert spacemouse_input.motion_sequence == 2
+
+
 def test_spacemouse_motion_returns_latest_zero_after_event_consumed():
     node = _make_arm_node_for_unit_tests(
         [
