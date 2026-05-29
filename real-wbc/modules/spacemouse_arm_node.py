@@ -340,11 +340,11 @@ class SpaceMouseArmNode:
         if hasattr(self.spacemouse, "is_alive") and not self.spacemouse.is_alive():
             self._log_stale_spacemouse("reader process is not alive")
             return None
-        sample = self._read_spacemouse_sample()
-        if sample is None:
+        latest_sample = self._read_spacemouse_sample()
+        if latest_sample is None:
             self._log_stale_spacemouse("shared-memory sample is unavailable")
             return None
-        sample_time = _finite_timestamp(sample.get("receive_timestamp"))
+        sample_time = _finite_timestamp(latest_sample.get("receive_timestamp"))
         stamp = time.monotonic() if now is None else float(now)
         if sample_time is None or stamp - sample_time > self.sm_watchdog_sec:
             age = float("nan") if sample_time is None else stamp - sample_time
@@ -352,16 +352,21 @@ class SpaceMouseArmNode:
             return None
 
         buttons = np.asarray(
-            sample.get("button_state", np.zeros(2, dtype=bool)),
+            latest_sample.get("button_state", np.zeros(2, dtype=bool)),
             dtype=bool,
         )
         self.last_spacemouse_button_state = buttons
-        raw = self._motion_from_spacemouse_sample(sample)
+        motion_sample = self._select_spacemouse_motion_sample(
+            latest_sample,
+            now=stamp,
+        )
+        raw = self._motion_from_spacemouse_sample(motion_sample)
+        motion_sequence = _finite_int(motion_sample.get("motion_sequence"))
         if self.sm_use_raw_frame:
             return SpaceMouseInput(
                 motion=raw,
                 buttons=buttons,
-                motion_sequence=_finite_int(sample.get("motion_sequence")),
+                motion_sequence=motion_sequence,
             )
         self.node.get_logger().warning("using transformed SpaceMouse frame: legacy z-up")
         tx_zup_spnav = np.asarray(
@@ -378,7 +383,7 @@ class SpaceMouseArmNode:
         return SpaceMouseInput(
             motion=transformed,
             buttons=buttons,
-            motion_sequence=_finite_int(sample.get("motion_sequence")),
+            motion_sequence=motion_sequence,
         )
 
     def _read_spacemouse_sample(self):
@@ -386,6 +391,42 @@ class SpaceMouseArmNode:
         if ring_buffer is None or not hasattr(ring_buffer, "get"):
             return None
         return ring_buffer.get()
+
+    def _select_spacemouse_motion_sample(self, latest_sample, *, now: float):
+        ring_buffer = getattr(self.spacemouse, "ring_buffer", None)
+        if ring_buffer is None or not hasattr(ring_buffer, "get_last_k"):
+            return latest_sample
+        try:
+            count = int(getattr(ring_buffer, "count", 0))
+            max_k = int(getattr(ring_buffer, "get_max_k", 1))
+            k = min(count, max_k)
+        except (TypeError, ValueError):
+            return latest_sample
+        if k <= 1:
+            return latest_sample
+        try:
+            recent = ring_buffer.get_last_k(k)
+        except Exception as exc:
+            self.node.get_logger().warning(f"Failed to read SpaceMouse recent samples: {exc}")
+            return latest_sample
+
+        for idx in range(k - 1, -1, -1):
+            candidate = _sample_from_batch(recent, idx)
+            sequence = _finite_int(candidate.get("motion_sequence"))
+            if sequence is None:
+                continue
+            if (
+                self.last_spacemouse_motion_sequence is not None
+                and sequence <= self.last_spacemouse_motion_sequence
+            ):
+                continue
+            motion_time = _finite_timestamp(candidate.get("motion_timestamp"))
+            if motion_time is None or motion_time <= 0.0:
+                continue
+            if now - motion_time > self.sm_watchdog_sec:
+                continue
+            return candidate
+        return latest_sample
 
     def _motion_from_spacemouse_sample(self, sample) -> np.ndarray:
         motion_event = np.asarray(sample["motion_event"], dtype=np.float64).reshape(-1)
@@ -597,6 +638,18 @@ def _finite_int(value) -> Optional[int]:
     except (TypeError, ValueError):
         return None
     return number
+
+
+def _sample_from_batch(batch, idx: int):
+    sample = {}
+    for key, value in batch.items():
+        array = np.asarray(value)
+        item = array[idx]
+        if isinstance(item, np.ndarray):
+            sample[key] = item.copy()
+        else:
+            sample[key] = item
+    return sample
 
 
 def _has_nonzero_command(translation: np.ndarray, rotation: np.ndarray) -> bool:

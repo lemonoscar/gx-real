@@ -63,6 +63,72 @@ def test_spacemouse_motion_uses_fresh_sample_timestamp_and_buttons():
     np.testing.assert_array_equal(node.last_spacemouse_button_state, [True, False])
 
 
+def test_spacemouse_motion_reads_recent_event_before_latest_zero_heartbeat():
+    node = _make_arm_node_for_unit_tests(
+        [
+            _spacemouse_sample(
+                motion_event=np.zeros(7, dtype=np.int64),
+                button_state=np.array([False, False]),
+                receive_timestamp=10.00,
+                motion_timestamp=0.0,
+                motion_sequence=0,
+            ),
+            _spacemouse_sample(
+                motion_event=np.array([50, -100, 0, 25, 0, -50, 0], dtype=np.int64),
+                button_state=np.array([False, False]),
+                receive_timestamp=10.01,
+                motion_timestamp=10.01,
+                motion_sequence=1,
+            ),
+            _spacemouse_sample(
+                motion_event=np.zeros(7, dtype=np.int64),
+                button_state=np.array([True, False]),
+                receive_timestamp=10.02,
+                motion_timestamp=0.0,
+                motion_sequence=1,
+            ),
+        ]
+    )
+    node.spacemouse_motion_armed = True
+    node.last_spacemouse_motion_sequence = 0
+
+    spacemouse_input = node._read_spacemouse_input(now=10.03)
+
+    np.testing.assert_allclose(
+        spacemouse_input.motion,
+        [0.1, -0.2, 0.0, 0.05, 0.0, -0.1],
+    )
+    np.testing.assert_array_equal(spacemouse_input.buttons, [True, False])
+    assert spacemouse_input.motion_sequence == 1
+
+
+def test_spacemouse_motion_returns_latest_zero_after_event_consumed():
+    node = _make_arm_node_for_unit_tests(
+        [
+            _spacemouse_sample(
+                motion_event=np.array([50, 0, 0, 0, 0, 0, 0], dtype=np.int64),
+                button_state=np.array([False, False]),
+                receive_timestamp=10.01,
+                motion_timestamp=10.01,
+                motion_sequence=1,
+            ),
+            _spacemouse_sample(
+                motion_event=np.zeros(7, dtype=np.int64),
+                button_state=np.array([False, False]),
+                receive_timestamp=10.02,
+                motion_timestamp=0.0,
+                motion_sequence=1,
+            ),
+        ]
+    )
+    node.last_spacemouse_motion_sequence = 1
+
+    spacemouse_input = node._read_spacemouse_input(now=10.03)
+
+    np.testing.assert_allclose(spacemouse_input.motion, np.zeros(6, dtype=np.float64))
+    assert spacemouse_input.motion_sequence == 1
+
+
 def test_motion_gate_starts_centered_and_requires_new_sequence():
     node = SpaceMouseArmNode.__new__(SpaceMouseArmNode)
     node.spacemouse_motion_armed = False
@@ -172,12 +238,44 @@ def _make_arm_node_for_unit_tests(sample):
     return node
 
 
+def _spacemouse_sample(
+    *,
+    motion_event,
+    button_state,
+    receive_timestamp,
+    motion_timestamp,
+    motion_sequence,
+):
+    return {
+        "motion_event": motion_event,
+        "button_state": button_state,
+        "receive_timestamp": receive_timestamp,
+        "motion_timestamp": motion_timestamp,
+        "motion_sequence": motion_sequence,
+    }
+
+
 class _FakeRingBuffer:
-    def __init__(self, sample):
-        self.sample = sample
+    def __init__(self, sample_or_history):
+        if isinstance(sample_or_history, list):
+            self.history = sample_or_history
+        else:
+            self.history = [sample_or_history]
+        self.get_max_k = 30
+
+    @property
+    def count(self):
+        return len(self.history)
 
     def get(self):
-        return self.sample
+        return self.history[-1]
+
+    def get_last_k(self, k):
+        selected = self.history[-k:]
+        return {
+            key: np.stack([np.asarray(sample[key]) for sample in selected], axis=0)
+            for key in selected[-1]
+        }
 
 
 class _FakeSpaceMouse:
