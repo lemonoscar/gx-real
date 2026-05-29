@@ -231,13 +231,35 @@ def test_estop_damps_and_blocks_future_sends():
     node.node = _FakeRosNode()
     node.controller = _FakeController()
     node.estopped = False
+    node.arm_position_control_enabled = True
 
     node._trigger_estop("unit_test")
     node._send_target()
 
     assert node.estopped is True
     assert node.controller.damping_count == 1
+    assert node.arm_position_control_enabled is False
     assert node.controller.sent_count == 0
+
+
+def test_enable_current_pose_hold_sets_default_gain():
+    node = SpaceMouseArmNode.__new__(SpaceMouseArmNode)
+    node.node = _FakeRosNode()
+    node.arx5 = _FakeArx5
+    node.controller = _FakeController()
+    node.target_pose6d = np.arange(6, dtype=np.float64)
+    node.target_joint = np.zeros(6, dtype=np.float64)
+    node.target_gripper = 0.03
+    node.gripper_min = 0.0
+    node.gripper_max = 0.08
+    node.arm_position_control_enabled = False
+
+    node._enable_current_pose_hold(_FakeControllerConfig())
+
+    assert node.arm_position_control_enabled is True
+    assert node.controller.sent_count == 1
+    assert node.controller.gain_count == 1
+    np.testing.assert_allclose(node.controller.last_cmd.pose_6d(), np.arange(6, dtype=np.float64))
 
 
 def test_send_target_clamps_gripper_and_publishes_commanded_joint_target():
@@ -251,6 +273,7 @@ def test_send_target_clamps_gripper_and_publishes_commanded_joint_target():
     node.target_gripper = 1.0
     node.gripper_min = 0.0
     node.gripper_max = 0.08
+    node.arm_position_control_enabled = True
 
     node._send_target()
 
@@ -351,7 +374,9 @@ class _FakeController:
     def __init__(self):
         self.sent_count = 0
         self.damping_count = 0
+        self.gain_count = 0
         self.last_cmd = None
+        self.last_gain = None
 
     def set_eef_cmd(self, cmd):
         self.sent_count += 1
@@ -363,6 +388,10 @@ class _FakeController:
     def set_to_damping(self):
         self.damping_count += 1
 
+    def set_gain(self, gain):
+        self.gain_count += 1
+        self.last_gain = gain
+
 
 class _FakeEEFState:
     def __init__(self):
@@ -373,5 +402,21 @@ class _FakeEEFState:
         return self._pose
 
 
+class _FakeGain:
+    def __init__(self, kp, kd, gripper_kp, gripper_kd):
+        self.kp = kp
+        self.kd = kd
+        self.gripper_kp = gripper_kp
+        self.gripper_kd = gripper_kd
+
+
 class _FakeArx5:
     EEFState = _FakeEEFState
+    Gain = _FakeGain
+
+
+class _FakeControllerConfig:
+    default_kp = np.ones(6, dtype=np.float64)
+    default_kd = np.ones(6, dtype=np.float64) * 0.1
+    default_gripper_kp = 1.0
+    default_gripper_kd = 0.1

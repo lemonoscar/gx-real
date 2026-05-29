@@ -158,6 +158,8 @@ class SpaceMouseArmNode:
         self.spacemouse_motion_armed = False
         self.spacemouse_buttons_armed = False
         self.spacemouse_watchdog_damped = False
+        self.arm_position_control_enabled = False
+        self.last_spacemouse_command_log_time = -1.0
         self.last_spacemouse_stale_log_time = -1.0
         self.estopped = False
         self.last_spacemouse_button_state: Optional[np.ndarray] = None
@@ -230,17 +232,8 @@ class SpaceMouseArmNode:
                 controller_config,
                 self.can_interface,
             )
-            eef_state = self.controller.get_eef_state()
-            self.target_pose6d = np.asarray(eef_state.pose_6d(), dtype=np.float64).copy()
-            self.target_gripper = self._clamp_gripper(
-                float(getattr(eef_state, "gripper_pos", 0.0))
-            )
-            if hasattr(self.controller, "get_joint_state"):
-                joint_state = self.controller.get_joint_state()
-                self.target_joint = np.asarray(
-                    joint_state.pos(),
-                    dtype=np.float64,
-                ).copy()
+            self._refresh_targets_from_controller_state()
+            self._enable_current_pose_hold(controller_config)
 
             self.shared_memory_manager = SharedMemoryManager()
             self.shared_memory_manager.start()
@@ -280,6 +273,9 @@ class SpaceMouseArmNode:
                 translation,
                 rotation,
             )
+            buttons_request = self._buttons_request_gripper_motion()
+            if (motion_command or buttons_request) and not self.arm_position_control_enabled:
+                self._refresh_targets_from_controller_state()
             if motion_command:
                 self.target_pose6d[:3] += translation
                 self.target_pose6d[3:] = _wrap_to_pi(self.target_pose6d[3:] + rotation)
@@ -287,6 +283,13 @@ class SpaceMouseArmNode:
             if motion_command or gripper_changed:
                 self.last_motion_time = now
                 self._send_target()
+                self._log_spacemouse_command(
+                    now=now,
+                    sequence=spacemouse_input.motion_sequence,
+                    translation=translation,
+                    rotation=rotation,
+                    gripper_changed=gripper_changed,
+                )
         elif not self.estopped and now - self.last_spacemouse_sample_time > self.sm_watchdog_sec:
             self._handle_spacemouse_watchdog()
 
@@ -317,6 +320,7 @@ class SpaceMouseArmNode:
             return
         try:
             self.controller.set_to_damping()
+            self.arm_position_control_enabled = False
         except Exception as exc:
             self.node.get_logger().error(f"Failed to set X5 arm damping mode: {exc}")
 
@@ -462,6 +466,39 @@ class SpaceMouseArmNode:
         translation, rotation = map_spacemouse_motion(motion, self.mapping, dt=1.0)
         return _has_nonzero_command(translation, rotation)
 
+    def _refresh_targets_from_controller_state(self) -> None:
+        if self.controller is None:
+            return
+        eef_state = self.controller.get_eef_state()
+        self.target_pose6d = np.asarray(eef_state.pose_6d(), dtype=np.float64).copy()
+        self.target_gripper = self._clamp_gripper(
+            float(getattr(eef_state, "gripper_pos", self.target_gripper))
+        )
+        if hasattr(self.controller, "get_joint_state"):
+            joint_state = self.controller.get_joint_state()
+            joint_pos = np.asarray(joint_state.pos(), dtype=np.float64).reshape(-1)
+            if joint_pos.shape[0] == 6 and np.isfinite(joint_pos).all():
+                self.target_joint = joint_pos.copy()
+
+    def _enable_current_pose_hold(self, controller_config) -> None:
+        if self.controller is None or self.arx5 is None:
+            return
+        cmd = self.arx5.EEFState()
+        cmd.pose_6d()[:] = self.target_pose6d
+        cmd.gripper_pos = self._clamp_gripper(self.target_gripper)
+        self.controller.set_eef_cmd(cmd)
+        if hasattr(self.controller, "set_gain") and hasattr(self.arx5, "Gain"):
+            gain = self.arx5.Gain(
+                controller_config.default_kp,
+                controller_config.default_kd,
+                controller_config.default_gripper_kp,
+                controller_config.default_gripper_kd,
+            )
+            self.controller.set_gain(gain)
+        self.arm_position_control_enabled = True
+        self._sync_target_joint_from_controller()
+        self.node.get_logger().info("X5 position hold enabled")
+
     def _should_apply_motion_command(
         self,
         motion_sequence: Optional[int],
@@ -511,11 +548,21 @@ class SpaceMouseArmNode:
         )
         return abs(self.target_gripper - old_target) > 1e-9
 
+    def _buttons_request_gripper_motion(self) -> bool:
+        if self.last_spacemouse_button_state is None or self.last_spacemouse_button_state.shape[0] < 2:
+            return False
+        left_pressed = bool(self.last_spacemouse_button_state[0])
+        right_pressed = bool(self.last_spacemouse_button_state[1])
+        return self.spacemouse_buttons_armed and left_pressed != right_pressed
+
     def _send_target(self) -> None:
         if self.estopped:
             return
         if self.dry_run or self.controller is None or self.arx5 is None:
             return
+        if not self.arm_position_control_enabled:
+            controller_config = self.controller.get_controller_config()
+            self._enable_current_pose_hold(controller_config)
         cmd = self.arx5.EEFState()
         cmd.pose_6d()[:] = self.target_pose6d
         self.target_gripper = self._clamp_gripper(self.target_gripper)
@@ -630,6 +677,29 @@ class SpaceMouseArmNode:
         ):
             self.node.get_logger().warning(f"SpaceMouse sample stale: {reason}")
             self.last_spacemouse_stale_log_time = now
+
+    def _log_spacemouse_command(
+        self,
+        *,
+        now: float,
+        sequence: Optional[int],
+        translation: np.ndarray,
+        rotation: np.ndarray,
+        gripper_changed: bool,
+    ) -> None:
+        if (
+            self.last_spacemouse_command_log_time >= 0.0
+            and now - self.last_spacemouse_command_log_time < 1.0
+        ):
+            return
+        self.last_spacemouse_command_log_time = now
+        self.node.get_logger().info(
+            "SpaceMouse command accepted "
+            f"seq={sequence} "
+            f"translation={np.asarray(translation, dtype=np.float64).round(5).tolist()} "
+            f"rotation={np.asarray(rotation, dtype=np.float64).round(5).tolist()} "
+            f"gripper_changed={gripper_changed}"
+        )
 
 
 def _wrap_to_pi(value: np.ndarray) -> np.ndarray:
