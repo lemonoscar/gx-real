@@ -55,6 +55,8 @@ def main() -> int:
             )
         from unitree_go.msg import LowCmd, LowState, WirelessController  # noqa: F401
         from robot_state.msg import (  # noqa: F401
+            ArmState,
+            ArmTargetState,
             TeleopBaseCommand,
             TeleopEEFDelta,
             TeleopGripperCommand,
@@ -63,6 +65,8 @@ def main() -> int:
         LowCmd.__class__.__import_type_support__()
         LowState.__class__.__import_type_support__()
         WirelessController.__class__.__import_type_support__()
+        ArmState.__class__.__import_type_support__()
+        ArmTargetState.__class__.__import_type_support__()
         TeleopBaseCommand.__class__.__import_type_support__()
         TeleopEEFDelta.__class__.__import_type_support__()
         TeleopGripperCommand.__class__.__import_type_support__()

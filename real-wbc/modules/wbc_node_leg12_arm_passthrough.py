@@ -20,6 +20,17 @@ from modules.arm_cartesian_decoder import (
     ArmCartesianCommandDecoder,
     ArmCartesianDecodeResult,
 )
+from modules.arm_observation import (
+    ArmObservationCache,
+    should_initialize_wbc_arm_controller,
+)
+from modules.base_command_provider import (
+    BaseCommandGate,
+    CommandSafetyFilter,
+    FixedCommandProvider,
+    WirelessJoystickCommandProvider,
+)
+from modules.can_owner_lock import CanOwnerLock
 from modules.height_scan_provider import HeightScanProvider
 from modules.height_scan_policy_validation import (
     HEIGHT_SCAN_POLICY_FUNCS,
@@ -65,7 +76,10 @@ from unitree_go.msg import (
 import time
 from geometry_msgs.msg import PoseStamped
 from rclpy.time import Time
+from std_msgs.msg import Bool
 from robot_state.msg import (
+    ArmState,
+    ArmTargetState,
     TeleopBaseCommand,
     TeleopEEFDelta,
     TeleopGripperCommand,
@@ -106,8 +120,10 @@ BUTTON_A = int(2**8)
 BUTTON_B = int(2**9)
 BUTTON_X = int(2**10)
 BUTTON_Y = int(2**11)
+BUTTON_DPAD_UP = int(2**12)
+BUTTON_DPAD_DOWN = int(2**14)
 GRIPPER_MIN = 0.0
-GRIPPER_MAX = 0.08
+GRIPPER_MAX_FALLBACK = 0.08
 
 INTERFACE_LEG_JOINT_NAMES = [
     "FR_hip_joint",
@@ -281,7 +297,30 @@ class WBCNodeLeg12ArmPassthrough(Node):
         cmd_vx: float = 0.0,
         cmd_vy: float = 0.0,
         cmd_yaw: float = 0.0,
+        base_command_source: str = "fixed",
+        joy_vx_axis: str = "ly",
+        joy_vx_sign: int = -1,
+        joy_vy_axis: str = "lx",
+        joy_vy_sign: int = -1,
+        joy_yaw_axis: str = "rx",
+        joy_yaw_sign: int = -1,
+        joy_deadzone: float = 0.12,
+        joy_max_vx: float = 0.30,
+        joy_max_vy: float = 0.20,
+        joy_max_yaw: float = 0.50,
+        joy_acc_vx: float = 0.3,
+        joy_acc_vy: float = 0.3,
+        joy_acc_yaw: float = 0.6,
+        joy_watchdog_sec: float = 0.25,
+        joy_dry_run: bool = False,
         gripper_cmd: float = 0.0,
+        arm_control_owner: str = "external_spacemouse",
+        arm_state_topic: str = "/arm/state",
+        arm_target_topic: str = "/arm/target_state",
+        safety_topic: str = "/safety/estop",
+        arm_state_timeout_sec: float = 0.25,
+        arm_target_timeout_sec: float = 0.25,
+        require_arm_state_for_rl: bool = False,
         button_arm_pose: Optional[List[float]] = None,
         arm_reset_pose: Optional[List[float]] = None,
         time_to_replay: float = 3.0,  # how long to wait after policy starts before starting trajectory
@@ -324,7 +363,16 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.init_action = np.zeros(18, dtype=np.float64)
         self.latest_tick = -1
         self.policy_path = policy_path
-        self.arm_enabled = not disable_arm
+        self.arm_control_owner = arm_control_owner.lower()
+        if self.arm_control_owner not in {"none", "wbc", "external_spacemouse"}:
+            raise ValueError(
+                "Invalid arm_control_owner=%r; expected none, wbc, or external_spacemouse"
+                % arm_control_owner
+            )
+        self.arm_enabled = should_initialize_wbc_arm_controller(
+            self.arm_control_owner,
+            disable_arm,
+        )
         self.require_arm = bool(require_arm)
         self.arm_init_error: Optional[str] = None
         self.arm_command_mode = arm_command_mode.lower()
@@ -360,6 +408,35 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.commanded_leg_kd = np.ones(LEG_DOF, dtype=np.float64) * float(leg_kd)
         self.policy_takeover_commands = np.array([0.0, 0.0, 0.0], dtype=np.float64)
         self.policy_move_commands = np.array([cmd_vx, cmd_vy, cmd_yaw], dtype=np.float64)
+        self.base_command_source = base_command_source.lower()
+        if self.base_command_source not in {"fixed", "wireless_joystick"}:
+            raise ValueError(
+                "Invalid base_command_source=%r; expected fixed or wireless_joystick"
+                % base_command_source
+            )
+        self.fixed_command_provider = FixedCommandProvider(cmd_vx, cmd_vy, cmd_yaw)
+        self.wireless_command_provider = WirelessJoystickCommandProvider(
+            vx_axis=joy_vx_axis,
+            vx_sign=joy_vx_sign,
+            vy_axis=joy_vy_axis,
+            vy_sign=joy_vy_sign,
+            yaw_axis=joy_yaw_axis,
+            yaw_sign=joy_yaw_sign,
+            deadzone=joy_deadzone,
+            max_vx=joy_max_vx,
+            max_vy=joy_max_vy,
+            max_yaw=joy_max_yaw,
+            watchdog_sec=joy_watchdog_sec,
+        )
+        self.command_safety_filter = CommandSafetyFilter(
+            acc_vx=joy_acc_vx,
+            acc_vy=joy_acc_vy,
+            acc_yaw=joy_acc_yaw,
+            dry_run=joy_dry_run,
+        )
+        self.joy_dry_run = bool(joy_dry_run)
+        self.joy_diag_log_interval = 0.25 if joy_dry_run else 0.5
+        self.last_joy_diag_log_time = -1.0
         self.policy_command_ramp_duration = 1.5
         self.startup_kick_duration = 0.0
         self.startup_kick_leg_delta = np.zeros(LEG_DOF, dtype=np.float64)
@@ -379,6 +456,19 @@ class WBCNodeLeg12ArmPassthrough(Node):
             if arm_reset_pose is not None
             else np.array([0.0, 0.5, 0.3, 0.0, 0.0, 0.0], dtype=np.float64)
         )
+        self.arm_state_topic = arm_state_topic
+        self.arm_target_topic = arm_target_topic
+        self.safety_topic = safety_topic
+        self.arm_state_timeout_sec = float(arm_state_timeout_sec)
+        self.arm_target_timeout_sec = float(arm_target_timeout_sec)
+        self.require_arm_state_for_rl = bool(require_arm_state_for_rl)
+        self.arm_observation_cache = ArmObservationCache(
+            fallback_joint_pos=self.requested_arm_hold_pose,
+            fallback_gripper=gripper_cmd,
+            state_timeout_sec=self.arm_state_timeout_sec,
+            target_timeout_sec=self.arm_target_timeout_sec,
+        )
+        self.last_arm_state_timeout_log_time = -1.0
         self.arm_passthrough_pose = self.requested_arm_hold_pose.copy()
         self.arm_smoothed_pose = self.arm_passthrough_pose.copy()
         self.arm_last_cmd_time = -1.0
@@ -398,6 +488,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.policy_command_ramp_start_time = time.monotonic()
         self.policy_command_current_ramp_duration = self.policy_command_ramp_duration
         self.fixed_gripper_cmd = float(gripper_cmd)
+        self.gripper_min = GRIPPER_MIN
+        self.gripper_max = GRIPPER_MAX_FALLBACK
         self.teleop_mode = TELEOP_MODE_ARM
         self.teleop_watchdog_timeout = 0.25
         self.teleop_log_interval = 0.5
@@ -422,9 +514,13 @@ class WBCNodeLeg12ArmPassthrough(Node):
         )
         self.teleop_eef_last_time = -1.0
         self.teleop_eef_last_apply_time = -1.0
-        self.teleop_gripper_velocity = 0.0
+        self.teleop_gripper_spacemouse_velocity = 0.0
+        self.teleop_gripper_spacemouse_last_time = -1.0
+        self.teleop_gripper_spacemouse_active = False
+        self.teleop_gripper_gamepad_velocity = 0.0
+        self.teleop_gripper_gamepad_last_time = -1.0
+        self.teleop_gripper_gamepad_active = False
         self.teleop_gripper_max_velocity = 0.04
-        self.teleop_gripper_last_time = -1.0
         self.teleop_gripper_update_time = time.monotonic()
         self.last_teleop_watchdog_log_time = -1.0
         self.last_teleop_ik_warn_time = -1.0
@@ -456,6 +552,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         }
         self.arm_diag_log_interval = 0.5
         self.last_arm_diag_log_time = -1.0
+        self.last_arm_button_noop_log_time = -1.0
         self.align_to_policy_active = False
         self.align_to_policy_start_time = -1.0
         self.align_to_policy_duration = 1.5
@@ -599,6 +696,21 @@ class WBCNodeLeg12ArmPassthrough(Node):
             self.teleop_gripper_cmd_cb,
             low_state_history_depth,
         )
+        self.arm_state_sub = None
+        self.arm_target_sub = None
+        if self.arm_control_owner in {"external_spacemouse", "none"}:
+            self.arm_state_sub = self.create_subscription(
+                ArmState,
+                self.arm_state_topic,
+                self.arm_state_cb,
+                low_state_history_depth,
+            )
+            self.arm_target_sub = self.create_subscription(
+                ArmTargetState,
+                self.arm_target_topic,
+                self.arm_target_state_cb,
+                low_state_history_depth,
+            )
         self.lowlevel_state_sub = self.create_subscription(
             LowState, "lowstate", self.lowlevel_state_cb, low_state_history_depth
         )  # "/lowcmd" or  "lf/lowstate" (low frequencies)
@@ -668,6 +780,11 @@ class WBCNodeLeg12ArmPassthrough(Node):
                 low_state_history_depth,
             )
         # init publishers
+        self.safety_pub = self.create_publisher(
+            Bool,
+            self.safety_topic,
+            low_state_history_depth,
+        )
         self.motor_pub = self.create_publisher(
             LowCmd, "lowcmd", low_state_history_depth
         )
@@ -693,6 +810,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.arx5_config = None
         self.arx5_gain = None
         self.arx5_cmd = None
+        self.can_owner_lock: Optional[CanOwnerLock] = None
         # init policy
         self.policy_kp: np.ndarray
         self.policy_kd: np.ndarray
@@ -711,9 +829,13 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.policy_handover_leg_start = self.stand_target_leg_pos.copy()
         self.policy_dt_slack = policy_dt_slack
         logging.info(
-            "Runtime targets | standup_mode=%s arm_pose_source=%s arm_hold_pose=%s button_arm_pose=%s arm_reset_pose=%s commanded_leg_kp=%s commanded_leg_kd=%s move_commands=%s"
+            "Runtime targets | standup_mode=%s base_command_source=%s arm_control_owner=%s "
+            "arm_pose_source=%s arm_hold_pose=%s button_arm_pose=%s arm_reset_pose=%s "
+            "commanded_leg_kp=%s commanded_leg_kd=%s move_commands=%s"
             % (
                 self.standup_mode,
+                self.base_command_source,
+                self.arm_control_owner,
                 self.arm_pose_source,
                 np.array2string(self.requested_arm_hold_pose, precision=3, floatmode="fixed"),
                 (
@@ -727,6 +849,13 @@ class WBCNodeLeg12ArmPassthrough(Node):
                 np.array2string(self.policy_move_commands, precision=3, floatmode="fixed"),
             )
         )
+        if self.arm_control_owner == "external_spacemouse":
+            logging.info("Arm control owner: external_spacemouse")
+            logging.info("WBC will only consume arm state from %s and target from %s", self.arm_state_topic, self.arm_target_topic)
+        elif self.arm_control_owner == "none":
+            logging.info("Arm control owner: none; WBC uses fallback arm observation only unless topics publish")
+        else:
+            logging.warning("Arm control owner: wbc; legacy WBC X5 write mode is enabled")
 
         # Create a quick timer for steadier timer interval
         self.policy_timer = self.create_timer(1.0 / 1000.0, self.policy_timer_callback)
@@ -777,15 +906,20 @@ class WBCNodeLeg12ArmPassthrough(Node):
             logging.info("Press L2 to start pose test and hold the policy stand target")
         else:
             logging.info("Press L2 to start policy after stand-up completes")
-        logging.info("Press A to enable SpaceMouse arm teleop, X to reset arm, Y to zero base command")
-        logging.info("Press B to toggle SpaceMouse teleop Arm/Base mode")
+        logging.info("Press Y to zero base command; in joystick mode it inhibits until sticks return to center")
+        if self.arm_control_owner == "wbc":
+            logging.info("Legacy arm write mode: A enables SpaceMouse arm teleop, X resets arm, B toggles teleop mode")
+            logging.info("Hold D-pad Up/Down to open/close the gripper")
+            logging.info("Hold SpaceMouse left/right side buttons to open/close the gripper")
+        else:
+            logging.info("A/X/B/D-pad arm controls are no-op; X5 control moved to standalone SpaceMouse Arm Node")
         logging.info("Press L1 for emergency stop")
         self.button_debounce_s = 0.5
         self.button_prev_pressed: Dict[int, bool] = {}
         self.button_last_trigger_time: Dict[int, float] = {}
 
         # Set up Arm
-        self.gripper_pos_cmd = self.fixed_gripper_cmd
+        self.gripper_pos_cmd = self.clamp_gripper_pos(self.fixed_gripper_cmd)
         if self.arm_enabled:
             try:
                 self.initialize_arm_controller()
@@ -795,7 +929,11 @@ class WBCNodeLeg12ArmPassthrough(Node):
                     raise
                 self.disable_arm_runtime(str(exc))
         else:
-            logging.warning("Arm disabled; running body-only deployment")
+            logging.warning(
+                "WBC ARX5 write controller disabled; arm_control_owner=%s. "
+                "Leg control remains active and arm observation uses external topics or fallback.",
+                self.arm_control_owner,
+            )
         self.start_time = -1.0
         if self.arm_enabled:
             self.arx5_solver = arx5.Arx5Solver(
@@ -974,16 +1112,35 @@ class WBCNodeLeg12ArmPassthrough(Node):
                 self.arx5_robot_config.joint_dof,
             )
         )
-        self.arx5_joint_controller = arx5.Arx5JointController(
-            self.arx5_robot_config,
-            self.arx5_controller_config,
+        self.can_owner_lock = CanOwnerLock(
             "can0",
+            owner=f"{self.get_name()}:{os.getpid()}:wbc",
         )
+        self.can_owner_lock.acquire()
+        try:
+            self.arx5_joint_controller = arx5.Arx5JointController(
+                self.arx5_robot_config,
+                self.arx5_controller_config,
+                "can0",
+            )
+        except Exception:
+            self.release_can_owner_lock()
+            raise
 
         if hasattr(self.arx5_joint_controller, "enable_background_send_recv"):
             self.arx5_joint_controller.enable_background_send_recv()
         self.arx5_gain = arx5.Gain(self.arx5_robot_config.joint_dof)
         self.arx5_config = self.arx5_joint_controller.get_robot_config()
+        gripper_width = float(self.arx5_config.gripper_width)
+        if np.isfinite(gripper_width) and gripper_width > self.gripper_min:
+            self.gripper_max = gripper_width
+        self.fixed_gripper_cmd = self.clamp_gripper_pos(self.fixed_gripper_cmd)
+        self.gripper_pos_cmd = self.fixed_gripper_cmd
+        logging.info(
+            "Gripper command range: %.3f..%.3f m",
+            self.gripper_min,
+            self.gripper_max,
+        )
 
         self.arx5_gain.kp()[:] = self.policy_kp[-6:]
         self.arx5_gain.kd()[:] = self.policy_kd[-6:]
@@ -1009,7 +1166,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.arm_smoothed_pose = arm_hold_pos.copy()
         self.arm_last_cmd_time = time.monotonic()
         self.arx5_cmd = arx5.JointState(self.arx5_robot_config.joint_dof)
-        self.arx5_cmd.gripper_pos = 0.0
+        self.arx5_cmd.gripper_pos = self.gripper_pos_cmd
         self.arx5_cmd.pos()[:] = arm_hold_pos
         self.arx5_joint_controller.set_joint_cmd(self.arx5_cmd)
 
@@ -1023,6 +1180,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.arx5_config = None
         self.arx5_gain = None
         self.arx5_cmd = None
+        self.release_can_owner_lock()
         self.latest_arm_state_valid = False
         self.latest_arm_pos = self.requested_arm_hold_pose.copy()
         self.arm_smoothed_pose = self.requested_arm_hold_pose.copy()
@@ -1033,6 +1191,11 @@ class WBCNodeLeg12ArmPassthrough(Node):
             "Check X5 power, motor initialization, can0 state, and CAN wiring. error=%s",
             reason,
         )
+
+    def release_can_owner_lock(self):
+        if self.can_owner_lock is not None:
+            self.can_owner_lock.release()
+            self.can_owner_lock = None
 
     def log_arm_cartesian_decode_result(
         self,
@@ -1396,6 +1559,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
         if self.start_policy:
             logging.warning("Policy is running; stop it with R2 before starting pose test")
             return
+        if not self.is_arm_state_ready_for_rl():
+            return
         self.pose_test_active = True
         self.pose_test_start_time = time.monotonic()
         self.pose_test_leg_start = self.interface_to_policy_leg_order(self.quadruped_q).copy()
@@ -1420,6 +1585,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
         if self.start_policy:
             logging.info("Policy is already running")
             return
+        if not self.is_arm_state_ready_for_rl():
+            return
         current_leg_q = self.interface_to_policy_leg_order(self.quadruped_q).copy()
         if (
             self.standup_mode == "manual"
@@ -1436,6 +1603,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.teleop_eef_target_pose6d = None
         self.teleop_eef_anchor_pose6d = None
         self.fixed_commands[:] = self.policy_takeover_commands
+        self.command_safety_filter.reset(tuple(self.policy_takeover_commands), now=time.monotonic())
         self.policy_command_start = self.policy_takeover_commands.copy()
         self.policy_command_target = self.policy_takeover_commands.copy()
         self.policy_command_ramp_start_time = time.monotonic()
@@ -1476,8 +1644,31 @@ class WBCNodeLeg12ArmPassthrough(Node):
             return False
         return True
 
+    def is_arm_state_ready_for_rl(self) -> bool:
+        if self.arm_control_owner == "wbc" or not self.require_arm_state_for_rl:
+            return True
+        obs = self.arm_observation_cache.get(time.monotonic())
+        if obs.state_fresh:
+            return True
+        logging.error(
+            "Refusing to enter policy: /arm/state missing or stale "
+            "(owner=%s state_valid=%s state_fresh=%s source=%s timeout=%.3fs). "
+            "Start scripts/run_spacemouse_arm.sh first or pass --no-require-arm-state-for-rl for offline diagnostics."
+            % (
+                self.arm_control_owner,
+                obs.state_valid,
+                obs.state_fresh,
+                obs.state_source,
+                self.arm_state_timeout_sec,
+            )
+        )
+        return False
+
     def update_policy_commands(self):
         if not self.start_policy:
+            return
+        if self.base_command_source == "wireless_joystick":
+            self.update_wireless_joystick_policy_command()
             return
         if self.teleop_mode == TELEOP_MODE_BASE:
             self.update_teleop_base_command()
@@ -1495,6 +1686,49 @@ class WBCNodeLeg12ArmPassthrough(Node):
             self.policy_command_target,
             _smoothstep(ramp_ratio),
         )
+
+    def update_wireless_joystick_policy_command(self):
+        now = time.monotonic()
+        raw_command = self.wireless_command_provider.update(now)
+        gate = BaseCommandGate(
+            standup_done=self.ready_to_start_policy,
+            policy_running=self.start_policy,
+            lowlevel_align_done=not self.align_to_policy_active,
+            emergency_stop=False,
+        )
+        safe_command = self.command_safety_filter.update(
+            raw_command,
+            gate,
+            axes_centered=self.wireless_command_provider.axes_centered(),
+            now=now,
+        )
+        self.fixed_commands[:] = np.asarray(safe_command.as_tuple(), dtype=np.float64)
+        if (
+            self.last_joy_diag_log_time < 0.0
+            or (now - self.last_joy_diag_log_time) >= self.joy_diag_log_interval
+        ):
+            logging.info(
+                "Joystick base command | dry_run=%s raw_axes=%s raw_cmd=%s safe_cmd=%s "
+                "valid=%s inhibited=%s reason=%s gate=%s"
+                % (
+                    self.joy_dry_run,
+                    {
+                        axis: round(value, 3)
+                        for axis, value in self.wireless_command_provider.axes.items()
+                    },
+                    np.array2string(
+                        np.asarray(raw_command.as_tuple()), precision=3, floatmode="fixed"
+                    ),
+                    np.array2string(
+                        self.fixed_commands, precision=3, floatmode="fixed"
+                    ),
+                    safe_command.valid,
+                    safe_command.inhibited,
+                    safe_command.reason,
+                    gate,
+                )
+            )
+            self.last_joy_diag_log_time = now
 
     def set_policy_command_target(
         self,
@@ -1624,12 +1858,16 @@ class WBCNodeLeg12ArmPassthrough(Node):
         return reset_ok
 
     def teleop_mode_cb(self, msg: TeleopMode):
+        if self.arm_control_owner != "wbc":
+            return
         if msg.toggle:
             self.toggle_teleop_mode("spacemouse_mode_toggle")
         else:
             self.set_teleop_mode(int(msg.mode), "spacemouse_mode")
 
     def teleop_base_cmd_cb(self, msg: TeleopBaseCommand):
+        if self.arm_control_owner != "wbc":
+            return
         now = time.monotonic()
         raw_cmd = np.array([msg.vx, msg.vy, msg.yaw_rate], dtype=np.float64)
         if raw_cmd.shape[0] != 3 or not np.isfinite(raw_cmd).all():
@@ -1645,6 +1883,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.teleop_base_last_time = now
 
     def teleop_eef_delta_cb(self, msg: TeleopEEFDelta):
+        if self.arm_control_owner != "wbc":
+            return
         now = time.monotonic()
         self.teleop_eef_last_time = now
         if (
@@ -1671,18 +1911,71 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.apply_teleop_eef_delta(translation, rotation, now)
 
     def teleop_gripper_cmd_cb(self, msg: TeleopGripperCommand):
+        if self.arm_control_owner != "wbc":
+            return
         velocity = float(msg.velocity)
         if not np.isfinite(velocity):
             self.log_invalid_teleop("gripper_cmd", np.array([velocity]))
             return
-        self.teleop_gripper_velocity = float(
+        self.set_gripper_velocity_source(
+            "spacemouse",
             np.clip(
                 0.0 if msg.hold else velocity,
                 -self.teleop_gripper_max_velocity,
                 self.teleop_gripper_max_velocity,
+            ),
+        )
+
+    def clamp_gripper_pos(self, gripper_pos: float) -> float:
+        return float(np.clip(gripper_pos, self.gripper_min, self.gripper_max))
+
+    def sync_gripper_command_to_state(self, source: str) -> bool:
+        if not self.arm_enabled:
+            return False
+        gripper_pos = getattr(self.get_arm_joint_state(), "gripper_pos", np.nan)
+        if not np.isfinite(gripper_pos):
+            return False
+        self.gripper_pos_cmd = self.clamp_gripper_pos(float(gripper_pos))
+        logging.info(
+            "Gripper command sync | source=%s pos=%.3f",
+            source,
+            self.gripper_pos_cmd,
+        )
+        return True
+
+    def set_gripper_velocity_source(self, source: str, velocity: float):
+        velocity = float(
+            np.clip(
+                velocity,
+                -self.teleop_gripper_max_velocity,
+                self.teleop_gripper_max_velocity,
             )
         )
-        self.teleop_gripper_last_time = time.monotonic()
+        active = abs(velocity) > 1e-6
+        now = time.monotonic()
+
+        if source == "spacemouse":
+            if self.teleop_gripper_spacemouse_active and not active:
+                self.sync_gripper_command_to_state("spacemouse_release")
+            self.teleop_gripper_spacemouse_velocity = velocity
+            self.teleop_gripper_spacemouse_active = active
+            self.teleop_gripper_spacemouse_last_time = now if active else -1.0
+        elif source == "gamepad":
+            if self.teleop_gripper_gamepad_active and not active:
+                self.sync_gripper_command_to_state("gamepad_release")
+            self.teleop_gripper_gamepad_velocity = velocity
+            self.teleop_gripper_gamepad_active = active
+            self.teleop_gripper_gamepad_last_time = now if active else -1.0
+
+    def update_gamepad_gripper_buttons(self, keys: int):
+        open_pressed = bool(keys & BUTTON_DPAD_UP)
+        close_pressed = bool(keys & BUTTON_DPAD_DOWN)
+        if open_pressed == close_pressed:
+            self.set_gripper_velocity_source("gamepad", 0.0)
+        elif open_pressed:
+            self.set_gripper_velocity_source("gamepad", self.teleop_gripper_max_velocity)
+        else:
+            self.set_gripper_velocity_source("gamepad", -self.teleop_gripper_max_velocity)
 
     def log_invalid_teleop(self, source: str, value: np.ndarray):
         now = time.monotonic()
@@ -1818,19 +2111,42 @@ class WBCNodeLeg12ArmPassthrough(Node):
     def update_teleop_gripper(self):
         now = time.monotonic()
         if (
-            self.teleop_gripper_last_time < 0.0
-            or (now - self.teleop_gripper_last_time) > self.teleop_watchdog_timeout
+            self.teleop_gripper_gamepad_active
+            and self.teleop_gripper_gamepad_last_time >= 0.0
+            and (now - self.teleop_gripper_gamepad_last_time)
+            > self.teleop_watchdog_timeout
         ):
-            velocity = 0.0
+            self.set_gripper_velocity_source("gamepad", 0.0)
+        if (
+            self.teleop_gripper_spacemouse_active
+            and self.teleop_gripper_spacemouse_last_time >= 0.0
+            and (now - self.teleop_gripper_spacemouse_last_time)
+            > self.teleop_watchdog_timeout
+        ):
+            self.set_gripper_velocity_source("spacemouse", 0.0)
+        gamepad_active = (
+            self.teleop_gripper_gamepad_last_time >= 0.0
+            and (now - self.teleop_gripper_gamepad_last_time)
+            <= self.teleop_watchdog_timeout
+        )
+        spacemouse_active = (
+            self.teleop_gripper_spacemouse_last_time >= 0.0
+            and (now - self.teleop_gripper_spacemouse_last_time)
+            <= self.teleop_watchdog_timeout
+        )
+        if gamepad_active:
+            velocity = self.teleop_gripper_gamepad_velocity
+        elif spacemouse_active:
+            velocity = self.teleop_gripper_spacemouse_velocity
         else:
-            velocity = self.teleop_gripper_velocity
+            velocity = 0.0
         dt = min(max(now - self.teleop_gripper_update_time, 1e-3), 0.05)
         self.teleop_gripper_update_time = now
         self.gripper_pos_cmd = float(
             np.clip(
                 self.gripper_pos_cmd + velocity * dt,
-                GRIPPER_MIN,
-                GRIPPER_MAX,
+                self.gripper_min,
+                self.gripper_max,
             )
         )
 
@@ -1853,7 +2169,13 @@ class WBCNodeLeg12ArmPassthrough(Node):
 
     def get_arm_joint_state(self):
         if not self.arm_enabled or self.arx5_joint_controller is None:
-            return _ZeroArmState()
+            obs = self.arm_observation_cache.get(time.monotonic())
+            state = _ZeroArmState()
+            state._pos[:] = obs.joint_pos
+            state._vel[:] = obs.joint_vel
+            state._torque[:] = obs.joint_tau
+            state.gripper_pos = obs.gripper_target
+            return state
         if hasattr(self.arx5_joint_controller, "get_joint_state"):
             return self.arx5_joint_controller.get_joint_state()
         return self.arx5_joint_controller.get_state()
@@ -1926,6 +2248,80 @@ class WBCNodeLeg12ArmPassthrough(Node):
     # subscriber callbacks
     ##############################
 
+    def arm_state_cb(self, msg: ArmState):
+        updated = self.arm_observation_cache.update_state(
+            joint_pos=msg.joint_pos,
+            joint_vel=msg.joint_vel,
+            joint_tau=msg.joint_tau,
+            gripper_pos=msg.gripper_pos,
+            gripper_vel=msg.gripper_vel,
+            valid=bool(msg.valid),
+            source=msg.source,
+            stamp=time.monotonic(),
+        )
+        if not updated:
+            logging.warning("Ignoring invalid /arm/state sample from %s", msg.source)
+            return
+        obs = self.arm_observation_cache.get(time.monotonic())
+        self.latest_arm_pos = obs.joint_pos.copy()
+        self.latest_arm_state_valid = True
+        if not obs.target_fresh:
+            self.arm_passthrough_pose = obs.joint_target.copy()
+            self.gripper_pos_cmd = self.clamp_gripper_pos(obs.gripper_target)
+
+    def arm_target_state_cb(self, msg: ArmTargetState):
+        updated = self.arm_observation_cache.update_target(
+            joint_target=msg.joint_target,
+            tcp_target_pose=msg.tcp_target_pose,
+            gripper_target=msg.gripper_target,
+            valid=bool(msg.valid),
+            source=msg.source,
+            stamp=time.monotonic(),
+        )
+        if not updated:
+            logging.warning("Ignoring invalid /arm/target_state sample from %s", msg.source)
+            return
+        obs = self.arm_observation_cache.get(time.monotonic())
+        self.arm_passthrough_pose = obs.joint_target.copy()
+        self.gripper_pos_cmd = self.clamp_gripper_pos(obs.gripper_target)
+
+    def external_arm_observation(self):
+        obs = self.arm_observation_cache.get(time.monotonic())
+        if obs.state_valid:
+            self.latest_arm_pos = obs.joint_pos.copy()
+            self.latest_arm_state_valid = True
+        self.arm_passthrough_pose = obs.joint_target.copy()
+        self.gripper_pos_cmd = self.clamp_gripper_pos(obs.gripper_target)
+        self._log_external_arm_stale_if_needed(obs)
+        return obs
+
+    def _log_external_arm_stale_if_needed(self, obs):
+        if self.arm_control_owner == "wbc":
+            return
+        if obs.state_fresh and obs.target_fresh:
+            return
+        now = time.monotonic()
+        if (
+            self.last_arm_state_timeout_log_time >= 0.0
+            and (now - self.last_arm_state_timeout_log_time) < self.policy_diag_log_interval
+        ):
+            return
+        logging.warning(
+            "Arm observation stale | owner=%s state_valid=%s state_fresh=%s target_valid=%s "
+            "target_fresh=%s state_source=%s target_source=%s require_arm_state_for_rl=%s"
+            % (
+                self.arm_control_owner,
+                obs.state_valid,
+                obs.state_fresh,
+                obs.target_valid,
+                obs.target_fresh,
+                obs.state_source,
+                obs.target_source,
+                self.require_arm_state_for_rl,
+            )
+        )
+        self.last_arm_state_timeout_log_time = now
+
     # @profile
     def robot_pose_cb(self, msg):
         self.robot_pose = affines.compose(
@@ -1988,6 +2384,18 @@ class WBCNodeLeg12ArmPassthrough(Node):
     def joy_stick_cb(self, msg):
         keys = int(msg.keys)
         now = time.monotonic()
+        self.wireless_command_provider.update_message(msg, stamp=now)
+        if self.arm_control_owner == "wbc":
+            self.update_gamepad_gripper_buttons(keys)
+        elif keys & (BUTTON_A | BUTTON_B | BUTTON_X | BUTTON_DPAD_UP | BUTTON_DPAD_DOWN):
+            if (
+                self.last_arm_button_noop_log_time < 0.0
+                or (now - self.last_arm_button_noop_log_time) >= self.arm_diag_log_interval
+            ):
+                logging.info(
+                    "Ignoring A/X/B/D-pad arm input: arm control moved to standalone SpaceMouse Arm Node"
+                )
+                self.last_arm_button_noop_log_time = now
 
         if self.button_pressed_once(keys, BUTTON_L1, now):
             logging.info("Emergency stop")
@@ -2010,6 +2418,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
             self.pose_test_active = False
             self.policy_motion_started = False
             self.fixed_commands[:] = self.policy_takeover_commands
+            self.command_safety_filter.reset(tuple(self.policy_takeover_commands), now=now)
             self.policy_command_start = self.policy_takeover_commands.copy()
             self.policy_command_target = self.policy_command_target.copy()
             self.teleop_base_target[:] = 0.0
@@ -2017,12 +2426,14 @@ class WBCNodeLeg12ArmPassthrough(Node):
             self.last_policy_diag_log_time = -1.0
 
         if self.button_pressed_once(keys, BUTTON_L2, now):
-            if self.start_policy:
+            if self.start_policy and self.base_command_source == "fixed":
                 self.set_policy_command_target(
                     self.policy_move_commands,
                     "l2_resume_move_command",
                     self.policy_command_ramp_duration,
                 )
+            elif self.start_policy:
+                logging.info("Policy is running; joystick base command remains live")
             elif self.pose_test_active:
                 logging.info("Pose test is already running")
             elif self.align_to_policy_active:
@@ -2052,24 +2463,38 @@ class WBCNodeLeg12ArmPassthrough(Node):
                 logging.warning("Low-state is not ready yet; wait for robot state before pressing L2")
 
         if self.button_pressed_once(keys, BUTTON_A, now):
-            self.enable_spacemouse_arm_teleop("button_A")
+            if self.arm_control_owner == "wbc":
+                self.enable_spacemouse_arm_teleop("button_A")
+            else:
+                logging.info("A no-op: arm control moved to standalone SpaceMouse Arm Node")
 
         if self.button_pressed_once(keys, BUTTON_X, now):
-            self.set_arm_passthrough_pose(self.arm_reset_pose, "button_X_reset")
-            self.clear_teleop_eef_target()
+            if self.arm_control_owner == "wbc":
+                self.set_arm_passthrough_pose(self.arm_reset_pose, "button_X_reset")
+                self.clear_teleop_eef_target()
+            else:
+                logging.info("X no-op: arm reset is handled by standalone SpaceMouse Arm Node")
 
         if self.button_pressed_once(keys, BUTTON_Y, now):
             self.teleop_base_target[:] = 0.0
             self.teleop_base_last_time = -1.0
-            self.set_teleop_mode(TELEOP_MODE_ARM, "button_Y_zero_base_command")
-            self.set_policy_command_target(
-                self.policy_takeover_commands,
-                "button_Y_zero_base_command",
-                self.policy_command_ramp_duration,
-            )
+            if self.base_command_source == "wireless_joystick":
+                self.command_safety_filter.inhibit_until_centered()
+                logging.info("Joystick base command inhibited until all sticks return to deadzone")
+            else:
+                if self.arm_control_owner == "wbc":
+                    self.set_teleop_mode(TELEOP_MODE_ARM, "button_Y_zero_base_command")
+                self.set_policy_command_target(
+                    self.policy_takeover_commands,
+                    "button_Y_zero_base_command",
+                    self.policy_command_ramp_duration,
+                )
 
         if self.button_pressed_once(keys, BUTTON_B, now):
-            self.toggle_teleop_mode("button_B")
+            if self.arm_control_owner == "wbc":
+                self.toggle_teleop_mode("button_B")
+            else:
+                logging.info("B no-op: SpaceMouse Arm/Base mode is not handled by WBC")
 
     # @profile
     def lowlevel_state_cb(self, msg: LowState):
@@ -2111,30 +2536,42 @@ class WBCNodeLeg12ArmPassthrough(Node):
         )
         self.estimated_linear_velocity = self.linear_velocity_estimator.estimated_velocity
 
-        lowstate = self.get_arm_joint_state()
-        arm_dof_pos = lowstate.pos().copy()
-        arm_dof_vel = lowstate.vel().copy()
-        arm_state_valid = self.is_valid_arm_state(arm_dof_pos, arm_dof_vel)
-        if arm_state_valid:
-            self.latest_arm_pos = arm_dof_pos.copy()
-            self.latest_arm_state_valid = True
-        elif self.latest_arm_state_valid:
-            now = time.monotonic()
-            if (
-                self.last_invalid_arm_state_log_time < 0.0
-                or (now - self.last_invalid_arm_state_log_time) >= self.policy_diag_log_interval
-            ):
-                logging.warning(
-                    "Ignoring invalid arm state sample | arm_pos=%s arm_vel=%s fallback_arm_q=%s"
-                    % (
-                        np.array2string(arm_dof_pos, precision=3, floatmode="fixed"),
-                        np.array2string(arm_dof_vel, precision=3, floatmode="fixed"),
-                        np.array2string(self.latest_arm_pos, precision=3, floatmode="fixed"),
+        arm_obs = None
+        if self.arm_control_owner == "wbc":
+            lowstate = self.get_arm_joint_state()
+            arm_dof_pos = lowstate.pos().copy()
+            arm_dof_vel = lowstate.vel().copy()
+            arm_state_valid = self.is_valid_arm_state(arm_dof_pos, arm_dof_vel)
+            if arm_state_valid:
+                self.latest_arm_pos = arm_dof_pos.copy()
+                self.latest_arm_state_valid = True
+            elif self.latest_arm_state_valid:
+                now = time.monotonic()
+                if (
+                    self.last_invalid_arm_state_log_time < 0.0
+                    or (now - self.last_invalid_arm_state_log_time) >= self.policy_diag_log_interval
+                ):
+                    logging.warning(
+                        "Ignoring invalid arm state sample | arm_pos=%s arm_vel=%s fallback_arm_q=%s"
+                        % (
+                            np.array2string(arm_dof_pos, precision=3, floatmode="fixed"),
+                            np.array2string(arm_dof_vel, precision=3, floatmode="fixed"),
+                            np.array2string(self.latest_arm_pos, precision=3, floatmode="fixed"),
+                        )
                     )
-                )
-                self.last_invalid_arm_state_log_time = now
-            arm_dof_pos = self.latest_arm_pos.copy()
-            arm_dof_vel = np.zeros_like(arm_dof_vel)
+                    self.last_invalid_arm_state_log_time = now
+                arm_dof_pos = self.latest_arm_pos.copy()
+                arm_dof_vel = np.zeros_like(arm_dof_vel)
+            arm_joint_command = self.arm_passthrough_pose.copy()
+            gripper_command = np.array([self.gripper_pos_cmd], dtype=np.float64)
+            arm_dof_tau = lowstate.torque().copy()
+        else:
+            arm_obs = self.external_arm_observation()
+            arm_dof_pos = arm_obs.joint_pos.copy()
+            arm_dof_vel = arm_obs.joint_vel.copy()
+            arm_joint_command = arm_obs.joint_target.copy()
+            gripper_command = np.array([arm_obs.gripper_target], dtype=np.float64)
+            arm_dof_tau = arm_obs.joint_tau.copy()
         full_dof_pos = np.concatenate(
             (self.interface_to_policy_leg_order(self.quadruped_q), arm_dof_pos), axis=0
         )
@@ -2148,8 +2585,6 @@ class WBCNodeLeg12ArmPassthrough(Node):
         commands = self.fixed_commands.copy()
         last_actions = self.prev_action.copy()
         height_scan = self.get_height_scan_observation()
-        arm_joint_command = self.arm_passthrough_pose.copy()
-        gripper_command = np.array([self.fixed_gripper_cmd], dtype=np.float64)
 
         obs = np.concatenate(
             (
@@ -2188,7 +2623,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
                 "angular_velocity": angular_velocity.copy(),
                 "arm_dof_pos": arm_dof_pos.copy(),
                 "arm_dof_vel": arm_dof_vel.copy(),
-                "arm_dof_tau": lowstate.torque().copy(),
+                "arm_dof_tau": arm_dof_tau.copy(),
                 "full_dof_pos": full_dof_pos.copy(),
                 "full_dof_vel": full_dof_vel.copy(),
                 "dof_pos": dof_pos.copy(),
@@ -2201,6 +2636,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
                 "arm_joint_command": arm_joint_command.copy(),
                 "height_scan": height_scan.copy(),
                 "height_scan_diag": dict(self.latest_height_scan_diag),
+                "arm_observation": None if arm_obs is None else arm_obs,
                 "obs": obs.copy(),
                 "time_since_policy_started": time.monotonic() - self.start_policy_time,
                 "time_monotonic": time.monotonic(),
@@ -2335,6 +2771,18 @@ class WBCNodeLeg12ArmPassthrough(Node):
         return self.arm_smoothed_pose.copy()
 
     def emergency_stop(self):
+        try:
+            self.safety_pub.publish(Bool(data=True))
+        except Exception as exc:
+            logging.error("Failed to publish safety estop: %s", exc)
+        if self.arx5_joint_controller is not None and hasattr(
+            self.arx5_joint_controller,
+            "set_to_damping",
+        ):
+            try:
+                self.arx5_joint_controller.set_to_damping()
+            except Exception as exc:
+                logging.error("Failed to set WBC arm damping mode: %s", exc)
         if self.debug_log:
             self.dump_logs()
 
@@ -2385,7 +2833,10 @@ class WBCNodeLeg12ArmPassthrough(Node):
         ):
             return
 
-        if self.start_policy or self.align_to_policy_active or self.pose_test_active:
+        if (
+            self.arm_control_owner == "wbc"
+            and (self.start_policy or self.align_to_policy_active or self.pose_test_active)
+        ):
             self.update_teleop_gripper()
 
         if self.pose_test_active and not self.start_policy:
@@ -3000,7 +3451,12 @@ class WBCNodeLeg12ArmPassthrough(Node):
             + f" fixed_commands: {self.fixed_commands},"
             + f" policy_takeover_commands: {self.policy_takeover_commands},"
             + f" policy_move_commands: {self.policy_move_commands},"
+            + f" base_command_source: {self.base_command_source},"
             + f" policy_command_ramp_duration: {self.policy_command_ramp_duration},"
+            + f" arm_control_owner: {self.arm_control_owner},"
+            + f" arm_state_topic: {self.arm_state_topic},"
+            + f" arm_target_topic: {self.arm_target_topic},"
+            + f" require_arm_state_for_rl: {self.require_arm_state_for_rl},"
             + f" allow_unknown_sport_mode: {self.allow_unknown_sport_mode},"
             + f" live_ready_pose_calibration: {self.live_ready_pose_calibration},"
             + f" fixed_gripper_cmd: {self.fixed_gripper_cmd}"

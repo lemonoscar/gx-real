@@ -1,6 +1,6 @@
 # gx-real 真机开发文档
 
-这份文档面向第一次接触本仓库的人，目标是把 `real` 目录下分散的上机、网络、硬件和策略替换说明整理成一条完整开发路径。默认部署环境是机器狗机身上的 Jetson Orin NX 开发板，路径按 `~/gx-real` 书写。当前主线不是原始 UMI-on-Legs 的完整末端轨迹控制链，而是 `Go2 + X5/ARX5` 真机上的 `12D 腿部 policy + 6D 机械臂姿态直通 + 可选 SpaceMouse 遥操作` 部署链。
+这份文档面向第一次接触本仓库的人，目标是把 `real` 目录下分散的上机、网络、硬件和策略替换说明整理成一条完整开发路径。默认部署环境是机器狗机身上的 Jetson Orin NX 开发板，路径按 `~/gx-real` 书写。当前主线不是原始 UMI-on-Legs 的完整末端轨迹控制链，而是 `Go2 + X5/ARX5` 真机上的分离控制链：WBC 主节点只写 Go2 腿部，独立 SpaceMouse Arm 节点独占 X5/ARX5。
 
 ## 1. 当前系统做什么
 
@@ -8,11 +8,11 @@
 
 - 运行端：Go2 机身上的 Jetson Orin NX，预期架构是 `aarch64`，默认使用系统 `/usr/bin/python3`。
 - Go2 腿部：读取低层状态，通过 `policy.onnx` 输出 12 维腿部动作。
-- X5/ARX5 机械臂：默认保持启动参数指定的 6 维关节姿态，`A` 键可把机械臂交给 SpaceMouse Arm teleop，`X` 键回复位姿态。
+- X5/ARX5 机械臂：由 `scripts/run_spacemouse_arm.sh` 启动的独立 SpaceMouse Arm 节点控制；WBC 只订阅 `/arm/state` 和 `/arm/target_state` 填 observation。
 - Go2 通信：ROS2 `lowstate/lowcmd`，并使用 Unitree DDS/ROS2 消息包。
-- X5 通信：SocketCAN `can0` + `arx5_interface`。
+- X5 通信：SocketCAN `can0` + `arx5_interface`，只允许 SpaceMouse Arm 节点打开写控制。
 - 控制流程：先关闭 Go2 `sport_mode`，再由 `R1` 起身，最后由 `L2` 进入低层 policy rollout。
-- SpaceMouse：单独运行 teleop 节点，只发布 `/teleop/*` ROS2 topic；硬件下发仍然只有 WBC 主节点负责。
+- SpaceMouse：单独运行 Arm 节点，默认使用 raw SpaceMouse 输入，经显式 axis/sign/scale 参数映射后直接控制 X5，并发布 arm state/target topic。
 
 主入口链路：
 
@@ -26,9 +26,13 @@ scripts/run_leg12_real.sh
 scripts/run_spacemouse_teleop.sh      # 可选，另开终端
   -> real-wbc/scripts/run_teleop.py
   -> /teleop/mode + /teleop/base_cmd + /teleop/eef_delta + /teleop/gripper_cmd
+
+scripts/run_spacemouse_arm.sh         # 推荐 X5 控制入口，另开终端
+  -> real-wbc/scripts/run_spacemouse_arm.py
+  -> /arm/state + /arm/target_state + ARX5 can0 command
 ```
 
-一句话理解：这个仓库保留了 UMI-on-Legs 的真机通信、状态读取、手柄流程、起身流程和急停框架，但把原来的 18 维 whole-body actor 换成了当前的 12 维腿部 ONNX policy；机械臂目标由固定关节姿态、复位按键或 SpaceMouse 末端增量生成，最后仍统一由 WBC 主节点下发到 Go2 和 X5。
+一句话理解：这个仓库保留了 UMI-on-Legs 的真机通信、状态读取、手柄流程、起身流程和急停框架，但把原来的 18 维 whole-body actor 换成了当前的 12 维腿部 ONNX policy；机械臂写控制已经从 WBC 主节点剥离，WBC 只消费外部 arm state/target。
 
 ## 2. 目录结构
 
@@ -49,8 +53,9 @@ real/
     check_env.py                    # 检查 policy、env.yaml、CRC、ROS2 type support 和 Python import
     setup_arx_can.sh                # 配置 ARX5 SocketCAN can0
     disable_sports_mode_go2.sh      # 编译/调用 Unitree SDK 工具关闭 sport mode
-    run_leg12_real.sh               # 当前推荐启动入口
-    run_spacemouse_teleop.sh        # 可选 SpaceMouse teleop 发布节点
+    run_leg12_real.sh               # 当前推荐 Go2/WBC 启动入口
+    run_spacemouse_arm.sh           # 推荐 SpaceMouse + X5 独立控制入口
+    run_spacemouse_teleop.sh        # legacy teleop topic 发布节点
     run_arm_spacemouse_test.sh      # 只测 X5 + SpaceMouse，不启动 Go2/policy
 
   policies/
@@ -61,15 +66,19 @@ real/
   real-wbc/
     modules/
       wbc_node_leg12_arm_passthrough.py
+      base_command_provider.py
+      arm_observation.py
+      spacemouse_arm_node.py
       common.py
       velocity_estimator.py
       spacemouse_shared_memory.py
       shared_memory/
     scripts/
       run_wbc_leg12.py
+      run_spacemouse_arm.py
       run_teleop.py
     ros2/
-      robot_state/                  # EEF 历史消息和当前 Teleop ROS2 消息
+      robot_state/                  # Teleop、ArmState、ArmTargetState ROS2 消息
     docs/                           # 硬件、网络、开发环境细分说明
 
   arx5-sdk/                         # X5/ARX5 机械臂 SDK 和 Python 绑定
@@ -78,7 +87,7 @@ real/
   logs/                             # 每次运行的日志目录
 ```
 
-当前优先维护的是 `scripts/run_leg12_real.sh` 到 `wbc_node_leg12_arm_passthrough.py` 这条链，以及可选的 `scripts/run_spacemouse_teleop.sh` 到 `/teleop/*` 这条遥操作输入链。`real-wbc/scripts/run_wbc.py`、`real-wbc/modules/wbc_node.py`、EEF trajectory、iPhone/MoCap 等内容主要属于原 UMI-on-Legs 历史链路或后续扩展。
+当前优先维护的是 `scripts/run_leg12_real.sh` 到 `wbc_node_leg12_arm_passthrough.py` 这条 Go2 腿部链，以及 `scripts/run_spacemouse_arm.sh` 到 `spacemouse_arm_node.py` 这条 X5 独立控制链。`run_spacemouse_teleop.sh`、`real-wbc/scripts/run_wbc.py`、`real-wbc/modules/wbc_node.py`、EEF trajectory、iPhone/MoCap 等内容主要属于原 UMI-on-Legs 历史链路或后续扩展。
 
 ## 3. 硬件和外部依赖
 
@@ -90,13 +99,13 @@ real/
 - USB-CAN 转接器，当前默认接口名是 `can0`。
 - Go2 网络连接，通常是 `192.168.123.xxx` 网段。
 - X5 供电链路，建议通过 DC 降压模块输出稳定 24V。
-- Go2 手柄，用于 `R1/L2/L1/R2/A/X/Y` 操作。
+- Go2 手柄，用于 `R1/L2/L1/R2/Y` 和可选摇杆底盘速度命令。`A/B/X/↑/↓` 不再控制机械臂。
 
 可选或历史外设：
 
 - iPhone/MoCap：原任务空间位姿估计链路需要，当前默认 `--pose_estimator none`。
 - GoPro、采集卡、fin-ray gripper：原 UMI 数据采集链路需要，当前 leg12 行走调试不依赖。
-- 3Dconnexion SpaceMouse Wireless：可用于机械臂末端和底盘 teleop；不是走路 policy 的必需项。
+- 3Dconnexion SpaceMouse Wireless：用于独立 X5/ARX5 机械臂控制；不是走路 policy 的必需项。
 
 软件环境默认假设机器人端路径为：
 
@@ -180,7 +189,7 @@ source /opt/ros/foxy/setup.bash
 colcon build
 ```
 
-编译本仓库的 `robot_state` 消息包。SpaceMouse teleop 新增的 `/teleop/*` 消息也在这里生成：
+编译本仓库的 `robot_state` 消息包。`/teleop/*`、`/arm/state`、`/arm/target_state` 消息都在这里生成：
 
 ```bash
 cd ~/gx-real/real-wbc/ros2
@@ -279,7 +288,7 @@ scripts/disable_sports_mode_go2.sh eth0
 
 ## 6. 标准启动流程
 
-典型启动命令：
+典型 WBC 启动命令。默认 `--arm-control-owner external_spacemouse`，WBC 不会打开 `can0` 或下发 X5 command：
 
 ```bash
 cd ~/gx-real
@@ -290,6 +299,8 @@ scripts/run_leg12_real.sh \
   --cmd-vx 0.5 \
   --cmd-vy 0.0 \
   --cmd-yaw 0.0 \
+  --base-command-source fixed \
+  --arm-control-owner external_spacemouse \
   --gripper-cmd 0.0 \
   --leg-kp 200 \
   --leg-kd 10 \
@@ -297,17 +308,22 @@ scripts/run_leg12_real.sh \
   --arm-reset-pose 0.0 0.5 0.3 0.0 0.0 0.0
 ```
 
-第一次验证建议把 `--cmd-vx` 降到 `0.0` 或 `0.1`，先确认低层接管、关节顺序和机械臂保持姿态正常，再逐步提高速度。
+第一次验证建议把 `--cmd-vx` 降到 `0.0` 或 `0.1`，先确认低层接管和关节顺序，再逐步提高速度。`--arm_pose` 现在只是 WBC observation fallback，不会由 WBC 下发给 X5。
 
-如果要启用 SpaceMouse，另开一个 Jetson 终端：
+推荐的 X5 控制方式是另开一个 Jetson 终端启动 SpaceMouse Arm 节点：
 
 ```bash
 cd ~/gx-real
 source scripts/setup_env.sh
-scripts/run_spacemouse_teleop.sh --initial-mode arm --deadzone 0.3 --max-value 500
+scripts/run_spacemouse_arm.sh \
+  --can-interface can0 \
+  --sm-use-raw-frame true \
+  --sm-pos-speed 0.03 \
+  --sm-rot-speed 0.10 \
+  --sm-deadzone 0.12
 ```
 
-SpaceMouse 节点只发布 `/teleop/*`，不直接写 `lowcmd` 或 `can0`。不要同时运行 `arx5-sdk/python/examples/spacemouse_teleop.py`，那个示例会直接控制 ARX5，和本仓库 WBC 主节点抢 `can0`。
+SpaceMouse Arm 节点是唯一 X5 写控制进程，会打开 `can0`，直接下发 ARX5 command，并持续发布 `/arm/state` 和 `/arm/target_state`。不要同时运行 `arx5-sdk/python/examples/spacemouse_teleop.py`、`scripts/run_arm_spacemouse_test.sh` 或 WBC legacy arm write 模式，避免两个进程同时抢 `can0`。
 
 如果只想单独测试机械臂和 SpaceMouse，不启动机器狗、不启动 policy：
 
@@ -318,7 +334,7 @@ scripts/setup_arx_can.sh              # can0 已经 UP 时可跳过
 scripts/run_arm_spacemouse_test.sh    # 默认 X5_umi can0
 ```
 
-这个命令会直接调用 ARX5 SDK 的 Cartesian SpaceMouse 示例，只控制 X5，不订阅 Go2，不发布 `lowcmd`，也不会运行 ONNX policy。它会拒绝在 `run_leg12_real.sh` 或 `run_wbc*.py` 已经运行时启动，避免两个进程同时抢 `can0`。如果需要显式指定模型和 CAN 接口：
+这个命令会直接调用 ARX5 SDK 的 Cartesian SpaceMouse 示例，只控制 X5，不订阅 Go2，不发布 `lowcmd`，也不会运行 ONNX policy。它是 legacy 单臂测试入口；新联合架构优先使用 `scripts/run_spacemouse_arm.sh`。如果需要显式指定模型和 CAN 接口：
 
 ```bash
 scripts/run_arm_spacemouse_test.sh X5_umi can0
@@ -351,13 +367,16 @@ Deploy node ready
 手柄按键：
 
 - `R1`：启动 internal 起身。
-- `L2`：起身完成后启动低层对齐和 policy；rollout 中再次按下会恢复配置的移动命令。
-- `A`：把机械臂控制权交给 SpaceMouse，切到 Arm teleop 并用当前机械臂姿态重置 EEF anchor。
-- `X`：机械臂回 `--arm-reset-pose`。
-- `Y`：底盘 command 平滑切到 `0 0 0`，policy 保持运行。
+- `L2`：起身完成后启动低层对齐和 policy；fixed 模式 rollout 中再次按下会恢复配置的移动命令。
+- `Y`：底盘 command 平滑切到 `0 0 0`，policy 保持运行；joystick 模式下会 inhibit 到摇杆全部回中。
 - `R2`：停止 policy。
 - `L1`：紧急停止并退出。
-- `B`：切换 SpaceMouse teleop 的 Arm/Base 模式，属于扩展功能。
+- `A/B/X/↑/↓`：默认 no-op，不再影响机械臂。机械臂动作只来自独立 SpaceMouse Arm 节点。
+
+底盘 command 来源：
+
+- 默认 `--base-command-source fixed`，继续使用 `--cmd-vx/--cmd-vy/--cmd-yaw`。
+- 可选 `--base-command-source wireless_joystick`，左摇杆/右摇杆映射由 `--joy-*-axis` 和 `--joy-*-sign` 显式配置，并带 deadzone、速度上限、加速度限制、watchdog 和 `Y` inhibit。
 
 ## 7. 控制架构
 
@@ -372,12 +391,17 @@ Go2 LowState
   -> action scale + offset
   -> 12D leg target
 
-arm_pose / SpaceMouse teleop arm target
-  -> 6D arm target
+/arm/state + /arm/target_state
+  -> 6D arm state/target observation only
 
-[12D leg target, 6D arm target]
+12D leg target
   -> set_motor_position(...)
-  -> Go2 LowCmd + ARX5 joint command
+  -> Go2 LowCmd only
+
+SpaceMouse raw input
+  -> explicit axis/sign/scale mapping
+  -> standalone SpaceMouse Arm Node
+  -> ARX5 can0 command + /arm/state + /arm/target_state
 ```
 
 关键文件：
@@ -393,7 +417,7 @@ arm_pose / SpaceMouse teleop arm target
 
 - Go2 `LowState` 读取。
 - Go2 `LowCmd` 下发和 CRC。
-- X5 `get_state()` / `set_joint_cmd()`。
+- `/arm/state` 和 `/arm/target_state` 订阅，用于机械臂 observation。
 - 手柄启动、停止、急停。
 - internal 起身和低层对齐。
 - policy 日志和运行日志落盘。
@@ -431,24 +455,24 @@ policies/env.yaml
 | `[0:3)` | `lin_vel` | IMU、足端接触、关节状态估计 |
 | `[3:6)` | `ang_vel` | IMU gyroscope，乘训练缩放 |
 | `[6:9)` | `gravity_vec` | IMU quaternion 投影重力 |
-| `[9:12)` | `commands` | `--cmd-vx/--cmd-vy/--cmd-yaw`，启动后从 0 ramp 到目标 |
-| `[12:30)` | `dof_pos` | 12 腿 + 6 臂真实关节位置，减 offset |
-| `[30:48)` | `dof_vel` | 12 腿 + 6 臂真实关节速度，乘 scale |
+| `[9:12)` | `commands` | fixed 模式来自 `--cmd-vx/--cmd-vy/--cmd-yaw`；joystick 模式来自 Go2 手柄摇杆安全滤波 |
+| `[12:30)` | `dof_pos` | 12 腿真实关节位置 + `/arm/state.joint_pos`，减 offset |
+| `[30:48)` | `dof_vel` | 12 腿真实关节速度 + `/arm/state.joint_vel`，乘 scale |
 | `[48:66)` | `actions` | 上一拍动作历史 |
 | `[66:253)` | `height_scan` | 当前为全 0 |
-| `[253:259)` | `arm_joint_command` | 当前机械臂目标姿态 |
-| `[259:260)` | `gripper_command` | 固定 gripper command |
+| `[253:259)` | `arm_joint_command` | 优先 `/arm/target_state.joint_target`，target stale 时回退 `/arm/state.joint_pos` |
+| `[259:260)` | `gripper_command` | 优先 `/arm/target_state.gripper_target`，target stale 时回退 `/arm/state.gripper_pos` |
 
 输出契约：
 
 - ONNX 输出必须是 12 维腿部 action。
 - action 先按 `env.yaml` 中的 scale 和 offset 映射到腿部目标关节位置。
-- 机械臂 6 维目标不由 ONNX 输出，而是由 `--arm_pose`、`X` 复位按键或 SpaceMouse teleop 缓存提供；`A` 用于进入 SpaceMouse Arm teleop。
-- 最终下发仍然是 18 维：
+- 机械臂 6 维目标不由 ONNX 输出，也不由 WBC 生成；默认由独立 SpaceMouse Arm 节点发布 `/arm/target_state`。
+- WBC 最终只向 Go2 下发 12 维腿部目标：
 
 ```text
 full_action[0:12]  = leg_policy_target
-full_action[12:18] = arm_passthrough_pose
+full_action[12:18] = observation target cache only; WBC 默认不下发给 X5
 ```
 
 关节顺序要特别注意。硬件接口默认顺序是：
@@ -482,13 +506,12 @@ FR, FL, RR, RL
 - 重点核对 `leg_action_scale`、`leg_action_offset`、`real_deploy_leg_offset`。
 - 真机上先用静态或低速命令验证 `current_leg_q` 是否跟随 `lowcmd_leg_q_policy`。
 
-如果要改 SpaceMouse teleop：
+如果要改 SpaceMouse Arm 控制：
 
-- 输入读取在 `real-wbc/modules/spacemouse_shared_memory.py`。
-- ROS2 发布在 `real-wbc/scripts/run_teleop.py`。
-- WBC 消费在 `wbc_node_leg12_arm_passthrough.py` 的 `teleop_*` 回调。
-- ROS2 消息在 `real-wbc/ros2/robot_state/msg/Teleop*.msg`，改消息后必须重新 `colcon build --packages-select robot_state`。
-- 保持 SpaceMouse 节点只发布 `/teleop/*`，不要让它直接写 Go2 `lowcmd` 或 ARX5 `can0`。
+- 输入读取在 `real-wbc/modules/spacemouse_shared_memory.py`，默认使用 raw `get_motion_state()`。
+- 控制节点在 `real-wbc/modules/spacemouse_arm_node.py`，启动入口是 `real-wbc/scripts/run_spacemouse_arm.py`。
+- ROS2 消息在 `real-wbc/ros2/robot_state/msg/Arm*.msg`，改消息后必须重新 `colcon build --packages-select robot_state`。
+- 保持 SpaceMouse Arm 节点是唯一 X5 写控制进程；WBC 默认只消费 `/arm/state` 和 `/arm/target_state`。
 
 如果要恢复 UMI 原始任务空间链路：
 
@@ -502,8 +525,12 @@ Jetson 上请优先使用系统 Python 做检查：
 
 ```bash
 /usr/bin/python3 -m py_compile \
+  real-wbc/modules/base_command_provider.py \
+  real-wbc/modules/arm_observation.py \
+  real-wbc/modules/spacemouse_arm_node.py \
   real-wbc/modules/wbc_node_leg12_arm_passthrough.py \
   real-wbc/scripts/run_wbc_leg12.py \
+  real-wbc/scripts/run_spacemouse_arm.py \
   real-wbc/scripts/run_teleop.py \
   scripts/check_env.py
 ```
@@ -516,6 +543,7 @@ bash -n scripts/check_env.sh
 bash -n scripts/setup_arx_can.sh
 bash -n scripts/disable_sports_mode_go2.sh
 bash -n scripts/run_leg12_real.sh
+bash -n scripts/run_spacemouse_arm.sh
 bash -n scripts/run_spacemouse_teleop.sh
 bash -n scripts/run_arm_spacemouse_test.sh
 ```
@@ -550,16 +578,16 @@ ros2 topic echo lf/sportmodestate
 
 每次运行会在 `logs/YYYYMMDD_HHMMSS/run.log` 下保存日志。重点看这些日志：
 
-- `Runtime targets`：启动参数是否被正确读取，尤其是 `arm_hold_pose`、`arm_reset_pose`、`commanded_leg_kp/kd`。`button_arm_pose` 可能仍在旧启动参数里打印，但 `A` 键当前不再发送它。
+- `Runtime targets`：启动参数是否被正确读取，尤其是 `base_command_source`、`arm_control_owner`、`arm_hold_pose`、`commanded_leg_kp/kd`。
 - `Runtime leg offset update`：`R1` 后是否使用当前站姿做 runtime offset。
 - `Policy diag`：policy 输出、clip、命令、低层目标、真实关节、误差和足端力。
-- `Arm diag`：机械臂目标、当前状态和平滑命令。
+- `Arm observation stale`：WBC 是否收到新鲜 `/arm/state` 和 `/arm/target_state`。
 - `Pose test diag`：只验证关节目标跟踪时使用。
 
 常见问题：
 
 - `check_env.sh` 失败在 `onnxruntime`：确认是在 Jetson 的 `/usr/bin/python3` 下安装，而不是 conda。用 `/usr/bin/python3 -c "import onnxruntime"` 复查。
-- `robot_state.msg.Teleop*` import 失败：重新编译 `real-wbc/ros2`，然后重新 `source scripts/setup_env.sh`。
+- `robot_state.msg.Teleop*` 或 `robot_state.msg.Arm*` import 失败：重新编译 `real-wbc/ros2`，然后重新 `source scripts/setup_env.sh`。
 - `Could not import 'rosidl_typesupport_c' for package 'robot_state'`：通常是 Jetson 上 `robot_state` 的生成消息还没按最新代码 clean rebuild，或当前 shell 还在 conda `base`。先 `conda deactivate`，再删除 `real-wbc/ros2/build/robot_state` 和 `real-wbc/ros2/install/robot_state` 后重新 `colcon build --packages-select robot_state`。
 - `check_env.sh --spacemouse` 失败在 `spnav` 或 `atomics`：安装 SpaceMouse Python 依赖；失败在 `spacenavd` 或 `libspnav`：安装/启动系统服务。
 - `undefined symbol: PyCObject_AsVoidPtr`：卸载 PyPI 版 `spnav`，安装 README 中固定的 Cheng Chi fork。
@@ -578,14 +606,14 @@ ros2 topic echo lf/sportmodestate
 
 真机调试时遵守：
 
-- Jetson 上只运行一个 WBC 主节点。不要同时启动 `run_wbc.py`、`run_wbc_leg12.py` 或任何直接控制 `can0` 的 ARX5 示例。
+- Jetson 上只运行一个 WBC 主节点。X5 写控制也只能有一个进程：默认只允许 `scripts/run_spacemouse_arm.sh` 打开 `can0`。
 - 第一次跑新 policy 时，先 `--cmd-vx 0.0` 或 `0.1`。
 - 机械臂运动空间内不要放手、线缆和工具。
 - 改 X5 电源线前先断电，降压模块输出先用万用表确认约 24V。
 - 不要在 sport mode 未关闭时强行跑 lowcmd。
 - `max_leg_error` 长期大于 `0.08 rad` 时不要跑动态 policy。
-- SpaceMouse 只作为 `/teleop/*` 输入源。真正下发 Go2/X5 的只能是 `wbc_node_leg12_arm_passthrough.py`。
-- 按 `A` 后才把机械臂交给 SpaceMouse Arm teleop；按 `Y` 会清零底盘并回 Arm mode；`R2` 停 policy；`L1` 急停退出。
+- WBC 默认不写 X5；不要用 `--arm-control-owner wbc`，除非明确做 legacy 回退测试。
+- `Y` 会清零底盘，joystick 模式下会 inhibit 到摇杆回中；`R2` 停 policy；`L1` 急停退出。
 - 不要一开始就同时改 policy、obs、动作 scale、起身流程和 teleop，先保持变量可控。
 - 手柄 `L1` 是第一急停手段，旁边必须有人能及时按下。
 

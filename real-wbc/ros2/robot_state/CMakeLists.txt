@@ -9,11 +9,14 @@ endif()
 find_package(ament_cmake REQUIRED)
 
 find_package(rosidl_default_generators REQUIRED)
+find_package(std_msgs REQUIRED)
 # find_package(rclcpp REQUIRED)
 # find_package(geometry_msgs REQUIRED)
 # find_package(builtin_interfaces REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
+  msg/ArmState.msg
+  msg/ArmTargetState.msg
   msg/EEFState.msg
   msg/EEFTraj.msg
   msg/PoseMultiStamped.msg
@@ -21,6 +24,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   msg/TeleopEEFDelta.msg
   msg/TeleopGripperCommand.msg
   msg/TeleopMode.msg
+  DEPENDENCIES std_msgs
 )
 
 ament_export_dependencies(rosidl_default_runtime)

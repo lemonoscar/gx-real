@@ -44,7 +44,9 @@ def configure_logging(log_root: str) -> str:
 if __name__ == "__main__":
 
     np.set_printoptions(precision=3)
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
     parser.add_argument(
         "--policy_path",
         type=str,
@@ -77,7 +79,7 @@ if __name__ == "__main__":
         type=float,
         nargs=6,
         default=None,
-        help="Deprecated: A now enables SpaceMouse arm teleop instead of sending this pose.",
+        help="Deprecated: ignored unless --arm-control-owner=wbc.",
     )
     parser.add_argument(
         "--arm-reset-pose",
@@ -88,7 +90,48 @@ if __name__ == "__main__":
     parser.add_argument("--cmd-vx", type=float, default=0.0)
     parser.add_argument("--cmd-vy", type=float, default=0.0)
     parser.add_argument("--cmd-yaw", type=float, default=0.0)
+    parser.add_argument(
+        "--base-command-source",
+        choices=["fixed", "wireless_joystick"],
+        default="fixed",
+    )
+    parser.add_argument("--joy-vx-axis", choices=["lx", "ly", "rx", "ry"], default="ly")
+    parser.add_argument("--joy-vx-sign", type=int, choices=[-1, 1], default=-1)
+    parser.add_argument("--joy-vy-axis", choices=["lx", "ly", "rx", "ry"], default="lx")
+    parser.add_argument("--joy-vy-sign", type=int, choices=[-1, 1], default=-1)
+    parser.add_argument("--joy-yaw-axis", choices=["lx", "ly", "rx", "ry"], default="rx")
+    parser.add_argument("--joy-yaw-sign", type=int, choices=[-1, 1], default=-1)
+    parser.add_argument("--joy-deadzone", type=float, default=0.12)
+    parser.add_argument("--joy-max-vx", type=float, default=0.30)
+    parser.add_argument("--joy-max-vy", type=float, default=0.20)
+    parser.add_argument("--joy-max-yaw", type=float, default=0.50)
+    parser.add_argument("--joy-acc-vx", type=float, default=0.3)
+    parser.add_argument("--joy-acc-vy", type=float, default=0.3)
+    parser.add_argument("--joy-acc-yaw", type=float, default=0.6)
+    parser.add_argument("--joy-watchdog-sec", type=float, default=0.25)
+    parser.add_argument("--joy-dry-run", action="store_true")
     parser.add_argument("--gripper-cmd", type=float, default=0.0)
+    parser.add_argument(
+        "--arm-control-owner",
+        choices=["none", "wbc", "external_spacemouse"],
+        default="external_spacemouse",
+    )
+    parser.add_argument("--arm-state-topic", type=str, default="/arm/state")
+    parser.add_argument("--arm-target-topic", type=str, default="/arm/target_state")
+    parser.add_argument("--safety-topic", type=str, default="/safety/estop")
+    parser.add_argument("--arm-state-timeout-sec", type=float, default=0.25)
+    parser.add_argument("--arm-target-timeout-sec", type=float, default=0.25)
+    parser.add_argument(
+        "--require-arm-state-for-rl",
+        dest="require_arm_state_for_rl",
+        action="store_true",
+        default=False,
+    )
+    parser.add_argument(
+        "--no-require-arm-state-for-rl",
+        dest="require_arm_state_for_rl",
+        action="store_false",
+    )
     parser.add_argument("--enable-height-scan", action="store_true")
     parser.add_argument(
         "--height-scan-contract",
@@ -194,4 +237,5 @@ if __name__ == "__main__":
     finally:
         if wbc_node.obs_history_log or wbc_node.action_history_log:
             wbc_node.dump_logs()
+        wbc_node.release_can_owner_lock()
         rclpy.shutdown()
