@@ -39,6 +39,7 @@ def test_spacemouse_motion_returns_none_for_stale_sample():
             "motion_event": np.ones(7, dtype=np.int64),
             "button_state": np.array([True, False]),
             "receive_timestamp": 1.0,
+            "motion_sequence": 1,
         }
     )
 
@@ -52,6 +53,7 @@ def test_spacemouse_motion_uses_fresh_sample_timestamp_and_buttons():
             "motion_event": np.array([50, -100, 0, 25, 0, -50, 0], dtype=np.int64),
             "button_state": np.array([True, False]),
             "receive_timestamp": 2.0,
+            "motion_sequence": 7,
         }
     )
 
@@ -59,6 +61,65 @@ def test_spacemouse_motion_uses_fresh_sample_timestamp_and_buttons():
 
     np.testing.assert_allclose(motion, [0.1, -0.2, 0.0, 0.05, 0.0, -0.1])
     np.testing.assert_array_equal(node.last_spacemouse_button_state, [True, False])
+
+
+def test_motion_gate_starts_centered_and_requires_new_sequence():
+    node = SpaceMouseArmNode.__new__(SpaceMouseArmNode)
+    node.spacemouse_motion_armed = False
+    node.last_spacemouse_motion_sequence = None
+
+    assert not node._should_apply_motion_command(
+        1,
+        np.array([0.01, 0.0, 0.0]),
+        np.zeros(3, dtype=np.float64),
+    )
+    assert node.spacemouse_motion_armed is False
+
+    assert not node._should_apply_motion_command(
+        2,
+        np.zeros(3, dtype=np.float64),
+        np.zeros(3, dtype=np.float64),
+    )
+    assert node.spacemouse_motion_armed is True
+
+    assert node._should_apply_motion_command(
+        3,
+        np.array([0.01, 0.0, 0.0]),
+        np.zeros(3, dtype=np.float64),
+    )
+    assert not node._should_apply_motion_command(
+        3,
+        np.array([0.01, 0.0, 0.0]),
+        np.zeros(3, dtype=np.float64),
+    )
+
+
+def test_gripper_gate_ignores_startup_press_and_clamps():
+    node = SpaceMouseArmNode.__new__(SpaceMouseArmNode)
+    node.dry_run = False
+    node.spacemouse = None
+    node.last_spacemouse_button_state = np.array([True, False])
+    node.spacemouse_buttons_armed = False
+    node.target_gripper = 0.0
+    node.gripper_speed = 0.03
+    node.gripper_min = 0.0
+    node.gripper_max = 0.08
+
+    assert not node._update_gripper_from_buttons(1.0)
+    assert node.target_gripper == 0.0
+    assert node.spacemouse_buttons_armed is False
+
+    node.last_spacemouse_button_state = np.array([False, False])
+    assert not node._update_gripper_from_buttons(1.0)
+    assert node.spacemouse_buttons_armed is True
+
+    node.last_spacemouse_button_state = np.array([True, False])
+    assert node._update_gripper_from_buttons(1.0)
+    assert node.target_gripper == 0.03
+
+    node.target_gripper = 0.08
+    assert not node._update_gripper_from_buttons(1.0)
+    assert node.target_gripper == 0.08
 
 
 def test_estop_damps_and_blocks_future_sends():
@@ -105,6 +166,9 @@ def _make_arm_node_for_unit_tests(sample):
     node.node = _FakeRosNode()
     node.last_spacemouse_stale_log_time = -1.0
     node.last_spacemouse_button_state = None
+    node.last_spacemouse_motion_sequence = None
+    node.spacemouse_motion_armed = False
+    node.spacemouse_buttons_armed = False
     return node
 
 

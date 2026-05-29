@@ -63,6 +63,8 @@ class Spacemouse(mp.Process):
             # left and right button
             "button_state": np.zeros((n_buttons,), dtype=bool),
             "receive_timestamp": time.monotonic(),
+            "motion_timestamp": 0.0,
+            "motion_sequence": 0,
         }
         ring_buffer = SharedMemoryRingBuffer.create_from_examples(
             shm_manager=shm_manager,
@@ -138,14 +140,17 @@ class Spacemouse(mp.Process):
     def run(self):
         spnav_open()
         try:
-            motion_event = np.zeros((7,), dtype=np.int64)
+            zero_motion_event = np.zeros((7,), dtype=np.int64)
             button_state = np.zeros((self.n_buttons,), dtype=bool)
+            motion_sequence = 0
             # send one message immediately so client can start reading
             self.ring_buffer.put(
                 {
-                    "motion_event": motion_event,
-                    "button_state": button_state,
+                    "motion_event": zero_motion_event,
+                    "button_state": button_state.copy(),
                     "receive_timestamp": time.monotonic(),  # type: ignore
+                    "motion_timestamp": 0.0,
+                    "motion_sequence": motion_sequence,
                 }
             )
             self.ready_event.set()
@@ -154,19 +159,43 @@ class Spacemouse(mp.Process):
                 event = spnav_poll_event()
                 receive_timestamp = time.monotonic()
                 if isinstance(event, SpnavMotionEvent):
+                    motion_event = zero_motion_event.copy()
                     motion_event[:3] = event.translation
                     motion_event[3:6] = event.rotation
                     motion_event[6] = event.period
-                elif isinstance(event, SpnavButtonEvent):
-                    button_state[event.bnum] = event.press
-                else:
-                    # finish integrating this round of events
-                    # before sending over
+                    motion_sequence += 1
                     self.ring_buffer.put(
                         {
                             "motion_event": motion_event,
-                            "button_state": button_state,
+                            "button_state": button_state.copy(),
                             "receive_timestamp": receive_timestamp,  # type: ignore
+                            "motion_timestamp": receive_timestamp,
+                            "motion_sequence": motion_sequence,
+                        }
+                    )
+                elif isinstance(event, SpnavButtonEvent):
+                    if 0 <= event.bnum < self.n_buttons:
+                        button_state[event.bnum] = event.press
+                    self.ring_buffer.put(
+                        {
+                            "motion_event": zero_motion_event,
+                            "button_state": button_state.copy(),
+                            "receive_timestamp": receive_timestamp,  # type: ignore
+                            "motion_timestamp": 0.0,
+                            "motion_sequence": motion_sequence,
+                        }
+                    )
+                else:
+                    # No SpaceMouse event means no new motion command. Keep
+                    # button state, but publish zero motion so old deltas do not
+                    # get replayed by the arm control loop.
+                    self.ring_buffer.put(
+                        {
+                            "motion_event": zero_motion_event,
+                            "button_state": button_state.copy(),
+                            "receive_timestamp": receive_timestamp,  # type: ignore
+                            "motion_timestamp": 0.0,
+                            "motion_sequence": motion_sequence,
                         }
                     )
                     time.sleep(1 / self.frequency)

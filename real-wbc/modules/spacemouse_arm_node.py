@@ -24,6 +24,13 @@ RAW_AXIS_INDEX = {
     "ry": 4,
     "rz": 5,
 }
+MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
+REAL_WBC_DIR = os.path.dirname(MODULE_DIR)
+GX_REAL_ROOT = os.path.dirname(REAL_WBC_DIR)
+ARX5_MODELS_DIR = os.environ.get(
+    "GX_REAL_ARX5_MODELS_DIR",
+    os.path.join(GX_REAL_ROOT, "arx5-sdk", "models"),
+)
 
 
 @dataclass(frozen=True)
@@ -48,6 +55,13 @@ class SpaceMouseMapping:
                 raise ValueError(f"axis signs must be -1 or 1, got {sign!r}")
         if self.pos_speed < 0.0 or self.rot_speed < 0.0 or self.deadzone < 0.0:
             raise ValueError("pos_speed, rot_speed, and deadzone must be non-negative")
+
+
+@dataclass(frozen=True)
+class SpaceMouseInput:
+    motion: np.ndarray
+    buttons: np.ndarray
+    motion_sequence: Optional[int]
 
 
 def map_spacemouse_motion(
@@ -139,6 +153,10 @@ class SpaceMouseArmNode:
         self.gripper_max = GRIPPER_MAX_FALLBACK
         self.last_update_time = time.monotonic()
         self.last_motion_time = self.last_update_time
+        self.last_spacemouse_sample_time = self.last_update_time
+        self.last_spacemouse_motion_sequence: Optional[int] = None
+        self.spacemouse_motion_armed = False
+        self.spacemouse_buttons_armed = False
         self.spacemouse_watchdog_damped = False
         self.last_spacemouse_stale_log_time = -1.0
         self.estopped = False
@@ -192,6 +210,14 @@ class SpaceMouseArmNode:
 
         try:
             robot_config = arx5.RobotConfigFactory.get_instance().get_config(self.model)
+            urdf_path = os.path.join(ARX5_MODELS_DIR, f"{self.model}.urdf")
+            if os.path.isfile(urdf_path):
+                robot_config.urdf_path = urdf_path
+                self.node.get_logger().info(f"Using ARX5 URDF: {urdf_path}")
+            else:
+                self.node.get_logger().warning(
+                    f"ARX5 URDF not found at {urdf_path}; using SDK default"
+                )
             gripper_width = float(getattr(robot_config, "gripper_width", self.gripper_max))
             if np.isfinite(gripper_width) and gripper_width > self.gripper_min:
                 self.gripper_max = gripper_width
@@ -235,20 +261,33 @@ class SpaceMouseArmNode:
         self.tick += 1
 
         if not self.estopped:
-            raw = self._read_spacemouse_motion(now=now)
+            spacemouse_input = self._read_spacemouse_input(now=now)
         else:
-            raw = None
-        if raw is not None:
-            self.last_motion_time = now
+            spacemouse_input = None
+
+        if spacemouse_input is not None:
+            self.last_spacemouse_sample_time = now
             if self.spacemouse_watchdog_damped:
-                self.node.get_logger().info("SpaceMouse samples recovered; resuming target sends")
+                self.node.get_logger().info("SpaceMouse samples recovered; waiting for a new command")
                 self.spacemouse_watchdog_damped = False
-            translation, rotation = map_spacemouse_motion(raw, self.mapping, dt=dt)
-            self.target_pose6d[:3] += translation
-            self.target_pose6d[3:] = _wrap_to_pi(self.target_pose6d[3:] + rotation)
-            self._update_gripper_from_buttons(dt)
-            self._send_target()
-        elif now - self.last_motion_time > self.sm_watchdog_sec:
+            translation, rotation = map_spacemouse_motion(
+                spacemouse_input.motion,
+                self.mapping,
+                dt=dt,
+            )
+            motion_command = self._should_apply_motion_command(
+                spacemouse_input.motion_sequence,
+                translation,
+                rotation,
+            )
+            if motion_command:
+                self.target_pose6d[:3] += translation
+                self.target_pose6d[3:] = _wrap_to_pi(self.target_pose6d[3:] + rotation)
+            gripper_changed = self._update_gripper_from_buttons(dt)
+            if motion_command or gripper_changed:
+                self.last_motion_time = now
+                self._send_target()
+        elif not self.estopped and now - self.last_spacemouse_sample_time > self.sm_watchdog_sec:
             self._handle_spacemouse_watchdog()
 
         joint_pos, joint_vel, joint_tau, gripper_pos, gripper_vel = self._read_arm_state()
@@ -282,8 +321,20 @@ class SpaceMouseArmNode:
             self.node.get_logger().error(f"Failed to set X5 arm damping mode: {exc}")
 
     def _read_spacemouse_motion(self, *, now: Optional[float] = None) -> Optional[np.ndarray]:
+        spacemouse_input = self._read_spacemouse_input(now=now)
+        if spacemouse_input is None:
+            return None
+        return spacemouse_input.motion
+
+    def _read_spacemouse_input(self, *, now: Optional[float] = None) -> Optional[SpaceMouseInput]:
         if self.dry_run:
-            return np.zeros(6, dtype=np.float64)
+            buttons = np.zeros(2, dtype=bool)
+            self.last_spacemouse_button_state = buttons
+            return SpaceMouseInput(
+                motion=np.zeros(6, dtype=np.float64),
+                buttons=buttons,
+                motion_sequence=None,
+            )
         if self.spacemouse is None:
             return None
         if hasattr(self.spacemouse, "is_alive") and not self.spacemouse.is_alive():
@@ -300,13 +351,18 @@ class SpaceMouseArmNode:
             self._log_stale_spacemouse(f"sample age {age:.3f}s exceeds watchdog")
             return None
 
-        self.last_spacemouse_button_state = np.asarray(
+        buttons = np.asarray(
             sample.get("button_state", np.zeros(2, dtype=bool)),
             dtype=bool,
         )
+        self.last_spacemouse_button_state = buttons
         raw = self._motion_from_spacemouse_sample(sample)
         if self.sm_use_raw_frame:
-            return raw
+            return SpaceMouseInput(
+                motion=raw,
+                buttons=buttons,
+                motion_sequence=_finite_int(sample.get("motion_sequence")),
+            )
         self.node.get_logger().warning("using transformed SpaceMouse frame: legacy z-up")
         tx_zup_spnav = np.asarray(
             getattr(
@@ -319,7 +375,11 @@ class SpaceMouseArmNode:
         transformed = np.zeros_like(raw)
         transformed[:3] = tx_zup_spnav @ raw[:3]
         transformed[3:] = tx_zup_spnav @ raw[3:]
-        return transformed
+        return SpaceMouseInput(
+            motion=transformed,
+            buttons=buttons,
+            motion_sequence=_finite_int(sample.get("motion_sequence")),
+        )
 
     def _read_spacemouse_sample(self):
         ring_buffer = getattr(self.spacemouse, "ring_buffer", None)
@@ -340,21 +400,54 @@ class SpaceMouseArmNode:
         raw[dead] = 0.0
         return raw
 
-    def _update_gripper_from_buttons(self, dt: float) -> None:
-        if self.dry_run or self.spacemouse is None:
-            return
+    def _should_apply_motion_command(
+        self,
+        motion_sequence: Optional[int],
+        translation: np.ndarray,
+        rotation: np.ndarray,
+    ) -> bool:
+        motion_active = _has_nonzero_command(translation, rotation)
+        sequence_changed = self._mark_motion_sequence(motion_sequence)
+        if not self.spacemouse_motion_armed:
+            if not motion_active:
+                self.spacemouse_motion_armed = True
+            return False
+        return motion_active and sequence_changed
+
+    def _mark_motion_sequence(self, motion_sequence: Optional[int]) -> bool:
+        if motion_sequence is None:
+            return True
+        if self.last_spacemouse_motion_sequence is None:
+            self.last_spacemouse_motion_sequence = motion_sequence
+            return False
+        if motion_sequence == self.last_spacemouse_motion_sequence:
+            return False
+        self.last_spacemouse_motion_sequence = motion_sequence
+        return True
+
+    def _update_gripper_from_buttons(self, dt: float) -> bool:
+        if self.dry_run:
+            return False
         if self.last_spacemouse_button_state is not None and self.last_spacemouse_button_state.shape[0] >= 2:
             left_pressed = bool(self.last_spacemouse_button_state[0])
             right_pressed = bool(self.last_spacemouse_button_state[1])
-        else:
+        elif self.spacemouse is not None:
             left_pressed = bool(self.spacemouse.is_button_pressed(0))
             right_pressed = bool(self.spacemouse.is_button_pressed(1))
+        else:
+            return False
+        if not self.spacemouse_buttons_armed:
+            if not left_pressed and not right_pressed:
+                self.spacemouse_buttons_armed = True
+            return False
         if left_pressed == right_pressed:
-            return
+            return False
         direction = 1.0 if left_pressed else -1.0
+        old_target = self.target_gripper
         self.target_gripper = self._clamp_gripper(
             self.target_gripper + direction * self.gripper_speed * dt
         )
+        return abs(self.target_gripper - old_target) > 1e-9
 
     def _send_target(self) -> None:
         if self.estopped:
@@ -399,13 +492,13 @@ class SpaceMouseArmNode:
             gripper_pos = float(getattr(state, "gripper_pos", self.target_gripper))
             gripper_vel = float(getattr(state, "gripper_vel", 0.0))
             return joint_pos, joint_vel, joint_tau, gripper_pos, gripper_vel
-            return (
-                self.target_joint.copy(),
-                np.zeros(6, dtype=np.float64),
-                np.zeros(6, dtype=np.float64),
-                self._clamp_gripper(self.target_gripper),
-                0.0,
-            )
+        return (
+            self.target_joint.copy(),
+            np.zeros(6, dtype=np.float64),
+            np.zeros(6, dtype=np.float64),
+            self._clamp_gripper(self.target_gripper),
+            0.0,
+        )
 
     def _publish_arm_state(
         self,
@@ -495,6 +588,21 @@ def _finite_timestamp(value) -> Optional[float]:
     if not np.isfinite(timestamp):
         return None
     return timestamp
+
+
+def _finite_int(value) -> Optional[int]:
+    try:
+        scalar = np.asarray(value).reshape(()).item()
+        number = int(scalar)
+    except (TypeError, ValueError):
+        return None
+    return number
+
+
+def _has_nonzero_command(translation: np.ndarray, rotation: np.ndarray) -> bool:
+    translation = np.asarray(translation, dtype=np.float64).reshape(-1)
+    rotation = np.asarray(rotation, dtype=np.float64).reshape(-1)
+    return bool(np.any(np.abs(translation) > 1e-12) or np.any(np.abs(rotation) > 1e-12))
 
 
 def _quat_from_rpy(roll: float, pitch: float, yaw: float) -> Tuple[float, float, float, float]:
