@@ -41,6 +41,7 @@ ip route
 
 ```bash
 cd ~/gx-real
+export GX_REAL_NETWORK_IFACE=eth0
 source scripts/setup_env.sh
 scripts/check_env.sh
 ```
@@ -58,7 +59,7 @@ ros2 topic echo /wirelesscontroller
 如果 topic 不存在或没有数据：
 
 - 先检查 Go2 局域网连接。
-- 确认 `unitree_ros2/cyclonedds_ws/install/setup.bash` 已被加载。
+- 确认 `scripts/setup_env.sh` 输出 `rmw=rmw_cyclonedds_cpp`，并且 `GX_REAL_NETWORK_IFACE` 是连接 Go2 的网卡。
 - 确认没有错误地从 `unitree_sdk2/python` 导入旧消息包。
 
 ## 3. 关闭 sport mode

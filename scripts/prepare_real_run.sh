@@ -272,6 +272,24 @@ run_environment_check() {
   "${GX_REAL_ROOT}/scripts/check_env.sh" "${args[@]}"
 }
 
+check_ros_middleware() {
+  if [[ "${RMW_IMPLEMENTATION:-}" != "rmw_cyclonedds_cpp" ]]; then
+    if [[ "${REQUIRE_JETSON}" -eq 0 ]]; then
+      warn "ROS2 middleware is ${RMW_IMPLEMENTATION:-unset}; skipping CycloneDDS requirement for non-Jetson diagnostics"
+      return
+    fi
+    die "ROS2 middleware is ${RMW_IMPLEMENTATION:-unset}; gx-real real runs require rmw_cyclonedds_cpp"
+  fi
+  if [[ -z "${CYCLONEDDS_URI:-}" ]]; then
+    if [[ "${REQUIRE_JETSON}" -eq 0 ]]; then
+      warn "CYCLONEDDS_URI is unset; skipping CycloneDDS interface check for non-Jetson diagnostics"
+      return
+    fi
+    die "CYCLONEDDS_URI is unset; export GX_REAL_NETWORK_IFACE=${NETWORK_IFACE} before sourcing scripts/setup_env.sh"
+  fi
+  info "ROS2 middleware is ${RMW_IMPLEMENTATION} on ${NETWORK_IFACE}"
+}
+
 check_spacemouse_daemon() {
   if [[ "${CHECK_SPACEMOUSE}" -eq 0 ]]; then
     info "skipping SpaceMouse checks (--no-spacemouse)"
@@ -512,11 +530,13 @@ print_next_steps() {
 
 Terminal A:
   cd ${GX_REAL_ROOT}
+  export GX_REAL_NETWORK_IFACE=${NETWORK_IFACE}
   source scripts/setup_env.sh
   scripts/run_spacemouse_arm.sh --can-interface ${CAN_IF} --safety-topic /safety/estop --sm-use-raw-frame true --sm-pos-speed 0.03 --sm-rot-speed 0.10 --sm-deadzone 0.12 --sm-watchdog-sec 0.25
 
 Terminal B:
   cd ${GX_REAL_ROOT}
+  export GX_REAL_NETWORK_IFACE=${NETWORK_IFACE}
   source scripts/setup_env.sh
   scripts/run_leg12_real.sh --device cpu --pose_estimator none --standup-mode internal --base-command-source wireless_joystick --joy-vx-axis ly --joy-vx-sign -1 --joy-vy-axis lx --joy-vy-sign -1 --joy-yaw-axis rx --joy-yaw-sign -1 --joy-deadzone 0.12 --joy-max-vx 0.10 --joy-max-vy 0.05 --joy-max-yaw 0.20 --arm-control-owner external_spacemouse --arm-state-topic /arm/state --arm-target-topic /arm/target_state --safety-topic /safety/estop --require-arm-state-for-rl --gripper-cmd 0.0 --leg-kp 200 --leg-kd 10 --arm_pose 0.0 0.5 0.3 0.0 0.0 0.0
 EOF
@@ -526,7 +546,9 @@ main() {
   info "root=${GX_REAL_ROOT}"
   check_host
   run_builds
+  export GX_REAL_NETWORK_IFACE="${NETWORK_IFACE}"
   source_gx_env
+  check_ros_middleware
   run_environment_check
   check_spacemouse_daemon
   check_spacemouse_input_device
