@@ -179,12 +179,16 @@ timeout_arg() {
 
 source_ros_setup() {
   if [[ -f /opt/ros/foxy/setup.bash ]]; then
+    set +u
     # shellcheck disable=SC1091
     source /opt/ros/foxy/setup.bash
+    set -u
     info "sourced ROS2: /opt/ros/foxy/setup.bash"
   elif [[ -f /opt/ros/humble/setup.bash ]]; then
+    set +u
     # shellcheck disable=SC1091
     source /opt/ros/humble/setup.bash
+    set -u
     info "sourced ROS2: /opt/ros/humble/setup.bash"
   else
     die "missing ROS2 setup.bash under /opt/ros/foxy or /opt/ros/humble"
