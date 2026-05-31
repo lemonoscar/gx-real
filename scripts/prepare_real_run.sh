@@ -337,6 +337,25 @@ can_is_up() {
   ip link show "${CAN_IF}" 2>/dev/null | grep -q '<[^>]*UP'
 }
 
+print_can_device_candidates() {
+  local path
+  local found=0
+  shopt -s nullglob
+  for path in /dev/serial/by-id/* /dev/ttyACM* /dev/ttyUSB*; do
+    [[ -e "${path}" ]] || continue
+    found=1
+    if [[ -L "${path}" ]]; then
+      warn "CAN device candidate: ${path} -> $(readlink -f "${path}" 2>/dev/null || true)"
+    else
+      warn "CAN device candidate: ${path}"
+    fi
+  done
+  shopt -u nullglob
+  if [[ "${found}" -eq 0 ]]; then
+    warn "no /dev/serial/by-id, /dev/ttyACM*, or /dev/ttyUSB* CAN candidates found"
+  fi
+}
+
 ensure_can_ready() {
   if [[ "${CHECK_CAN}" -eq 0 ]]; then
     info "skipping CAN setup/check (--no-can)"
@@ -346,12 +365,18 @@ ensure_can_ready() {
   require_command ip
   if [[ "${FORCE_CAN_SETUP}" -eq 1 ]] || ! can_is_up; then
     info "configuring SocketCAN ${CAN_IF}"
-    "${GX_REAL_ROOT}/scripts/setup_arx_can.sh" "${CAN_DEV}" "${CAN_IF}" "${SLCAN_SPEED_CODE}"
+    if ! "${GX_REAL_ROOT}/scripts/setup_arx_can.sh" "${CAN_DEV}" "${CAN_IF}" "${SLCAN_SPEED_CODE}"; then
+      print_can_device_candidates
+      die "failed to configure ${CAN_IF}; pass --can-dev /dev/serial/by-id/<USB-CAN> or --can-dev /dev/ttyACM0 explicitly"
+    fi
   else
     info "SocketCAN ${CAN_IF} is already UP"
   fi
 
-  ip -details link show "${CAN_IF}" >/dev/null || die "CAN interface is unavailable after setup: ${CAN_IF}"
+  if ! ip -details link show "${CAN_IF}" >/dev/null; then
+    print_can_device_candidates
+    die "CAN interface is unavailable after setup: ${CAN_IF}"
+  fi
 }
 
 ROS_TOPICS_CACHE=""
