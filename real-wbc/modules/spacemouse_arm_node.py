@@ -312,8 +312,20 @@ class SpaceMouseArmNode:
         if self.spacemouse_watchdog_damped:
             return
         self.spacemouse_watchdog_damped = True
-        self.node.get_logger().warning("SpaceMouse watchdog expired; damping X5 arm")
-        self._set_to_damping()
+        self.node.get_logger().warning("SpaceMouse watchdog expired; holding X5 arm")
+        self._hold_current_pose()
+
+    def _hold_current_pose(self) -> None:
+        if self.controller is None or self.arx5 is None:
+            return
+        if self.arm_position_control_enabled:
+            return
+        try:
+            self._refresh_targets_from_controller_state()
+            controller_config = self.controller.get_controller_config()
+            self._enable_current_pose_hold(controller_config)
+        except Exception as exc:
+            self.node.get_logger().error(f"Failed to keep X5 arm in position hold: {exc}")
 
     def _set_to_damping(self) -> None:
         if self.controller is None or not hasattr(self.controller, "set_to_damping"):

@@ -242,6 +242,26 @@ def test_estop_damps_and_blocks_future_sends():
     assert node.controller.sent_count == 0
 
 
+def test_spacemouse_watchdog_holds_without_damping():
+    node = SpaceMouseArmNode.__new__(SpaceMouseArmNode)
+    node.node = _FakeRosNode()
+    node.arx5 = _FakeArx5
+    node.controller = _FakeController()
+    node.target_pose6d = np.zeros(6, dtype=np.float64)
+    node.target_joint = np.zeros(6, dtype=np.float64)
+    node.target_gripper = 0.0
+    node.gripper_min = 0.0
+    node.gripper_max = 0.08
+    node.arm_position_control_enabled = False
+    node.spacemouse_watchdog_damped = False
+
+    node._handle_spacemouse_watchdog()
+
+    assert node.controller.damping_count == 0
+    assert node.controller.sent_count == 1
+    assert node.arm_position_control_enabled is True
+
+
 def test_enable_current_pose_hold_sets_default_gain():
     node = SpaceMouseArmNode.__new__(SpaceMouseArmNode)
     node.node = _FakeRosNode()
@@ -384,6 +404,15 @@ class _FakeController:
 
     def get_joint_cmd(self):
         return _FakeJointState()
+
+    def get_joint_state(self):
+        return _FakeJointState()
+
+    def get_eef_state(self):
+        return _FakeEEFState()
+
+    def get_controller_config(self):
+        return _FakeControllerConfig()
 
     def set_to_damping(self):
         self.damping_count += 1
