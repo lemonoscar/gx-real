@@ -220,9 +220,9 @@ build_unitree_ros2() {
   local ws="${GX_REAL_ROOT}/unitree_ros2/cyclonedds_ws"
   [[ -d "${ws}" ]] || die "missing Unitree ROS2 workspace: ${ws}"
 
-  info "building Unitree ROS2 workspace"
+  info "building Unitree ROS2 message packages"
   pushd "${ws}" >/dev/null
-  colcon build
+  colcon build --packages-select unitree_api unitree_go unitree_hg
   popd >/dev/null
 }
 
