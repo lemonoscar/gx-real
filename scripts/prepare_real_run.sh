@@ -407,10 +407,18 @@ find_ros_topic() {
 sample_ros_topic() {
   local topic="$1"
   local timeout_value
+  local sample_file
   timeout_value="$(timeout_arg)"
+  sample_file="$(mktemp)"
 
   info "sampling ROS2 topic: ${topic}"
-  timeout "${timeout_value}" ros2 topic echo --once "${topic}" >/dev/null
+  timeout "${timeout_value}" ros2 topic echo "${topic}" >"${sample_file}" || true
+  if [[ -s "${sample_file}" ]]; then
+    rm -f "${sample_file}"
+    return 0
+  fi
+  rm -f "${sample_file}"
+  return 1
 }
 
 require_ros_topic() {
