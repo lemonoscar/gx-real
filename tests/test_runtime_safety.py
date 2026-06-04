@@ -11,6 +11,7 @@ sys.path.insert(0, str(ROOT / "real-wbc"))
 from modules.runtime_safety import (  # noqa: E402
     RuntimeSafetyFault,
     is_finite_vector,
+    limit_vector_abs_delta,
     require_finite_scalar,
     require_finite_vector,
 )
@@ -39,3 +40,43 @@ def test_require_finite_scalar_rejects_inf():
 def test_is_finite_vector_returns_false_for_invalid_values():
     assert is_finite_vector([1.0, 2.0, 3.0], size=3)
     assert not is_finite_vector([1.0, float("nan"), 3.0], size=3)
+
+
+def test_limit_vector_abs_delta_clips_amplitude_first():
+    limited, abs_clipped, delta_clipped = limit_vector_abs_delta(
+        [2.0, -2.0, 0.2],
+        [0.0, 0.0, 0.0],
+        size=3,
+        abs_limit=1.0,
+        delta_limit=0.0,
+        name="action",
+    )
+    np.testing.assert_allclose(limited, [1.0, -1.0, 0.2])
+    assert abs_clipped is True
+    assert delta_clipped is False
+
+
+def test_limit_vector_abs_delta_clips_delta_from_previous():
+    limited, abs_clipped, delta_clipped = limit_vector_abs_delta(
+        [0.8, -0.8, 0.0],
+        [0.0, -0.6, 0.0],
+        size=3,
+        abs_limit=1.0,
+        delta_limit=0.25,
+        name="action",
+    )
+    np.testing.assert_allclose(limited, [0.25, -0.8, 0.0])
+    assert abs_clipped is False
+    assert delta_clipped is True
+
+
+def test_limit_vector_abs_delta_rejects_negative_limits():
+    with pytest.raises(RuntimeSafetyFault):
+        limit_vector_abs_delta(
+            [0.0],
+            [0.0],
+            size=1,
+            abs_limit=-1.0,
+            delta_limit=0.0,
+            name="action",
+        )

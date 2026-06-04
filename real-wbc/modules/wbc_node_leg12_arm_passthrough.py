@@ -39,6 +39,7 @@ from modules.height_scan_policy_validation import (
 )
 from modules.runtime_safety import (
     RuntimeSafetyFault,
+    limit_vector_abs_delta,
     require_finite_scalar,
     require_finite_vector,
 )
@@ -343,6 +344,9 @@ class WBCNodeLeg12ArmPassthrough(Node):
         allow_unknown_sport_mode: bool = False,
         lowstate_watchdog_sec: float = 0.25,
         sport_state_watchdog_sec: float = 0.5,
+        startup_action_limit_sec: float = 3.0,
+        startup_action_abs_limit: float = 1.0,
+        startup_action_delta_limit: float = 0.35,
         estop_repeat_count: int = 5,
         estop_repeat_period_sec: float = 0.02,
         live_ready_pose_calibration: bool = True,
@@ -421,6 +425,24 @@ class WBCNodeLeg12ArmPassthrough(Node):
         )
         if self.sport_state_watchdog_sec <= 0.0:
             raise ValueError("sport_state_watchdog_sec must be > 0")
+        self.startup_action_limit_sec = require_finite_scalar(
+            startup_action_limit_sec,
+            "startup_action_limit_sec",
+        )
+        if self.startup_action_limit_sec < 0.0:
+            raise ValueError("startup_action_limit_sec must be >= 0")
+        self.startup_action_abs_limit = require_finite_scalar(
+            startup_action_abs_limit,
+            "startup_action_abs_limit",
+        )
+        if self.startup_action_abs_limit < 0.0:
+            raise ValueError("startup_action_abs_limit must be >= 0")
+        self.startup_action_delta_limit = require_finite_scalar(
+            startup_action_delta_limit,
+            "startup_action_delta_limit",
+        )
+        if self.startup_action_delta_limit < 0.0:
+            raise ValueError("startup_action_delta_limit must be >= 0")
         self.estop_repeat_count = max(1, int(estop_repeat_count))
         self.estop_repeat_period_sec = require_finite_scalar(
             estop_repeat_period_sec,
@@ -623,6 +645,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.sim2sim_action_buffer = np.zeros((1, LEG_DOF), dtype=np.float64)
         self.sim2sim_action_buffer_idx = 0
         self.sim2sim_last_action = np.zeros(LEG_DOF, dtype=np.float64)
+        self.prev_startup_limited_action = np.zeros(LEG_DOF, dtype=np.float64)
+        self.last_startup_action_limit_log_time = -1.0
         self.sim2sim_rng = np.random.default_rng()
         self.real_deploy_leg_offset = np.array(
             [
@@ -1749,6 +1773,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.reset_sim2sim_action_state()
         self.last_policy_diag_log_time = -1.0
         self.last_policy_block_log_time = -1.0
+        self.last_startup_action_limit_log_time = -1.0
         logging.info(
             "Starting dog-only startup before rollout; command ramp %s -> %s over %.2fs"
             % (
@@ -2381,7 +2406,55 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.sim2sim_action_buffer = np.zeros((max_delay + 1, LEG_DOF), dtype=np.float64)
         self.sim2sim_action_buffer_idx = 0
         self.sim2sim_last_action = np.zeros(LEG_DOF, dtype=np.float64)
+        self.prev_startup_limited_action = np.zeros(LEG_DOF, dtype=np.float64)
         self.sample_sim2sim_action_delay()
+
+    def apply_startup_action_limits(
+        self,
+        action: np.ndarray,
+        policy_elapsed: float,
+    ) -> Tuple[np.ndarray, bool, bool, bool]:
+        action = require_finite_vector(action, size=LEG_DOF, name="startup_action")
+        active = (
+            self.startup_action_limit_sec > 0.0
+            and policy_elapsed < self.startup_action_limit_sec
+        )
+        if not active:
+            self.prev_startup_limited_action = action.copy()
+            return action, False, False, False
+
+        limited, abs_clipped, delta_clipped = limit_vector_abs_delta(
+            action,
+            self.prev_startup_limited_action,
+            size=LEG_DOF,
+            abs_limit=self.startup_action_abs_limit,
+            delta_limit=self.startup_action_delta_limit,
+            name="startup_action",
+        )
+        self.prev_startup_limited_action = limited.copy()
+        if abs_clipped or delta_clipped:
+            now = time.monotonic()
+            if (
+                self.last_startup_action_limit_log_time < 0.0
+                or (now - self.last_startup_action_limit_log_time)
+                >= self.policy_diag_log_interval
+            ):
+                logging.warning(
+                    "Startup action limiter | elapsed=%.3f/%.3fs abs_limit=%.3f "
+                    "delta_limit=%.3f abs_clipped=%s delta_clipped=%s requested=%s limited=%s"
+                    % (
+                        policy_elapsed,
+                        self.startup_action_limit_sec,
+                        self.startup_action_abs_limit,
+                        self.startup_action_delta_limit,
+                        abs_clipped,
+                        delta_clipped,
+                        np.array2string(action, precision=3, floatmode="fixed"),
+                        np.array2string(limited, precision=3, floatmode="fixed"),
+                    )
+                )
+                self.last_startup_action_limit_log_time = now
+        return limited, True, abs_clipped, delta_clipped
 
     def apply_sim2sim_action_timing(
         self, clipped_action: np.ndarray
@@ -3365,7 +3438,10 @@ class WBCNodeLeg12ArmPassthrough(Node):
                     self.clip_actions_lower,
                     self.clip_actions_upper,
                 )
-                timed_action, leg_action = self.apply_sim2sim_action_timing(clipped_action)
+                startup_limited_action, startup_limiter_active, startup_abs_clipped, startup_delta_clipped = (
+                    self.apply_startup_action_limits(clipped_action, policy_elapsed)
+                )
+                timed_action, leg_action = self.apply_sim2sim_action_timing(startup_limited_action)
                 timed_action = require_finite_vector(
                     timed_action,
                     size=LEG_DOF,
@@ -3398,7 +3474,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
                 >= self.policy_diag_log_interval
             ):
                 logging.info(
-                    "Policy diag | handover=%.3f est_lin_vel=%s commands=%s raw_action=%s clipped_action=%s timed_action=%s applied_action=%s startup_kick=%s target_leg_q=%s commanded_leg_q=%s current_leg_q=%s leg_q_error=%s current_leg_dq=%s current_tau_est=%s motor_mode=%s lowcmd_leg_q_policy=%s lowcmd_leg_q_hw=%s lowcmd_kp=%s lowcmd_kd=%s arm_target=%s arm_current=%s arm_smoothed_cmd=%s sim2sim_delay=%d hold_prob=%.3f foot_force=%s"
+                    "Policy diag | handover=%.3f est_lin_vel=%s commands=%s raw_action=%s clipped_action=%s startup_limited_action=%s startup_limiter_active=%s startup_abs_clipped=%s startup_delta_clipped=%s timed_action=%s applied_action=%s startup_kick=%s target_leg_q=%s commanded_leg_q=%s current_leg_q=%s leg_q_error=%s current_leg_dq=%s current_tau_est=%s motor_mode=%s lowcmd_leg_q_policy=%s lowcmd_leg_q_hw=%s lowcmd_kp=%s lowcmd_kd=%s arm_target=%s arm_current=%s arm_smoothed_cmd=%s sim2sim_delay=%d hold_prob=%.3f foot_force=%s"
                     % (
                         handover_ratio,
                         np.array2string(
@@ -3421,6 +3497,14 @@ class WBCNodeLeg12ArmPassthrough(Node):
                             precision=3,
                             floatmode="fixed",
                         ),
+                        np.array2string(
+                            startup_limited_action,
+                            precision=3,
+                            floatmode="fixed",
+                        ),
+                        startup_limiter_active,
+                        startup_abs_clipped,
+                        startup_delta_clipped,
                         np.array2string(
                             timed_action,
                             precision=3,
@@ -3531,6 +3615,10 @@ class WBCNodeLeg12ArmPassthrough(Node):
                     "policy_input": self.obs.reshape(1, -1).copy(),
                     "raw_action": raw_action.copy(),
                     "clipped_action": clipped_action.copy(),
+                    "startup_limited_action": startup_limited_action.copy(),
+                    "startup_limiter_active": startup_limiter_active,
+                    "startup_abs_clipped": startup_abs_clipped,
+                    "startup_delta_clipped": startup_delta_clipped,
                     "timed_action": timed_action.copy(),
                     "applied_action": leg_action.copy(),
                     "reordered_wbc_action": wbc_action,
@@ -3722,6 +3810,9 @@ class WBCNodeLeg12ArmPassthrough(Node):
             + f" policy_move_commands: {self.policy_move_commands},"
             + f" base_command_source: {self.base_command_source},"
             + f" policy_command_ramp_duration: {self.policy_command_ramp_duration},"
+            + f" startup_action_limit_sec: {self.startup_action_limit_sec},"
+            + f" startup_action_abs_limit: {self.startup_action_abs_limit},"
+            + f" startup_action_delta_limit: {self.startup_action_delta_limit},"
             + f" arm_control_owner: {self.arm_control_owner},"
             + f" arm_state_topic: {self.arm_state_topic},"
             + f" arm_target_topic: {self.arm_target_topic},"

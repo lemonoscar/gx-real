@@ -199,6 +199,24 @@ if __name__ == "__main__":
         default=0.5,
         help="Stop low-level control if sport_mode state is stale for this long.",
     )
+    parser.add_argument(
+        "--startup-action-limit-sec",
+        type=float,
+        default=3.0,
+        help="Apply deployment action abs/delta limits for this many seconds after policy starts; 0 disables.",
+    )
+    parser.add_argument(
+        "--startup-action-abs-limit",
+        type=float,
+        default=1.0,
+        help="Absolute policy action limit during the startup action limit window; 0 disables.",
+    )
+    parser.add_argument(
+        "--startup-action-delta-limit",
+        type=float,
+        default=0.35,
+        help="Per-policy-step action delta limit during the startup action limit window; 0 disables.",
+    )
     parser.add_argument("--estop-repeat-count", type=int, default=5)
     parser.add_argument("--estop-repeat-period-sec", type=float, default=0.02)
     parser.add_argument(

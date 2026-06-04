@@ -43,3 +43,34 @@ def is_finite_vector(
     except RuntimeSafetyFault:
         return False
     return True
+
+
+def limit_vector_abs_delta(
+    values: Sequence[float],
+    previous: Sequence[float],
+    *,
+    size: Optional[int],
+    abs_limit: float,
+    delta_limit: float,
+    name: str,
+) -> tuple[np.ndarray, bool, bool]:
+    arr = require_finite_vector(values, size=size, name=name)
+    prev = require_finite_vector(previous, size=arr.shape[0], name=f"{name}_previous")
+    abs_limit = require_finite_scalar(abs_limit, f"{name}_abs_limit")
+    delta_limit = require_finite_scalar(delta_limit, f"{name}_delta_limit")
+    if abs_limit < 0.0:
+        raise RuntimeSafetyFault(f"{name}_abs_limit must be >= 0, got {abs_limit!r}")
+    if delta_limit < 0.0:
+        raise RuntimeSafetyFault(f"{name}_delta_limit must be >= 0, got {delta_limit!r}")
+
+    limited = arr.copy()
+    if abs_limit > 0.0:
+        limited = np.clip(limited, -abs_limit, abs_limit)
+    abs_clipped = not np.array_equal(limited, arr)
+
+    before_delta = limited.copy()
+    if delta_limit > 0.0:
+        limited = prev + np.clip(limited - prev, -delta_limit, delta_limit)
+    delta_clipped = not np.array_equal(limited, before_delta)
+
+    return limited, abs_clipped, delta_clipped
