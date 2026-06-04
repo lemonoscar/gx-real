@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 import math
 import os
 import time
@@ -10,6 +11,11 @@ from typing import Optional, Sequence, Tuple
 import numpy as np
 
 from modules.can_owner_lock import CanOwnerLock
+from modules.runtime_safety import (
+    RuntimeSafetyFault,
+    require_finite_scalar,
+    require_finite_vector,
+)
 
 
 TRANSLATION_AXES = ("x", "y", "z")
@@ -178,24 +184,36 @@ class SpaceMouseArmNode:
         self._init_inputs_and_controller()
         self.timer = self.node.create_timer(1.0 / self.ctrl_freq, self.timer_callback)
 
+    def _log_info(self, message: str) -> None:
+        self.node.get_logger().info(message)
+        logging.info(message)
+
+    def _log_warning(self, message: str) -> None:
+        self.node.get_logger().warning(message)
+        logging.warning(message)
+
+    def _log_error(self, message: str) -> None:
+        self.node.get_logger().error(message)
+        logging.error(message)
+
     def _log_startup_config(self) -> None:
         frame_source = "raw" if self.sm_use_raw_frame else "transformed"
-        self.node.get_logger().info(f"Arm control owner: spacemouse_arm_node ({self.can_interface})")
-        self.node.get_logger().info(f"SpaceMouse frame source: {frame_source}")
-        self.node.get_logger().info(f"translation axis map: {self.mapping.translation_axes}")
-        self.node.get_logger().info(f"rotation axis map: {self.mapping.rotation_axes}")
-        self.node.get_logger().info(f"translation signs: {self.mapping.translation_signs}")
-        self.node.get_logger().info(f"rotation signs: {self.mapping.rotation_signs}")
-        self.node.get_logger().info(f"arm command frame: {self.arm_command_frame}")
-        self.node.get_logger().info(f"pos speed: {self.mapping.pos_speed}")
-        self.node.get_logger().info(f"rot speed: {self.mapping.rot_speed}")
-        self.node.get_logger().info(f"deadzone: {self.mapping.deadzone}")
-        self.node.get_logger().info(f"watchdog: {self.sm_watchdog_sec}")
-        self.node.get_logger().info(f"safety estop topic: {self.safety_topic}")
+        self._log_info(f"Arm control owner: spacemouse_arm_node ({self.can_interface})")
+        self._log_info(f"SpaceMouse frame source: {frame_source}")
+        self._log_info(f"translation axis map: {self.mapping.translation_axes}")
+        self._log_info(f"rotation axis map: {self.mapping.rotation_axes}")
+        self._log_info(f"translation signs: {self.mapping.translation_signs}")
+        self._log_info(f"rotation signs: {self.mapping.rotation_signs}")
+        self._log_info(f"arm command frame: {self.arm_command_frame}")
+        self._log_info(f"pos speed: {self.mapping.pos_speed}")
+        self._log_info(f"rot speed: {self.mapping.rot_speed}")
+        self._log_info(f"deadzone: {self.mapping.deadzone}")
+        self._log_info(f"watchdog: {self.sm_watchdog_sec}")
+        self._log_info(f"safety estop topic: {self.safety_topic}")
 
     def _init_inputs_and_controller(self) -> None:
         if self.dry_run:
-            self.node.get_logger().warning("SpaceMouse Arm Node dry-run: not opening SpaceMouse or ARX5")
+            self._log_warning("SpaceMouse Arm Node dry-run: not opening SpaceMouse or ARX5")
             return
         if self.require_can and not can_interface_exists(self.can_interface):
             raise RuntimeError(f"CAN interface {self.can_interface!r} does not exist")
@@ -215,9 +233,9 @@ class SpaceMouseArmNode:
             urdf_path = os.path.join(ARX5_MODELS_DIR, f"{self.model}.urdf")
             if os.path.isfile(urdf_path):
                 robot_config.urdf_path = urdf_path
-                self.node.get_logger().info(f"Using ARX5 URDF: {urdf_path}")
+                self._log_info(f"Using ARX5 URDF: {urdf_path}")
             else:
-                self.node.get_logger().warning(
+                self._log_warning(
                     f"ARX5 URDF not found at {urdf_path}; using SDK default"
                 )
             gripper_width = float(getattr(robot_config, "gripper_width", self.gripper_max))
@@ -261,7 +279,7 @@ class SpaceMouseArmNode:
         if spacemouse_input is not None:
             self.last_spacemouse_sample_time = now
             if self.spacemouse_watchdog_damped:
-                self.node.get_logger().info("SpaceMouse samples recovered; waiting for a new command")
+                self._log_info("SpaceMouse samples recovered; waiting for a new command")
                 self.spacemouse_watchdog_damped = False
             translation, rotation = map_spacemouse_motion(
                 spacemouse_input.motion,
@@ -275,7 +293,11 @@ class SpaceMouseArmNode:
             )
             buttons_request = self._buttons_request_gripper_motion()
             if (motion_command or buttons_request) and not self.arm_position_control_enabled:
-                self._refresh_targets_from_controller_state()
+                try:
+                    self._refresh_targets_from_controller_state()
+                except RuntimeSafetyFault as exc:
+                    self._trigger_estop(f"invalid X5 state before command: {exc}")
+                    return
             if motion_command:
                 self.target_pose6d[:3] += translation
                 self.target_pose6d[3:] = _wrap_to_pi(self.target_pose6d[3:] + rotation)
@@ -293,8 +315,8 @@ class SpaceMouseArmNode:
         elif not self.estopped and now - self.last_spacemouse_sample_time > self.sm_watchdog_sec:
             self._handle_spacemouse_watchdog()
 
-        joint_pos, joint_vel, joint_tau, gripper_pos, gripper_vel = self._read_arm_state()
-        self._publish_arm_state(joint_pos, joint_vel, joint_tau, gripper_pos, gripper_vel)
+        joint_pos, joint_vel, joint_tau, gripper_pos, gripper_vel, arm_state_valid = self._read_arm_state()
+        self._publish_arm_state(joint_pos, joint_vel, joint_tau, gripper_pos, gripper_vel, arm_state_valid)
         self._publish_arm_target()
 
     def _safety_estop_cb(self, msg) -> None:
@@ -305,14 +327,14 @@ class SpaceMouseArmNode:
         if self.estopped:
             return
         self.estopped = True
-        self.node.get_logger().error(f"Emergency stop received from {source}; damping X5 arm")
+        self._log_error(f"Emergency stop received from {source}; damping X5 arm")
         self._set_to_damping()
 
     def _handle_spacemouse_watchdog(self) -> None:
         if self.spacemouse_watchdog_damped:
             return
         self.spacemouse_watchdog_damped = True
-        self.node.get_logger().warning("SpaceMouse watchdog expired; holding X5 arm")
+        self._log_warning("SpaceMouse watchdog expired; holding X5 arm")
         self._hold_current_pose()
 
     def _hold_current_pose(self) -> None:
@@ -325,7 +347,7 @@ class SpaceMouseArmNode:
             controller_config = self.controller.get_controller_config()
             self._enable_current_pose_hold(controller_config)
         except Exception as exc:
-            self.node.get_logger().error(f"Failed to keep X5 arm in position hold: {exc}")
+            self._log_error(f"Failed to keep X5 arm in position hold: {exc}")
 
     def _set_to_damping(self) -> None:
         if self.controller is None or not hasattr(self.controller, "set_to_damping"):
@@ -334,7 +356,7 @@ class SpaceMouseArmNode:
             self.controller.set_to_damping()
             self.arm_position_control_enabled = False
         except Exception as exc:
-            self.node.get_logger().error(f"Failed to set X5 arm damping mode: {exc}")
+            self._log_error(f"Failed to set X5 arm damping mode: {exc}")
 
     def _read_spacemouse_motion(self, *, now: Optional[float] = None) -> Optional[np.ndarray]:
         spacemouse_input = self._read_spacemouse_input(now=now)
@@ -384,7 +406,7 @@ class SpaceMouseArmNode:
                 buttons=buttons,
                 motion_sequence=motion_sequence,
             )
-        self.node.get_logger().warning("using transformed SpaceMouse frame: legacy z-up")
+        self._log_warning("using transformed SpaceMouse frame: legacy z-up")
         tx_zup_spnav = np.asarray(
             getattr(
                 self.spacemouse,
@@ -423,7 +445,7 @@ class SpaceMouseArmNode:
         try:
             recent = ring_buffer.get_last_k(k)
         except Exception as exc:
-            self.node.get_logger().warning(f"Failed to read SpaceMouse recent samples: {exc}")
+            self._log_warning(f"Failed to read SpaceMouse recent samples: {exc}")
             return latest_sample
 
         for idx in range(k - 1, -1, -1):
@@ -482,22 +504,39 @@ class SpaceMouseArmNode:
         if self.controller is None:
             return
         eef_state = self.controller.get_eef_state()
-        self.target_pose6d = np.asarray(eef_state.pose_6d(), dtype=np.float64).copy()
+        self.target_pose6d = require_finite_vector(
+            eef_state.pose_6d(),
+            size=6,
+            name="arx5.eef_pose6d",
+        )
         self.target_gripper = self._clamp_gripper(
-            float(getattr(eef_state, "gripper_pos", self.target_gripper))
+            require_finite_scalar(
+                getattr(eef_state, "gripper_pos", self.target_gripper),
+                "arx5.eef_gripper",
+            )
         )
         if hasattr(self.controller, "get_joint_state"):
             joint_state = self.controller.get_joint_state()
-            joint_pos = np.asarray(joint_state.pos(), dtype=np.float64).reshape(-1)
-            if joint_pos.shape[0] == 6 and np.isfinite(joint_pos).all():
-                self.target_joint = joint_pos.copy()
+            joint_pos = require_finite_vector(
+                joint_state.pos(),
+                size=6,
+                name="arx5.joint_pos",
+            )
+            self.target_joint = joint_pos.copy()
 
     def _enable_current_pose_hold(self, controller_config) -> None:
         if self.controller is None or self.arx5 is None:
             return
+        self.target_pose6d = require_finite_vector(
+            self.target_pose6d,
+            size=6,
+            name="x5_hold_pose6d",
+        )
         cmd = self.arx5.EEFState()
         cmd.pose_6d()[:] = self.target_pose6d
-        cmd.gripper_pos = self._clamp_gripper(self.target_gripper)
+        cmd.gripper_pos = self._clamp_gripper(
+            require_finite_scalar(self.target_gripper, "x5_hold_gripper")
+        )
         self.controller.set_eef_cmd(cmd)
         if hasattr(self.controller, "set_gain") and hasattr(self.arx5, "Gain"):
             gain = self.arx5.Gain(
@@ -509,7 +548,7 @@ class SpaceMouseArmNode:
             self.controller.set_gain(gain)
         self.arm_position_control_enabled = True
         self._sync_target_joint_from_controller()
-        self.node.get_logger().info("X5 position hold enabled")
+        self._log_info("X5 position hold enabled")
 
     def _should_apply_motion_command(
         self,
@@ -576,8 +615,19 @@ class SpaceMouseArmNode:
             controller_config = self.controller.get_controller_config()
             self._enable_current_pose_hold(controller_config)
         cmd = self.arx5.EEFState()
+        try:
+            self.target_pose6d = require_finite_vector(
+                self.target_pose6d,
+                size=6,
+                name="x5_target_pose6d",
+            )
+            self.target_gripper = self._clamp_gripper(
+                require_finite_scalar(self.target_gripper, "x5_target_gripper")
+            )
+        except RuntimeSafetyFault as exc:
+            self._trigger_estop(f"invalid X5 target: {exc}")
+            return
         cmd.pose_6d()[:] = self.target_pose6d
-        self.target_gripper = self._clamp_gripper(self.target_gripper)
         cmd.gripper_pos = self.target_gripper
         if hasattr(self.controller, "set_eef_cmd"):
             self.controller.set_eef_cmd(cmd)
@@ -604,21 +654,53 @@ class SpaceMouseArmNode:
                 np.zeros(6, dtype=np.float64),
                 self._clamp_gripper(self.target_gripper),
                 0.0,
+                True,
             )
         if hasattr(self.controller, "get_joint_state"):
-            state = self.controller.get_joint_state()
-            joint_pos = np.asarray(state.pos(), dtype=np.float64).copy()
-            joint_vel = np.asarray(state.vel(), dtype=np.float64).copy()
-            joint_tau = np.asarray(state.torque(), dtype=np.float64).copy()
-            gripper_pos = float(getattr(state, "gripper_pos", self.target_gripper))
-            gripper_vel = float(getattr(state, "gripper_vel", 0.0))
-            return joint_pos, joint_vel, joint_tau, gripper_pos, gripper_vel
+            try:
+                state = self.controller.get_joint_state()
+                joint_pos = require_finite_vector(
+                    state.pos(),
+                    size=6,
+                    name="arx5.joint_pos",
+                )
+                joint_vel = require_finite_vector(
+                    state.vel(),
+                    size=6,
+                    name="arx5.joint_vel",
+                )
+                joint_tau = require_finite_vector(
+                    state.torque(),
+                    size=6,
+                    name="arx5.joint_tau",
+                )
+                gripper_pos = require_finite_scalar(
+                    getattr(state, "gripper_pos", self.target_gripper),
+                    "arx5.gripper_pos",
+                )
+                gripper_vel = require_finite_scalar(
+                    getattr(state, "gripper_vel", 0.0),
+                    "arx5.gripper_vel",
+                )
+                return joint_pos, joint_vel, joint_tau, gripper_pos, gripper_vel, True
+            except Exception as exc:
+                self._log_error(f"Invalid X5 arm state; damping arm and publishing invalid state: {exc}")
+                self._set_to_damping()
+                return (
+                    self.target_joint.copy(),
+                    np.zeros(6, dtype=np.float64),
+                    np.zeros(6, dtype=np.float64),
+                    self._clamp_gripper(self.target_gripper),
+                    0.0,
+                    False,
+                )
         return (
             self.target_joint.copy(),
             np.zeros(6, dtype=np.float64),
             np.zeros(6, dtype=np.float64),
             self._clamp_gripper(self.target_gripper),
             0.0,
+            False,
         )
 
     def _publish_arm_state(
@@ -628,16 +710,31 @@ class SpaceMouseArmNode:
         joint_tau: np.ndarray,
         gripper_pos: float,
         gripper_vel: float,
+        valid: bool,
     ) -> None:
         msg = self.ArmState()
         msg.header.stamp = self.node.get_clock().now().to_msg()
         msg.header.frame_id = "arm_base"
+        try:
+            joint_pos = require_finite_vector(joint_pos, size=6, name="arm_state.joint_pos")
+            joint_vel = require_finite_vector(joint_vel, size=6, name="arm_state.joint_vel")
+            joint_tau = require_finite_vector(joint_tau, size=6, name="arm_state.joint_tau")
+            gripper_pos = require_finite_scalar(gripper_pos, "arm_state.gripper_pos")
+            gripper_vel = require_finite_scalar(gripper_vel, "arm_state.gripper_vel")
+        except RuntimeSafetyFault as exc:
+            self._log_error(f"Refusing valid ArmState publish: {exc}")
+            joint_pos = self.target_joint.copy()
+            joint_vel = np.zeros(6, dtype=np.float64)
+            joint_tau = np.zeros(6, dtype=np.float64)
+            gripper_pos = self._clamp_gripper(self.target_gripper)
+            gripper_vel = 0.0
+            valid = False
         msg.joint_pos = joint_pos.astype(float).tolist()
         msg.joint_vel = joint_vel.astype(float).tolist()
         msg.joint_tau = joint_tau.astype(float).tolist()
         msg.gripper_pos = float(gripper_pos)
         msg.gripper_vel = float(gripper_vel)
-        msg.valid = True
+        msg.valid = bool(valid)
         msg.source = "spacemouse_arm_node_dry_run" if self.dry_run else "spacemouse_arm_node"
         self.state_pub.publish(msg)
 
@@ -645,13 +742,35 @@ class SpaceMouseArmNode:
         msg = self.ArmTargetState()
         msg.header.stamp = self.node.get_clock().now().to_msg()
         msg.header.frame_id = self.arm_command_frame
-        msg.joint_target = self.target_joint.astype(float).tolist()
-        msg.tcp_target_pose = _pose6d_to_pose7(self.target_pose6d).astype(float).tolist()
-        self.target_gripper = self._clamp_gripper(self.target_gripper)
-        msg.gripper_target = float(self.target_gripper)
+        valid = True
+        try:
+            joint_target = require_finite_vector(
+                self.target_joint,
+                size=6,
+                name="arm_target.joint_target",
+            )
+            pose6d = require_finite_vector(
+                self.target_pose6d,
+                size=6,
+                name="arm_target.pose6d",
+            )
+            gripper_target = self._clamp_gripper(
+                require_finite_scalar(self.target_gripper, "arm_target.gripper")
+            )
+            tcp_target_pose = _pose6d_to_pose7(pose6d)
+        except RuntimeSafetyFault as exc:
+            self._log_error(f"Publishing invalid ArmTargetState: {exc}")
+            joint_target = np.zeros(6, dtype=np.float64)
+            tcp_target_pose = np.zeros(7, dtype=np.float64)
+            gripper_target = self._clamp_gripper(0.0)
+            valid = False
+        msg.joint_target = joint_target.astype(float).tolist()
+        msg.tcp_target_pose = tcp_target_pose.astype(float).tolist()
+        self.target_gripper = gripper_target
+        msg.gripper_target = float(gripper_target)
         msg.command_frame = self.arm_command_frame
         msg.source = "spacemouse_arm_node_dry_run" if self.dry_run else "spacemouse_arm_node"
-        msg.valid = True
+        msg.valid = bool(valid)
         self.target_pub.publish(msg)
 
     def shutdown(self) -> None:
@@ -687,7 +806,7 @@ class SpaceMouseArmNode:
             self.last_spacemouse_stale_log_time < 0.0
             or (now - self.last_spacemouse_stale_log_time) >= 1.0
         ):
-            self.node.get_logger().warning(f"SpaceMouse sample stale: {reason}")
+            self._log_warning(f"SpaceMouse sample stale: {reason}")
             self.last_spacemouse_stale_log_time = now
 
     def _log_spacemouse_command(
@@ -705,7 +824,7 @@ class SpaceMouseArmNode:
         ):
             return
         self.last_spacemouse_command_log_time = now
-        self.node.get_logger().info(
+        self._log_info(
             "SpaceMouse command accepted "
             f"seq={sequence} "
             f"translation={np.asarray(translation, dtype=np.float64).round(5).tolist()} "

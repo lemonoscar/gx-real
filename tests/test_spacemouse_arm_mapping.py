@@ -302,6 +302,44 @@ def test_send_target_clamps_gripper_and_publishes_commanded_joint_target():
     np.testing.assert_allclose(node.target_joint, [1, 2, 3, 4, 5, 6])
 
 
+def test_send_target_invalid_pose_damps_and_blocks_command():
+    node = SpaceMouseArmNode.__new__(SpaceMouseArmNode)
+    node.node = _FakeRosNode()
+    node.estopped = False
+    node.dry_run = False
+    node.arx5 = _FakeArx5
+    node.controller = _FakeController()
+    node.target_pose6d = np.array([0.0, np.nan, 0.0, 0.0, 0.0, 0.0], dtype=np.float64)
+    node.target_joint = np.zeros(6, dtype=np.float64)
+    node.target_gripper = 0.0
+    node.gripper_min = 0.0
+    node.gripper_max = 0.08
+    node.arm_position_control_enabled = True
+
+    node._send_target()
+
+    assert node.estopped is True
+    assert node.controller.damping_count == 1
+    assert node.controller.sent_count == 0
+
+
+def test_read_arm_state_invalid_joint_values_publish_invalid_and_damps():
+    node = SpaceMouseArmNode.__new__(SpaceMouseArmNode)
+    node.node = _FakeRosNode()
+    node.dry_run = False
+    node.controller = _FakeController(joint_state=_FakeBadJointState())
+    node.target_joint = np.zeros(6, dtype=np.float64)
+    node.target_gripper = 0.0
+    node.gripper_min = 0.0
+    node.gripper_max = 0.08
+    node.arm_position_control_enabled = True
+
+    *_, valid = node._read_arm_state()
+
+    assert valid is False
+    assert node.controller.damping_count == 1
+
+
 def _make_arm_node_for_unit_tests(sample):
     node = SpaceMouseArmNode.__new__(SpaceMouseArmNode)
     node.dry_run = False
@@ -389,14 +427,26 @@ class _FakeJointState:
     def pos(self):
         return np.array([1, 2, 3, 4, 5, 6], dtype=np.float64)
 
+    def vel(self):
+        return np.zeros(6, dtype=np.float64)
+
+    def torque(self):
+        return np.zeros(6, dtype=np.float64)
+
+
+class _FakeBadJointState(_FakeJointState):
+    def pos(self):
+        return np.array([1, 2, np.nan, 4, 5, 6], dtype=np.float64)
+
 
 class _FakeController:
-    def __init__(self):
+    def __init__(self, joint_state=None):
         self.sent_count = 0
         self.damping_count = 0
         self.gain_count = 0
         self.last_cmd = None
         self.last_gain = None
+        self.joint_state = _FakeJointState() if joint_state is None else joint_state
 
     def set_eef_cmd(self, cmd):
         self.sent_count += 1
@@ -406,7 +456,7 @@ class _FakeController:
         return _FakeJointState()
 
     def get_joint_state(self):
-        return _FakeJointState()
+        return self.joint_state
 
     def get_eef_state(self):
         return _FakeEEFState()

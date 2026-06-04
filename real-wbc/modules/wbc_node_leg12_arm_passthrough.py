@@ -37,6 +37,11 @@ from modules.height_scan_policy_validation import (
     ZERO_HEIGHT_SCAN_FUNC,
     validate_height_scan_runtime_mode,
 )
+from modules.runtime_safety import (
+    RuntimeSafetyFault,
+    require_finite_scalar,
+    require_finite_vector,
+)
 from transforms3d import affines, quaternions, euler
 
 MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -336,6 +341,10 @@ class WBCNodeLeg12ArmPassthrough(Node):
         require_arm: bool = False,
         standup_mode: str = "internal",
         allow_unknown_sport_mode: bool = False,
+        lowstate_watchdog_sec: float = 0.25,
+        sport_state_watchdog_sec: float = 0.5,
+        estop_repeat_count: int = 5,
+        estop_repeat_period_sec: float = 0.02,
         live_ready_pose_calibration: bool = True,
         leg_kp: float = 200.0,
         leg_kd: float = 10.0,
@@ -400,12 +409,37 @@ class WBCNodeLeg12ArmPassthrough(Node):
                 )
         self.standup_mode = standup_mode
         self.allow_unknown_sport_mode = allow_unknown_sport_mode
+        self.lowstate_watchdog_sec = require_finite_scalar(
+            lowstate_watchdog_sec,
+            "lowstate_watchdog_sec",
+        )
+        if self.lowstate_watchdog_sec <= 0.0:
+            raise ValueError("lowstate_watchdog_sec must be > 0")
+        self.sport_state_watchdog_sec = require_finite_scalar(
+            sport_state_watchdog_sec,
+            "sport_state_watchdog_sec",
+        )
+        if self.sport_state_watchdog_sec <= 0.0:
+            raise ValueError("sport_state_watchdog_sec must be > 0")
+        self.estop_repeat_count = max(1, int(estop_repeat_count))
+        self.estop_repeat_period_sec = require_finite_scalar(
+            estop_repeat_period_sec,
+            "estop_repeat_period_sec",
+        )
+        if self.estop_repeat_period_sec < 0.0:
+            raise ValueError("estop_repeat_period_sec must be >= 0")
         self.live_ready_pose_calibration = live_ready_pose_calibration
         self.default_arm_hold_pose = np.array(
             [-0.8, 2.8, 1.9, -0.4, 0.0, 0.0], dtype=np.float64
         )
-        self.commanded_leg_kp = np.ones(LEG_DOF, dtype=np.float64) * float(leg_kp)
-        self.commanded_leg_kd = np.ones(LEG_DOF, dtype=np.float64) * float(leg_kd)
+        self.commanded_leg_kp = np.ones(LEG_DOF, dtype=np.float64) * require_finite_scalar(
+            leg_kp,
+            "leg_kp",
+        )
+        self.commanded_leg_kd = np.ones(LEG_DOF, dtype=np.float64) * require_finite_scalar(
+            leg_kd,
+            "leg_kd",
+        )
         self.policy_takeover_commands = np.array([0.0, 0.0, 0.0], dtype=np.float64)
         self.policy_move_commands = np.array([cmd_vx, cmd_vy, cmd_yaw], dtype=np.float64)
         self.base_command_source = base_command_source.lower()
@@ -437,6 +471,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.joy_dry_run = bool(joy_dry_run)
         self.joy_diag_log_interval = 0.25 if joy_dry_run else 0.5
         self.last_joy_diag_log_time = -1.0
+        self.last_joy_input_log_time = -1.0
         self.policy_command_ramp_duration = 1.5
         self.startup_kick_duration = 0.0
         self.startup_kick_leg_delta = np.zeros(LEG_DOF, dtype=np.float64)
@@ -527,6 +562,9 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.last_teleop_invalid_log_time = -1.0
         self.policy_diag_log_interval = 0.5
         self.last_policy_diag_log_time = -1.0
+        self.last_lowstate_time = -1.0
+        self.safety_stop_reason = ""
+        self.last_safety_fault_log_time = -1.0
         self.height_scan_diag_log_interval = 0.5
         self.last_height_scan_diag_log_time = -1.0
         self.enable_height_scan = bool(enable_height_scan)
@@ -1197,6 +1235,103 @@ class WBCNodeLeg12ArmPassthrough(Node):
             self.can_owner_lock.release()
             self.can_owner_lock = None
 
+    def low_level_control_active(self) -> bool:
+        return (
+            self.start_policy
+            or self.align_to_policy_active
+            or self.pose_test_active
+            or self.start_time != -1.0
+        )
+
+    def publish_safety_estop(self, *, repeat: bool = False) -> None:
+        count = self.estop_repeat_count if repeat else 1
+        for idx in range(count):
+            try:
+                self.safety_pub.publish(Bool(data=True))
+            except Exception as exc:
+                logging.error("Failed to publish safety estop: %s", exc)
+                return
+            if repeat and idx + 1 < count and self.estop_repeat_period_sec > 0.0:
+                time.sleep(self.estop_repeat_period_sec)
+
+    def reset_lowcmd_to_passive(self) -> None:
+        for motor_cmd in self.motor_cmd:
+            motor_cmd.q = POS_STOP_F
+            motor_cmd.dq = VEL_STOP_F
+            motor_cmd.tau = 0.0
+            motor_cmd.kp = 0.0
+            motor_cmd.kd = 0.0
+        self.quadruped_kp[:] = 0.0
+        self.quadruped_kd[:] = 0.0
+        self.cmd_msg.motor_cmd = self.motor_cmd.copy()
+
+    def publish_passive_lowcmd_once(self) -> None:
+        try:
+            self.cmd_msg.crc = get_crc(self.cmd_msg)
+            self.motor_pub.publish(self.cmd_msg)
+        except Exception as exc:
+            logging.error("Failed to publish passive lowcmd: %s", exc)
+
+    def trigger_safety_stop(self, reason: str, *, publish_estop: bool = True) -> None:
+        now = time.monotonic()
+        if (
+            self.safety_stop_reason != reason
+            and (
+                self.last_safety_fault_log_time < 0.0
+                or (now - self.last_safety_fault_log_time) >= self.policy_diag_log_interval
+            )
+        ):
+            logging.error("Runtime safety stop: %s", reason)
+            self.last_safety_fault_log_time = now
+        self.safety_stop_reason = reason
+        self.start_policy = False
+        self.align_to_policy_active = False
+        self.pose_test_active = False
+        self.awaiting_unitree_stand = False
+        self.policy_motion_started = False
+        self.start_time = -1.0
+        self.fixed_commands[:] = self.policy_takeover_commands
+        self.command_safety_filter.reset(tuple(self.policy_takeover_commands), now=now)
+        self.reset_lowcmd_to_passive()
+        self.publish_passive_lowcmd_once()
+        if publish_estop:
+            self.publish_safety_estop(repeat=True)
+
+    def has_recent_lowstate(self, now: Optional[float] = None) -> bool:
+        stamp = time.monotonic() if now is None else float(now)
+        return (
+            self.last_lowstate_time >= 0.0
+            and (stamp - self.last_lowstate_time) <= self.lowstate_watchdog_sec
+        )
+
+    def check_lowstate_watchdog(self, now: Optional[float] = None) -> bool:
+        stamp = time.monotonic() if now is None else float(now)
+        if self.has_recent_lowstate(stamp):
+            return True
+        age = float("inf") if self.last_lowstate_time < 0.0 else stamp - self.last_lowstate_time
+        self.trigger_safety_stop(
+            "lowstate watchdog expired: age=%.3fs limit=%.3fs"
+            % (age, self.lowstate_watchdog_sec)
+        )
+        return False
+
+    def is_sport_mode_fresh(self, now: Optional[float] = None) -> bool:
+        stamp = time.monotonic() if now is None else float(now)
+        return (
+            self.sport_state_seen
+            and self.last_sport_state_time >= 0.0
+            and (stamp - self.last_sport_state_time) <= self.sport_state_watchdog_sec
+        )
+
+    def check_runtime_control_gates(self) -> bool:
+        now = time.monotonic()
+        if not self.check_lowstate_watchdog(now):
+            return False
+        if not self.is_low_level_control_safe(now=now):
+            self.trigger_safety_stop("sport_mode gate failed during low-level control")
+            return False
+        return True
+
     def log_arm_cartesian_decode_result(
         self,
         result: ArmCartesianDecodeResult,
@@ -1508,6 +1643,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
         if self.latest_tick == -1:
             logging.warning("Low-state is not ready yet; wait for robot state before pressing R1")
             return
+        if not self.is_low_level_control_safe():
+            return
         if self.start_policy:
             logging.warning("Policy is running; stop it with R2 before restarting stand-up")
             return
@@ -1621,7 +1758,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
             )
         )
 
-    def is_low_level_control_safe(self) -> bool:
+    def is_low_level_control_safe(self, now: Optional[float] = None) -> bool:
+        stamp = time.monotonic() if now is None else float(now)
         if not self.sport_state_seen:
             if self.allow_unknown_sport_mode:
                 logging.warning(
@@ -1633,6 +1771,14 @@ class WBCNodeLeg12ArmPassthrough(Node):
                 "Refusing low-level rollout because sport_mode state has not been received. "
                 "Confirm the ROS2 sport state pipeline or pass --allow-unknown-sport-mode "
                 "only for controlled diagnostics."
+            )
+            return False
+        if not self.is_sport_mode_fresh(stamp):
+            age = float("inf") if self.last_sport_state_time < 0.0 else stamp - self.last_sport_state_time
+            logging.error(
+                "Refusing low-level control because sport_mode state is stale: "
+                "age=%.3fs limit=%.3fs."
+                % (age, self.sport_state_watchdog_sec)
             )
             return False
         if self.sport_mode != SPORT_MODE_IDLE or self.sport_progress > 0.0:
@@ -1729,6 +1875,47 @@ class WBCNodeLeg12ArmPassthrough(Node):
                 )
             )
             self.last_joy_diag_log_time = now
+
+    def log_wireless_joystick_input(self, now: float) -> None:
+        if self.base_command_source != "wireless_joystick" or self.start_policy:
+            return
+        if (
+            self.last_joy_input_log_time >= 0.0
+            and (now - self.last_joy_input_log_time) < self.joy_diag_log_interval
+        ):
+            return
+        raw_command = self.wireless_command_provider.update(now)
+        axes = {
+            axis: round(value, 3)
+            for axis, value in self.wireless_command_provider.axes.items()
+        }
+        provider = self.wireless_command_provider
+        logging.info(
+            "Joystick input received before policy | axes=%s mapped_cmd=%s "
+            "formula=[vx=%+d*%s*%.3f, vy=%+d*%s*%.3f, yaw=%+d*%s*%.3f] "
+            "deadzone=%.3f valid=%s reason=%s"
+            % (
+                axes,
+                np.array2string(
+                    np.asarray(raw_command.as_tuple()),
+                    precision=3,
+                    floatmode="fixed",
+                ),
+                provider.vx_sign,
+                provider.vx_axis,
+                provider.max_vx,
+                provider.vy_sign,
+                provider.vy_axis,
+                provider.max_vy,
+                provider.yaw_sign,
+                provider.yaw_axis,
+                provider.max_yaw,
+                provider.deadzone,
+                raw_command.valid,
+                raw_command.reason,
+            )
+        )
+        self.last_joy_input_log_time = now
 
     def set_policy_command_target(
         self,
@@ -2249,16 +2436,20 @@ class WBCNodeLeg12ArmPassthrough(Node):
     ##############################
 
     def arm_state_cb(self, msg: ArmState):
-        updated = self.arm_observation_cache.update_state(
-            joint_pos=msg.joint_pos,
-            joint_vel=msg.joint_vel,
-            joint_tau=msg.joint_tau,
-            gripper_pos=msg.gripper_pos,
-            gripper_vel=msg.gripper_vel,
-            valid=bool(msg.valid),
-            source=msg.source,
-            stamp=time.monotonic(),
-        )
+        try:
+            updated = self.arm_observation_cache.update_state(
+                joint_pos=msg.joint_pos,
+                joint_vel=msg.joint_vel,
+                joint_tau=msg.joint_tau,
+                gripper_pos=msg.gripper_pos,
+                gripper_vel=msg.gripper_vel,
+                valid=bool(msg.valid),
+                source=msg.source,
+                stamp=time.monotonic(),
+            )
+        except Exception as exc:
+            logging.warning("Ignoring invalid /arm/state sample from %s: %s", msg.source, exc)
+            return
         if not updated:
             logging.warning("Ignoring invalid /arm/state sample from %s", msg.source)
             return
@@ -2270,14 +2461,18 @@ class WBCNodeLeg12ArmPassthrough(Node):
             self.gripper_pos_cmd = self.clamp_gripper_pos(obs.gripper_target)
 
     def arm_target_state_cb(self, msg: ArmTargetState):
-        updated = self.arm_observation_cache.update_target(
-            joint_target=msg.joint_target,
-            tcp_target_pose=msg.tcp_target_pose,
-            gripper_target=msg.gripper_target,
-            valid=bool(msg.valid),
-            source=msg.source,
-            stamp=time.monotonic(),
-        )
+        try:
+            updated = self.arm_observation_cache.update_target(
+                joint_target=msg.joint_target,
+                tcp_target_pose=msg.tcp_target_pose,
+                gripper_target=msg.gripper_target,
+                valid=bool(msg.valid),
+                source=msg.source,
+                stamp=time.monotonic(),
+            )
+        except Exception as exc:
+            logging.warning("Ignoring invalid /arm/target_state sample from %s: %s", msg.source, exc)
+            return
         if not updated:
             logging.warning("Ignoring invalid /arm/target_state sample from %s", msg.source)
             return
@@ -2385,6 +2580,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         keys = int(msg.keys)
         now = time.monotonic()
         self.wireless_command_provider.update_message(msg, stamp=now)
+        self.log_wireless_joystick_input(now)
         if self.arm_control_owner == "wbc":
             self.update_gamepad_gripper_buttons(keys)
         elif keys & (BUTTON_A | BUTTON_B | BUTTON_X | BUTTON_DPAD_UP | BUTTON_DPAD_DOWN):
@@ -2499,41 +2695,78 @@ class WBCNodeLeg12ArmPassthrough(Node):
     # @profile
     def lowlevel_state_cb(self, msg: LowState):
         # imu data
-        self.latest_tick = msg.tick
-        imu_data = msg.imu_state
+        now = time.monotonic()
+        try:
+            if len(msg.motor_state) < LEG_DOF:
+                raise RuntimeSafetyFault(
+                    f"lowstate motor_state has {len(msg.motor_state)} motors, expected at least {LEG_DOF}"
+                )
+            self.latest_tick = msg.tick
+            imu_data = msg.imu_state
 
-        self.quadruped_q = np.array(
-            [motor_data.q for motor_data in msg.motor_state[:LEG_DOF]]
-        )
-        self.quadruped_dq = np.array(
-            [motor_data.dq for motor_data in msg.motor_state[:LEG_DOF]]
-        )
-        self.quadruped_tau = np.array(
-            [motor_data.tau_est for motor_data in msg.motor_state[:LEG_DOF]]
-        )
-        self.quadruped_motor_mode = np.array(
-            [motor_data.mode for motor_data in msg.motor_state[:LEG_DOF]],
-            dtype=np.uint8,
-        )
-        acceleration = np.array(imu_data.accelerometer, dtype=np.float64)
-        quaternion = np.array(imu_data.quaternion, dtype=np.float64)
-        foot_force = np.array(
-            [msg.foot_force[foot_id] for foot_id in range(4)], dtype=np.float64
-        )
+            self.quadruped_q = require_finite_vector(
+                [motor_data.q for motor_data in msg.motor_state[:LEG_DOF]],
+                size=LEG_DOF,
+                name="lowstate.leg_q",
+            )
+            self.quadruped_dq = require_finite_vector(
+                [motor_data.dq for motor_data in msg.motor_state[:LEG_DOF]],
+                size=LEG_DOF,
+                name="lowstate.leg_dq",
+            )
+            self.quadruped_tau = require_finite_vector(
+                [motor_data.tau_est for motor_data in msg.motor_state[:LEG_DOF]],
+                size=LEG_DOF,
+                name="lowstate.leg_tau",
+            )
+            self.quadruped_motor_mode = np.array(
+                [motor_data.mode for motor_data in msg.motor_state[:LEG_DOF]],
+                dtype=np.uint8,
+            )
+            acceleration = require_finite_vector(
+                imu_data.accelerometer,
+                size=3,
+                name="lowstate.imu.accelerometer",
+            )
+            quaternion = require_finite_vector(
+                imu_data.quaternion,
+                size=4,
+                name="lowstate.imu.quaternion",
+            )
+            if float(np.linalg.norm(quaternion)) <= 1.0e-6:
+                raise RuntimeSafetyFault("lowstate.imu.quaternion has near-zero norm")
+            gyroscope = require_finite_vector(
+                imu_data.gyroscope,
+                size=3,
+                name="lowstate.imu.gyroscope",
+            )
+            foot_force = require_finite_vector(
+                [msg.foot_force[foot_id] for foot_id in range(4)],
+                size=4,
+                name="lowstate.foot_force",
+            )
+        except Exception as exc:
+            self.trigger_safety_stop(str(exc))
+            return
+        self.last_lowstate_time = now
         self.latest_foot_force = foot_force.copy()
         foot_contact = np.array(foot_force > self.foot_contact_thres, dtype=np.float64)
 
         angular_velocity = self.angular_velocity_filter.calculate_average(
-            np.array(imu_data.gyroscope, dtype=np.float64)
+            gyroscope
         )
-        self.linear_velocity_estimator.update(
-            new_timestamp_s=float(msg.tick) / 1000.0,
-            acceleration=acceleration,
-            foot_contact=foot_contact,
-            quaternion=quaternion,
-            joint_velocity=self.quadruped_dq.copy(),
-            joint_position=self.quadruped_q.copy(),
-        )
+        try:
+            self.linear_velocity_estimator.update(
+                new_timestamp_s=float(msg.tick) / 1000.0,
+                acceleration=acceleration,
+                foot_contact=foot_contact,
+                quaternion=quaternion,
+                joint_velocity=self.quadruped_dq.copy(),
+                joint_position=self.quadruped_q.copy(),
+            )
+        except Exception as exc:
+            self.trigger_safety_stop(f"velocity estimator failed: {exc}")
+            return
         self.estimated_linear_velocity = self.linear_velocity_estimator.estimated_velocity
 
         arm_obs = None
@@ -2601,6 +2834,9 @@ class WBCNodeLeg12ArmPassthrough(Node):
             ),
             axis=0,
         )
+        if not np.isfinite(obs).all():
+            self.trigger_safety_stop("observation contains non-finite values")
+            return
         obs = np.clip(obs, -self.clip_obs, self.clip_obs)
         if obs.shape[0] != self.obs_dim:
             raise RuntimeError(
@@ -2647,18 +2883,32 @@ class WBCNodeLeg12ArmPassthrough(Node):
     # motor commands
     ##############################
 
+    def lowcmd_is_finite(self) -> bool:
+        try:
+            for idx, motor_cmd in enumerate(self.motor_cmd[:LEG_DOF]):
+                require_finite_vector(
+                    [motor_cmd.q, motor_cmd.dq, motor_cmd.tau, motor_cmd.kp, motor_cmd.kd],
+                    size=5,
+                    name=f"lowcmd.motor_cmd[{idx}]",
+                )
+        except RuntimeSafetyFault as exc:
+            self.trigger_safety_stop(str(exc))
+            return False
+        return True
+
     def motor_timer_callback(self):
-        if not (
-            self.start_policy
-            or self.align_to_policy_active
-            or self.pose_test_active
-            or self.start_time != -1.0
-        ):
+        if not self.low_level_control_active():
+            return
+        if not self.check_runtime_control_gates():
+            return
+        if not self.lowcmd_is_finite():
             return
         self.cmd_msg.crc = get_crc(self.cmd_msg)
         self.motor_pub.publish(self.cmd_msg)
 
     def set_gains(self, kp: np.ndarray, kd: np.ndarray):
+        kp = require_finite_vector(kp, size=LEG_DOF, name="leg_kp")
+        kd = require_finite_vector(kd, size=LEG_DOF, name="leg_kd")
         self.quadruped_kp = kp
         self.quadruped_kd = kd
         for i in range(LEG_DOF):
@@ -2670,7 +2920,12 @@ class WBCNodeLeg12ArmPassthrough(Node):
         q: np.ndarray,
         gripper_pos: float,
     ):
-        assert len(q) == 18
+        try:
+            q = require_finite_vector(q, size=18, name="motor_position_target")
+            gripper_pos = require_finite_scalar(gripper_pos, "gripper_pos")
+        except RuntimeSafetyFault as exc:
+            self.trigger_safety_stop(str(exc))
+            return
         self.latest_lowcmd_leg_q_policy = q[:12].copy()
         leg_q = self.policy_to_interface_leg_order(q[:12])
         self.latest_lowcmd_leg_q_hw = leg_q.copy()
@@ -2771,10 +3026,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         return self.arm_smoothed_pose.copy()
 
     def emergency_stop(self):
-        try:
-            self.safety_pub.publish(Bool(data=True))
-        except Exception as exc:
-            logging.error("Failed to publish safety estop: %s", exc)
+        self.publish_safety_estop(repeat=True)
         if self.arx5_joint_controller is not None and hasattr(
             self.arx5_joint_controller,
             "set_to_damping",
@@ -2831,6 +3083,9 @@ class WBCNodeLeg12ArmPassthrough(Node):
             and not self.align_to_policy_active
             and not self.pose_test_active
         ):
+            return
+
+        if self.low_level_control_active() and not self.check_runtime_control_gates():
             return
 
         if (
@@ -3103,15 +3358,29 @@ class WBCNodeLeg12ArmPassthrough(Node):
             blended_kp = _blend_arrays(base_kp, self.deploy_policy_kp, handover_ratio)
             blended_kd = _blend_arrays(base_kd, self.deploy_policy_kd, handover_ratio)
             self.set_gains(kp=blended_kp, kd=blended_kd)
-            raw_action = self.run_policy(self.obs)
-            clipped_action = np.clip(
-                raw_action,
-                self.clip_actions_lower,
-                self.clip_actions_upper,
-            )
-            timed_action, leg_action = self.apply_sim2sim_action_timing(clipped_action)
+            try:
+                raw_action = self.run_policy(self.obs)
+                clipped_action = np.clip(
+                    raw_action,
+                    self.clip_actions_lower,
+                    self.clip_actions_upper,
+                )
+                timed_action, leg_action = self.apply_sim2sim_action_timing(clipped_action)
+                timed_action = require_finite_vector(
+                    timed_action,
+                    size=LEG_DOF,
+                    name="timed_policy_action",
+                )
+                leg_action = require_finite_vector(
+                    leg_action,
+                    size=LEG_DOF,
+                    name="applied_policy_action",
+                )
+                target_leg_q = self.map_leg_action_to_targets(leg_action)
+            except RuntimeSafetyFault as exc:
+                self.trigger_safety_stop(str(exc))
+                return
             wbc_action = np.zeros(18, dtype=np.float64)
-            target_leg_q = self.map_leg_action_to_targets(leg_action)
             startup_kick_leg_delta = self.get_startup_kick_leg_delta()
             target_leg_q = target_leg_q + startup_kick_leg_delta
             commanded_leg_q = (
@@ -3458,12 +3727,15 @@ class WBCNodeLeg12ArmPassthrough(Node):
             + f" arm_target_topic: {self.arm_target_topic},"
             + f" require_arm_state_for_rl: {self.require_arm_state_for_rl},"
             + f" allow_unknown_sport_mode: {self.allow_unknown_sport_mode},"
+            + f" lowstate_watchdog_sec: {self.lowstate_watchdog_sec},"
+            + f" sport_state_watchdog_sec: {self.sport_state_watchdog_sec},"
             + f" live_ready_pose_calibration: {self.live_ready_pose_calibration},"
             + f" fixed_gripper_cmd: {self.fixed_gripper_cmd}"
         )
         return None
 
     def run_policy(self, obs: np.ndarray) -> np.ndarray:
+        obs = require_finite_vector(obs, size=self.obs_dim, name="policy_obs")
         obs_batch = np.ascontiguousarray(obs.reshape(1, -1), dtype=np.float32)
         action = self.ort_session.run(
             [self.ort_output_name],
@@ -3474,12 +3746,16 @@ class WBCNodeLeg12ArmPassthrough(Node):
             raise RuntimeError(
                 f"Policy output dimension mismatch: got {action.shape[0]}, expected {self.action_dim}"
             )
+        if not np.isfinite(action).all():
+            raise RuntimeSafetyFault(f"policy action contains non-finite values: {action}")
         return action.astype(np.float64, copy=False)
 
     def map_leg_action_to_targets(self, leg_action: np.ndarray) -> np.ndarray:
-        leg_action = np.asarray(leg_action, dtype=np.float64)
-        if leg_action.shape[0] != 12:
-            raise RuntimeError(f"Expected 12 leg actions, got {leg_action.shape[0]}")
+        leg_action = require_finite_vector(
+            leg_action,
+            size=LEG_DOF,
+            name="leg_action",
+        )
         return leg_action * self.leg_action_scale + self.leg_action_offset
 
     def get_tcp_pose(self, arm_dof_pos: np.ndarray) -> np.ndarray:

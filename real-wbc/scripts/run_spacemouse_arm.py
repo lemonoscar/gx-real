@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import datetime
 import logging
 import os
 import sys
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REAL_WBC_DIR = os.path.dirname(SCRIPT_DIR)
+GX_REAL_ROOT = os.path.dirname(REAL_WBC_DIR)
+DEFAULT_LOG_DIR = os.path.join(GX_REAL_ROOT, "logs")
 if REAL_WBC_DIR not in sys.path:
     sys.path.insert(0, REAL_WBC_DIR)
 
@@ -52,12 +55,35 @@ def parse_args():
     parser.add_argument("--sm-max-value", type=float, default=500.0)
     parser.add_argument("--gripper-speed", type=float, default=0.03)
     parser.add_argument("--arm-command-frame", choices=["base", "world", "arm_base"], default="base")
+    parser.add_argument(
+        "--logging-dir",
+        default=os.environ.get("GX_REAL_LOG_DIR", DEFAULT_LOG_DIR),
+        help="Directory used to store one timestamped SpaceMouse Arm log folder per run.",
+    )
     return parser.parse_args()
 
 
+def configure_logging(log_root: str) -> str:
+    run_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_log_dir = os.path.join(os.path.abspath(log_root), f"{run_timestamp}_spacemouse_arm")
+    os.makedirs(run_log_dir, exist_ok=True)
+    log_path = os.path.join(run_log_dir, "run.log")
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler(log_path, encoding="utf-8"),
+        ],
+        force=True,
+    )
+    logging.info("SpaceMouse Arm logs: %s", run_log_dir)
+    return run_log_dir
+
+
 def main() -> int:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     args = parse_args()
+    configure_logging(args.logging_dir)
 
     import rclpy
 

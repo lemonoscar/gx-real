@@ -188,6 +188,20 @@ if __name__ == "__main__":
         help="Allow low-level rollout if sport_mode state has not been received.",
     )
     parser.add_argument(
+        "--lowstate-watchdog-sec",
+        type=float,
+        default=0.25,
+        help="Stop low-level control if Go2 lowstate is stale for this long.",
+    )
+    parser.add_argument(
+        "--sport-state-watchdog-sec",
+        type=float,
+        default=0.5,
+        help="Stop low-level control if sport_mode state is stale for this long.",
+    )
+    parser.add_argument("--estop-repeat-count", type=int, default=5)
+    parser.add_argument("--estop-repeat-period-sec", type=float, default=0.02)
+    parser.add_argument(
         "--no-live-ready-calibration",
         dest="live_ready_pose_calibration",
         action="store_false",
