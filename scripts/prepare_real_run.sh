@@ -538,7 +538,7 @@ Terminal B:
   cd ${GX_REAL_ROOT}
   export GX_REAL_NETWORK_IFACE=${NETWORK_IFACE}
   source scripts/setup_env.sh
-  scripts/run_leg12_real.sh --device cpu --pose_estimator none --standup-mode internal --base-command-source wireless_joystick --joy-vx-axis ly --joy-vx-sign -1 --joy-vy-axis lx --joy-vy-sign -1 --joy-yaw-axis rx --joy-yaw-sign -1 --joy-deadzone 0.12 --joy-max-vx 0.10 --joy-max-vy 0.05 --joy-max-yaw 0.20 --arm-control-owner external_spacemouse --arm-state-topic /arm/state --arm-target-topic /arm/target_state --safety-topic /safety/estop --require-arm-state-for-rl --gripper-cmd 0.0 --leg-kp 200 --leg-kd 10 --arm_pose 0.0 0.5 0.3 0.0 0.0 0.0
+  scripts/run_leg12_real.sh --device cpu --pose_estimator none --standup-mode internal --base-command-source wireless_joystick --joy-vx-axis ly --joy-vx-sign 1 --joy-vy-axis lx --joy-vy-sign -1 --joy-yaw-axis rx --joy-yaw-sign -1 --joy-deadzone 0.12 --joy-max-vx 0.50 --joy-max-vy 0.0 --joy-max-yaw 0.0 --arm-control-owner external_spacemouse --arm-state-topic /arm/state --arm-target-topic /arm/target_state --safety-topic /safety/estop --require-arm-state-for-rl --gripper-cmd 0.0 --leg-kp 200 --leg-kd 10 --arm_pose 0.0 0.5 0.3 0.0 0.0 0.0
 EOF
 }
 
