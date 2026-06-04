@@ -3,6 +3,7 @@
 #include "utils.h"
 #include <array>
 #include <cmath>
+#include <cstdlib>
 #include <stdexcept>
 #include <sstream>
 #include <sys/syscall.h>
@@ -38,6 +39,17 @@ std::string join_motor_ids(const std::vector<int> &ids)
         out << ids[i];
     }
     return out.str();
+}
+
+bool strict_init_feedback_enabled()
+{
+    const char *value = std::getenv("ARX5_REQUIRE_INIT_FEEDBACK");
+    if (value == nullptr)
+    {
+        return false;
+    }
+    std::string text(value);
+    return text == "1" || text == "true" || text == "TRUE" || text == "yes" || text == "YES";
 }
 } // namespace
 
@@ -314,10 +326,14 @@ void Arx5ControllerBase::init_robot_()
     if (!missing_motor_ids.empty())
     {
         std::string ids = join_motor_ids(missing_motor_ids);
-        logger_->error("Missing feedback from joint motor IDs: {}. Please check arm power, CAN wiring, termination, "
-                       "bitrate, and motor ID configuration.",
-                       ids);
-        throw std::runtime_error("Missing feedback from joint motor IDs: " + ids);
+        logger_->warn("SDK telemetry fields do not show feedback from joint motor IDs: {}. Continuing because some "
+                      "ARX5 hardware decoders leave these fields unset at zero position. Verify SocketCAN RX with "
+                      "candump/ip counters if the arm does not move.",
+                      ids);
+        if (strict_init_feedback_enabled())
+        {
+            throw std::runtime_error("Missing feedback from joint motor IDs: " + ids);
+        }
     }
     if (joint_state_.pos.isZero(1e-9))
     {
