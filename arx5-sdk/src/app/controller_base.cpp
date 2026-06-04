@@ -2,10 +2,44 @@
 #include "app/common.h"
 #include "utils.h"
 #include <array>
+#include <cmath>
 #include <stdexcept>
+#include <sstream>
 #include <sys/syscall.h>
 #include <sys/types.h>
+#include <vector>
 using namespace arx;
+
+namespace
+{
+bool motor_feedback_seen(const OD_Motor_Msg &msg, int expected_id)
+{
+    if (msg.motor_id == static_cast<uint16_t>(expected_id))
+    {
+        return true;
+    }
+
+    // Some protocol decoders do not preserve motor_id in OD_Motor_Msg, but
+    // populate telemetry fields even when the joint is physically at zero.
+    return msg.temperature != 0 || msg.error != 0 || msg.current_actual_int != 0 ||
+           std::abs(msg.speed_actual_rad) > 1e-9 || std::abs(msg.angle_actual_rad) > 1e-9 ||
+           std::abs(msg.current_actual_float) > 1e-9 || std::abs(msg.angle_actual_float) > 1e-9;
+}
+
+std::string join_motor_ids(const std::vector<int> &ids)
+{
+    std::ostringstream out;
+    for (size_t i = 0; i < ids.size(); ++i)
+    {
+        if (i != 0)
+        {
+            out << ",";
+        }
+        out << ids[i];
+    }
+    return out.str();
+}
+} // namespace
 
 Arx5ControllerBase::Arx5ControllerBase(RobotConfig robot_config, ControllerConfig controller_config,
                                        std::string interface_name)
@@ -266,13 +300,29 @@ void Arx5ControllerBase::init_robot_()
     init_joint_state.torque = VecDoF::Zero(robot_config_.joint_dof);
     set_gain(gain); // set to damping by default
 
-    // std::lock_guard<std::mutex> guard(state_mutex_);
-    // Check whether any motor has non-zero position
-    if (joint_state_.pos == VecDoF::Zero(robot_config_.joint_dof))
+    std::array<OD_Motor_Msg, 10> motor_msg = can_handle_.get_motor_msg();
+    std::vector<int> missing_motor_ids;
+    for (int i = 0; i < robot_config_.joint_dof; i++)
     {
-        logger_->error("None of the motors are initialized. Please check the connection or power of the arm.");
-        throw std::runtime_error(
-            "None of the motors are initialized. Please check the connection or power of the arm.");
+        int motor_id = robot_config_.motor_id[i];
+        if (motor_id < 0 || motor_id >= static_cast<int>(motor_msg.size()) ||
+            !motor_feedback_seen(motor_msg[motor_id], motor_id))
+        {
+            missing_motor_ids.push_back(motor_id);
+        }
+    }
+    if (!missing_motor_ids.empty())
+    {
+        std::string ids = join_motor_ids(missing_motor_ids);
+        logger_->error("Missing feedback from joint motor IDs: {}. Please check arm power, CAN wiring, termination, "
+                       "bitrate, and motor ID configuration.",
+                       ids);
+        throw std::runtime_error("Missing feedback from joint motor IDs: " + ids);
+    }
+    if (joint_state_.pos.isZero(1e-9))
+    {
+        logger_->warn("All joint positions decoded near zero during initialization; accepting because configured "
+                      "joint motors reported feedback.");
     }
     {
         std::lock_guard<std::mutex> guard(cmd_mutex_);
