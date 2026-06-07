@@ -23,6 +23,10 @@ ROTATION_AXES = ("rx", "ry", "rz")
 GRIPPER_MIN = 0.0
 GRIPPER_MAX_FALLBACK = 0.08
 ARM_HOME_SETTLE_SEC = 0.7
+BUTTON_HOME_JOINT_POSE = np.array([0.0, 0.3, 0.5, 0.0, 0.0, 0.0], dtype=np.float64)
+BUTTON_HOME_JOINT_SPEED = 0.5
+BUTTON_HOME_MIN_DURATION_SEC = 1.0
+BUTTON_HOME_MAX_DURATION_SEC = 3.0
 RAW_AXIS_INDEX = {
     "x": 0,
     "y": 1,
@@ -164,6 +168,7 @@ class SpaceMouseArmNode:
         self.last_spacemouse_motion_sequence: Optional[int] = None
         self.spacemouse_motion_armed = False
         self.spacemouse_buttons_armed = False
+        self.spacemouse_home_buttons_pressed = False
         self.spacemouse_watchdog_damped = False
         self.arm_position_control_enabled = False
         self.last_spacemouse_command_log_time = -1.0
@@ -293,19 +298,27 @@ class SpaceMouseArmNode:
                 rotation,
             )
             buttons_request = self._buttons_request_gripper_motion()
-            if (motion_command or buttons_request) and not self.arm_position_control_enabled:
+            home_request = self._buttons_request_home_pose()
+            if home_request:
+                motion_command = False
+                buttons_request = False
+            if (motion_command or buttons_request or home_request) and not self.arm_position_control_enabled:
                 try:
                     self._refresh_targets_from_controller_state()
                 except RuntimeSafetyFault as exc:
                     self._trigger_estop(f"invalid X5 state before command: {exc}", return_home=False)
                     return
-            if motion_command:
+            home_commanded = False
+            if home_request:
+                home_commanded = self._command_button_home_pose()
+            elif motion_command:
                 self.target_pose6d[:3] += translation
                 self.target_pose6d[3:] = _wrap_to_pi(self.target_pose6d[3:] + rotation)
-            gripper_changed = self._update_gripper_from_buttons(dt)
-            if motion_command or gripper_changed:
+            gripper_changed = False if home_request else self._update_gripper_from_buttons(dt)
+            if motion_command or gripper_changed or home_commanded:
                 self.last_motion_time = now
-                self._send_target()
+                if not home_commanded:
+                    self._send_target()
                 self._log_spacemouse_command(
                     now=now,
                     sequence=spacemouse_input.motion_sequence,
@@ -617,7 +630,10 @@ class SpaceMouseArmNode:
             if not left_pressed and not right_pressed:
                 self.spacemouse_buttons_armed = True
             return False
+        if left_pressed and right_pressed:
+            return False
         if left_pressed == right_pressed:
+            self.spacemouse_home_buttons_pressed = False
             return False
         direction = 1.0 if left_pressed else -1.0
         old_target = self.target_gripper
@@ -626,12 +642,77 @@ class SpaceMouseArmNode:
         )
         return abs(self.target_gripper - old_target) > 1e-9
 
+    def _buttons_request_home_pose(self) -> bool:
+        if self.last_spacemouse_button_state is None or self.last_spacemouse_button_state.shape[0] < 2:
+            return False
+        left_pressed = bool(self.last_spacemouse_button_state[0])
+        right_pressed = bool(self.last_spacemouse_button_state[1])
+        both_pressed = self.spacemouse_buttons_armed and left_pressed and right_pressed
+        if not both_pressed:
+            self.spacemouse_home_buttons_pressed = False
+            return False
+        if self.spacemouse_home_buttons_pressed:
+            return False
+        self.spacemouse_home_buttons_pressed = True
+        return True
+
     def _buttons_request_gripper_motion(self) -> bool:
         if self.last_spacemouse_button_state is None or self.last_spacemouse_button_state.shape[0] < 2:
             return False
         left_pressed = bool(self.last_spacemouse_button_state[0])
         right_pressed = bool(self.last_spacemouse_button_state[1])
         return self.spacemouse_buttons_armed and left_pressed != right_pressed
+
+    def _command_button_home_pose(self) -> bool:
+        if self.controller is None or self.arx5 is None:
+            return False
+        try:
+            target_joint = BUTTON_HOME_JOINT_POSE.copy()
+            robot_config = self.controller.get_robot_config()
+            solver = self.arx5.Arx5Solver(
+                robot_config.urdf_path,
+                robot_config.joint_dof,
+                robot_config.joint_pos_min,
+                robot_config.joint_pos_max,
+                robot_config.base_link_name,
+                robot_config.eef_link_name,
+                robot_config.gravity_vector,
+            )
+            target_pose6d = require_finite_vector(
+                solver.forward_kinematics(target_joint),
+                size=6,
+                name="x5_button_home_pose6d",
+            )
+            current_joint = require_finite_vector(
+                self.controller.get_joint_state().pos(),
+                size=6,
+                name="x5_current_joint_for_button_home",
+            )
+            max_error = float(np.max(np.abs(current_joint - target_joint)))
+            duration = float(
+                np.clip(
+                    max_error / max(BUTTON_HOME_JOINT_SPEED, 1e-6),
+                    BUTTON_HOME_MIN_DURATION_SEC,
+                    BUTTON_HOME_MAX_DURATION_SEC,
+                )
+            )
+            cmd = self.arx5.EEFState()
+            cmd.pose_6d()[:] = target_pose6d
+            cmd.gripper_pos = self._clamp_gripper(self.target_gripper)
+            cmd.timestamp = self.controller.get_timestamp() + duration
+            self.controller.set_eef_cmd(cmd)
+            self.target_pose6d = target_pose6d.copy()
+            self.target_joint = target_joint.copy()
+            self._sync_target_joint_from_controller()
+            self._log_info(
+                "SpaceMouse both buttons pressed; commanding X5 joint pose "
+                f"{np.array2string(target_joint, precision=3, floatmode='fixed')} "
+                f"over {duration:.2f}s"
+            )
+            return True
+        except Exception as exc:
+            self._log_error(f"Failed to command SpaceMouse button home pose: {exc}")
+            return False
 
     def _send_target(self) -> None:
         if self.estopped:
