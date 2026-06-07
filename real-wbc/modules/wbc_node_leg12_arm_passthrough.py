@@ -3105,9 +3105,13 @@ class WBCNodeLeg12ArmPassthrough(Node):
             "set_to_damping",
         ):
             try:
+                if hasattr(self.arx5_joint_controller, "reset_to_home"):
+                    logging.info("Returning WBC-owned X5 arm to joint home before emergency exit")
+                    self.arx5_joint_controller.reset_to_home()
+                    time.sleep(0.7)
                 self.arx5_joint_controller.set_to_damping()
             except Exception as exc:
-                logging.error("Failed to set WBC arm damping mode: %s", exc)
+                logging.error("Failed to return WBC arm home/damping mode: %s", exc)
         if self.debug_log:
             self.dump_logs()
 

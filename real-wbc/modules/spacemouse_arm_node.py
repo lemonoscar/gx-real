@@ -22,6 +22,7 @@ TRANSLATION_AXES = ("x", "y", "z")
 ROTATION_AXES = ("rx", "ry", "rz")
 GRIPPER_MIN = 0.0
 GRIPPER_MAX_FALLBACK = 0.08
+ARM_HOME_SETTLE_SEC = 0.7
 RAW_AXIS_INDEX = {
     "x": 0,
     "y": 1,
@@ -296,7 +297,7 @@ class SpaceMouseArmNode:
                 try:
                     self._refresh_targets_from_controller_state()
                 except RuntimeSafetyFault as exc:
-                    self._trigger_estop(f"invalid X5 state before command: {exc}")
+                    self._trigger_estop(f"invalid X5 state before command: {exc}", return_home=False)
                     return
             if motion_command:
                 self.target_pose6d[:3] += translation
@@ -323,11 +324,13 @@ class SpaceMouseArmNode:
         if bool(getattr(msg, "data", False)):
             self._trigger_estop(f"{self.safety_topic}=true")
 
-    def _trigger_estop(self, source: str) -> None:
+    def _trigger_estop(self, source: str, *, return_home: bool = True) -> None:
         if self.estopped:
             return
         self.estopped = True
-        self._log_error(f"Emergency stop received from {source}; damping X5 arm")
+        self._log_error(f"Emergency stop received from {source}; stopping X5 arm")
+        if return_home:
+            self._return_home_before_damping(source)
         self._set_to_damping()
 
     def _handle_spacemouse_watchdog(self) -> None:
@@ -357,6 +360,30 @@ class SpaceMouseArmNode:
             self.arm_position_control_enabled = False
         except Exception as exc:
             self._log_error(f"Failed to set X5 arm damping mode: {exc}")
+
+    def _return_home_before_damping(self, source: str) -> None:
+        if self.controller is None or not hasattr(self.controller, "reset_to_home"):
+            return
+        try:
+            self._log_info(f"Returning X5 arm to joint home before damping ({source})")
+            self.controller.reset_to_home()
+            time.sleep(ARM_HOME_SETTLE_SEC)
+            self.target_joint = np.zeros(6, dtype=np.float64)
+            eef_cmd = self.controller.get_eef_cmd()
+            self.target_pose6d = require_finite_vector(
+                eef_cmd.pose_6d(),
+                size=6,
+                name="x5_home_pose6d",
+            )
+            self.target_gripper = self._clamp_gripper(
+                require_finite_scalar(
+                    getattr(eef_cmd, "gripper_pos", self.target_gripper),
+                    "x5_home_gripper",
+                )
+            )
+            self._log_info("X5 arm returned to joint home")
+        except Exception as exc:
+            self._log_error(f"Failed to return X5 arm home before damping: {exc}")
 
     def _read_spacemouse_motion(self, *, now: Optional[float] = None) -> Optional[np.ndarray]:
         spacemouse_input = self._read_spacemouse_input(now=now)
@@ -625,7 +652,7 @@ class SpaceMouseArmNode:
                 require_finite_scalar(self.target_gripper, "x5_target_gripper")
             )
         except RuntimeSafetyFault as exc:
-            self._trigger_estop(f"invalid X5 target: {exc}")
+            self._trigger_estop(f"invalid X5 target: {exc}", return_home=False)
             return
         cmd.pose_6d()[:] = self.target_pose6d
         cmd.gripper_pos = self.target_gripper
@@ -775,6 +802,7 @@ class SpaceMouseArmNode:
 
     def shutdown(self) -> None:
         try:
+            self._return_home_before_damping("node shutdown")
             self._set_to_damping()
             if self.spacemouse is not None:
                 self.spacemouse.stop()

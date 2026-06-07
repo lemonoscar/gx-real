@@ -532,7 +532,7 @@ Terminal A:
   cd ${GX_REAL_ROOT}
   export GX_REAL_NETWORK_IFACE=${NETWORK_IFACE}
   source scripts/setup_env.sh
-  scripts/run_spacemouse_arm.sh --can-interface ${CAN_IF} --safety-topic /safety/estop --sm-use-raw-frame true --sm-pos-speed 0.03 --sm-rot-speed 0.10 --sm-deadzone 0.12 --sm-watchdog-sec 0.25
+  scripts/run_spacemouse_arm.sh --model X5 --can-interface ${CAN_IF} --safety-topic /safety/estop --sm-use-raw-frame true --sm-pos-speed 0.03 --sm-rot-speed 0.10 --sm-deadzone 0.12 --sm-watchdog-sec 0.25
 
 Terminal B:
   cd ${GX_REAL_ROOT}

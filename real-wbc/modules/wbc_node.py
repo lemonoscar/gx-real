@@ -742,6 +742,16 @@ class WBCNode(Node):
         self.cmd_msg.motor_cmd = self.motor_cmd.copy()
 
     def emergency_stop(self):
+        if hasattr(self, "arx5_joint_controller") and self.arx5_joint_controller is not None:
+            try:
+                if hasattr(self.arx5_joint_controller, "reset_to_home"):
+                    logging.info("Returning X5 arm to joint home before emergency exit")
+                    self.arx5_joint_controller.reset_to_home()
+                    time.sleep(0.7)
+                if hasattr(self.arx5_joint_controller, "set_to_damping"):
+                    self.arx5_joint_controller.set_to_damping()
+            except Exception as exc:
+                logging.error("Failed to return X5 arm home/damping mode: %s", exc)
         if self.debug_log:
             self.dump_logs()
 
