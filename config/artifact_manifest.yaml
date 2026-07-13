@@ -1,0 +1,44 @@
+schema_version: 1
+release_status: UNRELEASED
+git_commit: 264f10cc7c65be5af7f0d88a6db0043113265c97
+dirty_worktree_policy: REJECT
+policy:
+  path: policies/policy.onnx
+  sha256: 4aeaa56e48b38e3fd20436205a4aa286039b9fcc86dc2bab4a647dfb95762063
+environment_config:
+  path: policies/env.yaml
+  sha256: bdd88ccbf71d862b72183d70fa6fabdc64a5b270c42c7fb37295e463b7bb2462
+expected_observation_shape: [260]
+expected_action_shape: [12]
+expected_joint_order:
+  - FR_hip_joint
+  - FR_thigh_joint
+  - FR_calf_joint
+  - FL_hip_joint
+  - FL_thigh_joint
+  - FL_calf_joint
+  - RR_hip_joint
+  - RR_thigh_joint
+  - RR_calf_joint
+  - RL_hip_joint
+  - RL_thigh_joint
+  - RL_calf_joint
+expected_x5_model: X5
+unitree_sdk_snapshot: "vendored tree at gx-real 264f10c; no upstream version contract recorded"
+arx5_sdk_snapshot: "vendored tree at gx-real 264f10c; X5 config in include/app/config.h"
+shared_libraries:
+  - path: unitree_sdk2/python/crc_module.so
+    sha256: 7b522d3d707858223a580cba1b878d6ac6812296410b8e6642c215c6dc006940
+  - path: arx5-sdk/lib/x86_64/libhardware.so
+    sha256: 34875c929a572efde835fff2d0cbb6d20e8aa484ef5def97a309d769526a86ff
+  - path: arx5-sdk/lib/x86_64/libsolver.so
+    sha256: 5ca9c0f34291823195431eacad348c2cfd030044ee6948492d2752807d67d42c
+python_version: 3.10.12
+onnxruntime_version: UNRESOLVED
+rmw_implementation: rmw_cyclonedds_cpp
+cyclonedds_config:
+  path: unitree_ros2/cyclonedds_ws/src/cyclonedds.xml
+  sha256: 366b849c0f2e3051695f54cfc662f50faefcca2f0f991ac325d47a271eb23562
+go2_leg_safety_contract:
+  path: config/go2_leg_safety_contract.yaml
+  sha256: 97b6506f490f5f68fc3115a1800c573e9fd6039d133d4ca70ab809df32723478

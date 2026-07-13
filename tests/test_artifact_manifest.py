@@ -1,0 +1,107 @@
+from pathlib import Path
+import hashlib
+import sys
+
+import pytest
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "real-wbc"))
+
+from modules.artifact_manifest import (  # noqa: E402
+    ArtifactManifestFault,
+    EXPECTED_GO2_JOINT_ORDER,
+    load_manifest,
+    verify_manifest,
+)
+
+
+def _write(root: Path, name: str, content: bytes) -> dict:
+    path = root / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(content)
+    return {"path": name, "sha256": hashlib.sha256(content).hexdigest()}
+
+
+def _manifest(root: Path) -> dict:
+    return {
+        "schema_version": 1,
+        "release_status": "RELEASED",
+        "git_commit": "abc",
+        "dirty_worktree_policy": "REJECT",
+        "policy": _write(root, "policy.onnx", b"policy"),
+        "environment_config": _write(root, "env.yaml", b"env"),
+        "expected_observation_shape": [260],
+        "expected_action_shape": [12],
+        "expected_joint_order": EXPECTED_GO2_JOINT_ORDER.copy(),
+        "expected_x5_model": "X5",
+        "unitree_sdk_snapshot": "unitree-a",
+        "arx5_sdk_snapshot": "arx-a",
+        "shared_libraries": [_write(root, "libhardware.so", b"lib")],
+        "python_version": "3.10.12",
+        "onnxruntime_version": "1.16.0",
+        "rmw_implementation": "rmw_cyclonedds_cpp",
+        "cyclonedds_config": _write(root, "cyclone.xml", b"xml"),
+        "go2_leg_safety_contract": _write(root, "leg_contract.yaml", b"contract"),
+    }
+
+
+def _verify(root: Path, manifest: dict, **changes):
+    runtime = dict(
+        root=root,
+        actual_git_commit="abc",
+        worktree_dirty=False,
+        actual_python_version="3.10.12",
+        actual_onnxruntime_version="1.16.0",
+        actual_rmw_implementation="rmw_cyclonedds_cpp",
+        expected_x5_model="X5",
+    )
+    runtime.update(changes)
+    return verify_manifest(manifest, **runtime)
+
+
+def test_complete_manifest_verifies_all_hashes(tmp_path: Path) -> None:
+    verified = _verify(tmp_path, _manifest(tmp_path))
+    assert "policy" in verified and "shared_libraries[0]" in verified
+
+
+@pytest.mark.parametrize("artifact", ["policy", "environment_config"])
+def test_same_shape_artifact_replacement_is_rejected(tmp_path: Path, artifact: str) -> None:
+    manifest = _manifest(tmp_path)
+    (tmp_path / manifest[artifact]["path"]).write_bytes(b"other")
+    with pytest.raises(ArtifactManifestFault, match="SHA-256 mismatch"):
+        _verify(tmp_path, manifest)
+
+
+def test_joint_order_model_dirty_and_runtime_version_mismatches_fail(tmp_path: Path) -> None:
+    mutations = [
+        (lambda m: m.update(expected_joint_order=list(reversed(m["expected_joint_order"]))), {}),
+        (lambda m: m.update(expected_x5_model="L5"), {}),
+        (lambda m: None, {"worktree_dirty": True}),
+        (lambda m: None, {"actual_onnxruntime_version": "other"}),
+    ]
+    for mutate, runtime in mutations:
+        manifest = _manifest(tmp_path)
+        mutate(manifest)
+        with pytest.raises(ArtifactManifestFault):
+            _verify(tmp_path, manifest, **runtime)
+
+
+def test_missing_library_and_manifest_field_fail(tmp_path: Path) -> None:
+    manifest = _manifest(tmp_path)
+    (tmp_path / "libhardware.so").unlink()
+    with pytest.raises(ArtifactManifestFault, match="missing"):
+        _verify(tmp_path, manifest)
+    repo_manifest = yaml.safe_load((ROOT / "config/artifact_manifest.yaml").read_text())
+    del repo_manifest["policy"]
+    path = tmp_path / "manifest.yaml"
+    path.write_text(yaml.safe_dump(repo_manifest), encoding="utf-8")
+    with pytest.raises(ArtifactManifestFault, match="missing fields"):
+        load_manifest(path)
+
+
+def test_repository_manifest_is_deliberately_unreleased() -> None:
+    manifest = load_manifest(ROOT / "config/artifact_manifest.yaml")
+    with pytest.raises(ArtifactManifestFault, match="not RELEASED"):
+        _verify(ROOT, manifest)

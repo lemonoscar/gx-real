@@ -2,6 +2,12 @@ cmake_minimum_required(VERSION 3.16.3)
 
 project(arx5-sdk)
 
+option(
+    GX_REAL_BUILD_VENDOR_HARDWARE_EXAMPLES
+    "Build ARX hardware-writer examples (must remain OFF for production artifacts)"
+    OFF
+)
+
 set(CMAKE_BUILD_TYPE Debug)
 
 set(CMAKE_CXX_STANDARD 14)
@@ -68,31 +74,33 @@ target_include_directories(ArxJointController PUBLIC $ENV{CONDA_PREFIX}/include/
 target_include_directories(ArxCartesianController PUBLIC $ENV{CONDA_PREFIX}/include/kdl_parser $ENV{CONDA_PREFIX}/include/urdfdom_headers)
 
 
-add_executable(test_joint_controller examples/test_joint_controller.cpp)
-target_link_libraries(test_joint_controller
-    ${LIB_DIR}/libhardware.so
-    ${LIB_DIR}/libsolver.so
-    ArxJointController
-    Eigen3::Eigen
-    Threads::Threads
-    spdlog::spdlog
-    kdl_parser
-    orocos-kdl
-    soem
-)
+if(GX_REAL_BUILD_VENDOR_HARDWARE_EXAMPLES)
+    add_executable(test_joint_controller examples/test_joint_controller.cpp)
+    target_link_libraries(test_joint_controller
+        ${LIB_DIR}/libhardware.so
+        ${LIB_DIR}/libsolver.so
+        ArxJointController
+        Eigen3::Eigen
+        Threads::Threads
+        spdlog::spdlog
+        kdl_parser
+        orocos-kdl
+        soem
+    )
 
-add_executable(test_cartesian_controller examples/test_cartesian_controller.cpp)
-target_link_libraries(test_cartesian_controller
-    ${LIB_DIR}/libhardware.so
-    ${LIB_DIR}/libsolver.so
-    ArxCartesianController
-    spdlog::spdlog
-    Eigen3::Eigen
-    Threads::Threads
-    kdl_parser
-    orocos-kdl
-    soem
-)
+    add_executable(test_cartesian_controller examples/test_cartesian_controller.cpp)
+    target_link_libraries(test_cartesian_controller
+        ${LIB_DIR}/libhardware.so
+        ${LIB_DIR}/libsolver.so
+        ArxCartesianController
+        spdlog::spdlog
+        Eigen3::Eigen
+        Threads::Threads
+        kdl_parser
+        orocos-kdl
+        soem
+    )
+endif()
 
 add_subdirectory(python)
 

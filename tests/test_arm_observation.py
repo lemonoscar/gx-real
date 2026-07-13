@@ -9,8 +9,10 @@ sys.path.insert(0, str(ROOT / "real-wbc"))
 
 from modules.arm_observation import (  # noqa: E402
     ArmObservationCache,
+    ArmObservationProtocolFault,
     should_initialize_wbc_arm_controller,
 )
+import pytest
 
 
 def test_arm_state_and_target_fill_observation_segments():
@@ -67,3 +69,87 @@ def test_external_spacemouse_owner_does_not_initialize_wbc_arm_controller():
     assert should_initialize_wbc_arm_controller("none", False) is False
     assert should_initialize_wbc_arm_controller("wbc", True) is False
     assert should_initialize_wbc_arm_controller("wbc", False) is True
+
+
+def _strict_cache() -> ArmObservationCache:
+    return ArmObservationCache(
+        fallback_joint_pos=np.zeros(6),
+        state_timeout_sec=0.25,
+        target_timeout_sec=0.25,
+        strict_metadata=True,
+    )
+
+
+def test_state_freshness_boundary_is_inclusive_then_invalid() -> None:
+    cache = _strict_cache()
+    cache.update_state(
+        joint_pos=np.ones(6), source="arm", session_id="a", sequence=1, stamp=1.0
+    )
+    at_boundary = cache.get(now=1.25)
+    after_boundary = cache.get(now=1.250001)
+    assert at_boundary.state_fresh and at_boundary.state_valid
+    assert not after_boundary.state_fresh and not after_boundary.state_valid
+    np.testing.assert_allclose(after_boundary.joint_pos, np.zeros(6))
+
+
+@pytest.mark.parametrize("sequence", [1, 0])
+def test_duplicate_or_backward_state_sequence_is_rejected(sequence: int) -> None:
+    cache = _strict_cache()
+    cache.update_state(
+        joint_pos=np.ones(6), source="arm", session_id="a", sequence=1, stamp=1.0
+    )
+    with pytest.raises(ArmObservationProtocolFault):
+        cache.update_state(
+            joint_pos=np.ones(6), source="arm", session_id="a", sequence=sequence, stamp=1.1
+        )
+
+
+def test_producer_restart_is_rejected_and_does_not_replace_cached_session() -> None:
+    cache = _strict_cache()
+    cache.update_state(
+        joint_pos=np.ones(6), source="arm", session_id="old", sequence=1, stamp=1.0
+    )
+    with pytest.raises(ArmObservationProtocolFault):
+        cache.update_state(
+            joint_pos=np.full(6, 2.0),
+            source="arm",
+            session_id="new",
+            sequence=1,
+            stamp=1.1,
+        )
+    assert cache.get(now=1.1).state_session_id == "old"
+
+
+@pytest.mark.parametrize("stale_stream", ["state", "target"])
+def test_state_and_target_freshness_are_independent(stale_stream: str) -> None:
+    cache = _strict_cache()
+    state_stamp = 0.0 if stale_stream == "state" else 1.0
+    target_stamp = 0.0 if stale_stream == "target" else 1.0
+    cache.update_state(
+        joint_pos=np.ones(6), source="arm", session_id="a", sequence=1, stamp=state_stamp
+    )
+    cache.update_target(
+        joint_target=np.ones(6), source="arm", session_id="a", sequence=1, stamp=target_stamp
+    )
+    obs = cache.get(now=1.1)
+    assert obs.state_fresh is (stale_stream != "state")
+    assert obs.target_fresh is (stale_stream != "target")
+
+
+def test_recovered_data_does_not_clear_external_latched_fault_state() -> None:
+    from modules.safety_state import SafetyState, SafetyStateMachine
+
+    cache = _strict_cache()
+    safety = SafetyStateMachine()
+    safety.begin_preflight()
+    safety.preflight_passed()
+    safety.trigger_fault("arm stale")
+    cache.update_state(
+        joint_pos=np.ones(6), source="arm", session_id="a", sequence=1, stamp=2.0
+    )
+    cache.update_target(
+        joint_target=np.ones(6), source="arm", session_id="a", sequence=1, stamp=2.0
+    )
+    assert cache.get(now=2.0).state_fresh
+    assert safety.state == SafetyState.FAULT
+    assert not safety.arm()

@@ -9,6 +9,7 @@ sys.path.insert(0, str(ROOT / "real-wbc"))
 
 from modules.spacemouse_arm_node import SpaceMouseMapping, map_spacemouse_motion  # noqa: E402
 from modules.spacemouse_arm_node import SpaceMouseArmNode  # noqa: E402
+from modules.safety_state import SafetyStateMachine  # noqa: E402
 
 
 def test_spacemouse_mapping_uses_raw_axes_and_configured_signs():
@@ -242,7 +243,71 @@ def test_estop_damps_and_blocks_future_sends():
     assert node.controller.sent_count == 0
 
 
-def test_spacemouse_watchdog_holds_without_damping():
+def test_estop_never_calls_home_and_first_hardware_call_is_damping():
+    node = SpaceMouseArmNode.__new__(SpaceMouseArmNode)
+    node.node = _FakeRosNode()
+    node.controller = _RecordingController()
+    node.estopped = False
+    node.estop_latched = False
+    node.output_enabled = True
+    node.arm_position_control_enabled = True
+
+    node._trigger_estop("L1")
+
+    assert node.controller.calls == ["damping"]
+    assert node.estop_latched is True
+    assert node.output_enabled is False
+
+
+def test_estop_is_idempotent_and_rejects_home_target_and_gripper_send():
+    node = SpaceMouseArmNode.__new__(SpaceMouseArmNode)
+    node.node = _FakeRosNode()
+    node.controller = _RecordingController()
+    node.arx5 = _FakeArx5
+    node.estopped = False
+    node.estop_latched = False
+    node.output_enabled = True
+    node.arm_position_control_enabled = True
+    node.dry_run = False
+    node.target_pose6d = np.zeros(6, dtype=np.float64)
+    node.target_joint = np.zeros(6, dtype=np.float64)
+    node.target_gripper = 0.04
+    node.gripper_min = 0.0
+    node.gripper_max = 0.08
+
+    node._trigger_estop("first")
+    node._trigger_estop("second")
+    node._send_target()
+    assert not node._command_button_home_pose()
+
+    assert node.controller.calls == ["damping"]
+
+
+def test_shutdown_and_exception_cleanup_never_call_home():
+    for cleanup_name in ("shutdown", "_cleanup_inputs_and_lock"):
+        node = SpaceMouseArmNode.__new__(SpaceMouseArmNode)
+        node.node = _DestroyableFakeRosNode()
+        node.controller = _RecordingController()
+        node.estopped = False
+        node.estop_latched = False
+        node.output_enabled = True
+        node.arm_position_control_enabled = True
+        node.spacemouse = None
+        node.shared_memory_manager = None
+        node.can_owner_lock = None
+        node._shutdown_complete = False
+
+        getattr(node, cleanup_name)()
+        if cleanup_name == "shutdown":
+            getattr(node, cleanup_name)()
+
+        assert "home" not in node.controller.calls
+        assert node.controller.calls[0] == "damping"
+        if cleanup_name == "shutdown":
+            assert node.controller.calls == ["damping"]
+
+
+def test_spacemouse_watchdog_latches_fault_and_damps():
     node = SpaceMouseArmNode.__new__(SpaceMouseArmNode)
     node.node = _FakeRosNode()
     node.arx5 = _FakeArx5
@@ -253,13 +318,16 @@ def test_spacemouse_watchdog_holds_without_damping():
     node.gripper_min = 0.0
     node.gripper_max = 0.08
     node.arm_position_control_enabled = False
+    node.output_enabled = True
     node.spacemouse_watchdog_damped = False
+    _mark_test_node_armed(node)
 
     node._handle_spacemouse_watchdog()
 
-    assert node.controller.damping_count == 0
-    assert node.controller.sent_count == 1
-    assert node.arm_position_control_enabled is True
+    assert node.controller.damping_count == 1
+    assert node.controller.sent_count == 0
+    assert node.output_enabled is False
+    assert node.safety_state.fault_latched
 
 
 def test_enable_current_pose_hold_sets_default_gain():
@@ -294,6 +362,8 @@ def test_send_target_clamps_gripper_and_publishes_commanded_joint_target():
     node.gripper_min = 0.0
     node.gripper_max = 0.08
     node.arm_position_control_enabled = True
+    node.output_enabled = True
+    _mark_test_node_armed(node)
 
     node._send_target()
 
@@ -315,6 +385,8 @@ def test_send_target_invalid_pose_damps_and_blocks_command():
     node.gripper_min = 0.0
     node.gripper_max = 0.08
     node.arm_position_control_enabled = True
+    node.output_enabled = True
+    _mark_test_node_armed(node)
 
     node._send_target()
 
@@ -423,6 +495,11 @@ class _FakeRosNode:
         return _FakeLogger()
 
 
+class _DestroyableFakeRosNode(_FakeRosNode):
+    def destroy_node(self):
+        pass
+
+
 class _FakeJointState:
     def pos(self):
         return np.array([1, 2, 3, 4, 5, 6], dtype=np.float64)
@@ -472,6 +549,23 @@ class _FakeController:
         self.last_gain = gain
 
 
+class _RecordingController(_FakeController):
+    def __init__(self):
+        super().__init__()
+        self.calls = []
+
+    def reset_to_home(self):
+        self.calls.append("home")
+
+    def set_to_damping(self):
+        self.calls.append("damping")
+        super().set_to_damping()
+
+    def set_eef_cmd(self, cmd):
+        self.calls.append("target")
+        super().set_eef_cmd(cmd)
+
+
 class _FakeEEFState:
     def __init__(self):
         self._pose = np.zeros(6, dtype=np.float64)
@@ -492,6 +586,14 @@ class _FakeGain:
 class _FakeArx5:
     EEFState = _FakeEEFState
     Gain = _FakeGain
+
+
+def _mark_test_node_armed(node):
+    state = SafetyStateMachine()
+    state.begin_preflight()
+    state.preflight_passed()
+    assert state.arm()
+    node.safety_state = state
 
 
 class _FakeControllerConfig:

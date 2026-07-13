@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+echo "[gx-real] BLOCKED: this script launches an unguarded vendor CAN writer." >&2
+echo "[gx-real] Use scripts/run_spacemouse_arm.sh after all production safety gates pass." >&2
+exit 2
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GX_REAL_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 

@@ -1,0 +1,17 @@
+schema_version: 1
+verification_status: UNVERIFIED
+evidence: "UNKNOWN: no version-controlled Go2 hardware joint-limit contract was found at review baseline 264f10cc7c65be5af7f0d88a6db0043113265c97"
+
+# Hardware output is intentionally fail-closed while this artifact is UNVERIFIED.
+# A release engineer must populate all fields below from a traceable Go2 hardware
+# contract and change verification_status only after independent review.
+joint_order: []
+position_lower: []
+position_upper: []
+max_step: []
+max_velocity: []
+max_acceleration: []
+max_jerk: []
+max_command_age_sec: null
+max_lowstate_age_sec: null
+max_dt_sec: null

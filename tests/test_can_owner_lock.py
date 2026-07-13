@@ -9,8 +9,8 @@ from modules.can_owner_lock import CanOwnerLock  # noqa: E402
 
 
 def test_can_owner_lock_rejects_second_owner(tmp_path):
-    first = CanOwnerLock("can0", owner="first-owner", lock_dir=str(tmp_path))
-    second = CanOwnerLock("can0", owner="second-owner", lock_dir=str(tmp_path))
+    first = CanOwnerLock("can0", owner="first-owner", lock_dir=str(tmp_path), real_hardware=False)
+    second = CanOwnerLock("can0", owner="second-owner", lock_dir=str(tmp_path), real_hardware=False)
 
     first.acquire()
     try:

@@ -1,6 +1,12 @@
 cmake_minimum_required(VERSION 3.5)
 project(unitree_ros2_example)
 
+option(
+  GX_REAL_BUILD_VENDOR_HARDWARE_EXAMPLES
+  "Build Unitree vendor command-writer examples (must remain OFF for production artifacts)"
+  OFF
+)
+
 # Default to C99
 if(NOT CMAKE_C_STANDARD)
   set(CMAKE_C_STANDARD 99)
@@ -38,6 +44,27 @@ find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(rosbag2_cpp REQUIRED)
 find_package(Eigen3 REQUIRED)
+
+if(NOT GX_REAL_BUILD_VENDOR_HARDWARE_EXAMPLES)
+  message(STATUS "GX_REAL: excluding Unitree vendor hardware-writer examples")
+  add_executable(read_low_state src/read_low_state.cpp)
+  add_executable(read_low_state_hg src/read_low_state_hg.cpp)
+  add_executable(read_motion_state src/read_motion_state.cpp)
+  add_executable(read_wireless_controller src/read_wireless_controller.cpp)
+  ament_target_dependencies(read_low_state ${DEPENDENCY_LIST})
+  ament_target_dependencies(read_low_state_hg ${DEPENDENCY_LIST})
+  ament_target_dependencies(read_motion_state ${DEPENDENCY_LIST})
+  ament_target_dependencies(read_wireless_controller ${DEPENDENCY_LIST})
+  install(TARGETS
+    read_low_state
+    read_low_state_hg
+    read_motion_state
+    read_wireless_controller
+    DESTINATION lib/${PROJECT_NAME}
+  )
+  ament_package()
+  return()
+endif()
 
 add_executable(low_level_ctrl src/low_level_ctrl.cpp src/common/motor_crc.cpp)
 add_executable(low_level_ctrl_hg src/h1-2/lowlevel/low_level_ctrl_hg.cpp src/common/motor_crc_hg.cpp)
