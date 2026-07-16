@@ -18,13 +18,13 @@ def test_r2_uses_central_stop_and_returns_before_other_button_actions() -> None:
     assert "return" in block
 
 
-def test_central_stop_clears_stand_flag_and_only_directly_publishes_passive() -> None:
+def test_central_stop_clears_stand_flag_and_dispatches_to_backend() -> None:
     source = _source()
     clear_start = source.index("def clear_all_motion_flags")
     stop_start = source.index("def request_operator_stop")
     stop_end = source.index("def trigger_safety_stop", stop_start)
     assert "self.start_time = -1.0" in source[clear_start:stop_start]
-    assert "publish_bounded_passive_sequence" in source[stop_start:stop_end]
+    assert "stop_leg_backend" in source[stop_start:stop_end]
     assert "motor_pub.publish" not in source[stop_start:stop_end]
 
 
@@ -43,7 +43,7 @@ def test_estop_and_shutdown_have_no_home_motion() -> None:
     end = source.index("def policy_timer_callback", start)
     block = source[start:end]
     assert "reset_to_home" not in block
-    assert "publish_bounded_passive_sequence" in block
+    assert "stop_leg_backend" in block
     assert "set_to_damping" in block
 
 
@@ -125,3 +125,65 @@ def test_policy_exception_and_latency_budget_enter_latched_fault_path() -> None:
     assert "inference_elapsed > self.policy_dt" in block
     assert "except Exception as exc:" in block
     assert "self.trigger_safety_stop" in block
+
+
+def test_sport_shadow_never_creates_lowcmd_publisher_or_motor_timer() -> None:
+    source = _source()
+    publisher = source.index('LowCmd, "lowcmd"')
+    publisher_guard = source.rfind("if not self.is_sport_shadow:", 0, publisher)
+    assert publisher_guard != -1
+    timer = source.index("self.motor_timer = self.create_timer")
+    timer_guard = source.rfind("if not self.is_sport_shadow:", 0, timer)
+    assert timer_guard != -1
+
+
+def test_all_central_stop_paths_dispatch_to_selected_leg_backend() -> None:
+    source = _source()
+    for start_name, end_name in (
+        ("def request_operator_stop", "def trigger_safety_stop"),
+        ("def trigger_safety_stop", "def has_recent_lowstate"),
+        ("def emergency_stop", "def safe_shutdown"),
+        ("def safe_shutdown", "def policy_timer_callback"),
+    ):
+        start = source.index(start_name)
+        end = source.index(end_name, start)
+        assert "self.stop_leg_backend()" in source[start:end]
+
+
+def test_sport_shadow_uses_one_command_for_policy_input_and_sport_move() -> None:
+    source = _source()
+    start = source.index("policy_input = self.obs.copy()")
+    end = source.index("def init_policy", start)
+    block = source[start:end]
+    assert "scaled_sport_command = sport_command * self.commands_scale" in block
+    assert "policy_input[9:12] = scaled_sport_command" in block
+    assert "self.publish_sport_move(sport_command)" in block
+    assert "policy_executed=false" in block
+    assert "counterfactual_not_joint_tracking" in block
+
+
+def test_sport_shadow_start_requires_successful_stopmove_before_joystick_arbitration() -> None:
+    source = _source()
+    start = source.index("def start_shadow_policy")
+    end = source.index("def is_low_level_control_safe", start)
+    block = source[start:end]
+    stop = block.index("if not self.publish_bounded_sport_stop_sequence(count=3):")
+    disable = block.index("self.disable_unitree_joystick_for_shadow()")
+    activate = block.index("self.safety_state.activate_shadow()")
+    assert stop < disable < activate
+    assert "StopMove was not published" in block
+
+
+def test_sport_shadow_requires_live_sport_request_endpoint_at_start_and_move() -> None:
+    source = _source()
+    start = source.index("def start_shadow_policy")
+    start_end = source.index("def is_low_level_control_safe", start)
+    assert "self.count_subscribers(SPORT_REQUEST_TOPIC) < 1" in source[
+        start:start_end
+    ]
+
+    move = source.index("def publish_sport_move")
+    move_end = source.index("def disable_unitree_joystick_for_shadow", move)
+    assert "self.count_subscribers(SPORT_REQUEST_TOPIC) < 1" in source[
+        move:move_end
+    ]

@@ -52,6 +52,11 @@ if __name__ == "__main__":
         type=str,
         default=DEFAULT_POLICY_PATH,
     )
+    parser.add_argument(
+        "--leg-control-backend",
+        choices=["lowcmd_policy", "sport_shadow"],
+        default="lowcmd_policy",
+    )
     parser.add_argument("--artifact-manifest", default="config/artifact_manifest.yaml")
     parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument("--arm_pose", type=float, nargs=6, default=None)
@@ -265,6 +270,19 @@ if __name__ == "__main__":
         ],
     )
     args = parser.parse_args()
+    if args.leg_control_backend == "sport_shadow":
+        if os.path.realpath(args.policy_path) != os.path.realpath(DEFAULT_POLICY_PATH):
+            parser.error("sport_shadow is flat-only and requires policies/policy.onnx")
+        if args.enable_height_scan:
+            parser.error("sport_shadow requires the flat zero height-scan observation")
+        if args.standup_mode not in {
+            "unitree_auto",
+            "unitree_recoverystand",
+            "unitree_standup",
+        }:
+            parser.error("sport_shadow requires a Unitree sport stand-up mode")
+        if args.allow_unknown_sport_mode:
+            parser.error("sport_shadow requires fresh sport mode state")
     if args.arm_control_owner == "wbc":
         parser.error("production WBC-owned X5 writer is blocked; use external_spacemouse")
     if args.arm_observation_mode != "live":

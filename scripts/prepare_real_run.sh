@@ -14,10 +14,12 @@ This wraps the repeated pre-run work before starting the real control nodes:
   - source gx-real runtime environment and run scripts/check_env.sh
   - check SpaceMouse USB receiver, dependencies, and daemon when enabled
   - ensure can0 is ready for X5/ARX5
-  - check Go2 ROS2 topics and disable sport mode
+  - check Go2 ROS2 topics and apply backend-specific sport-mode preflight
   - reject startup if another WBC/X5 writer is already running
 
 Options:
+  --leg-control-backend NAME
+                            lowcmd_policy or sport_shadow. Default: lowcmd_policy
   --network-iface IFACE     Go2 network interface for sport-mode disable. Default: eth0
   --can-dev DEV             USB-CAN serial device, or auto. Default: auto
   --can-if IFACE            SocketCAN interface. Default: can0
@@ -53,6 +55,7 @@ CHECK_SPACEMOUSE=1
 CHECK_GO2_TOPICS=1
 CHECK_JOYSTICK_MOTION=0
 REQUIRE_JETSON=1
+LEG_CONTROL_BACKEND="lowcmd_policy"
 
 NETWORK_IFACE="${GX_REAL_NETWORK_IFACE:-eth0}"
 CAN_DEV="${CAN_DEV:-auto}"
@@ -83,6 +86,11 @@ need_arg() {
 
 while [[ "$#" -gt 0 ]]; do
   case "$1" in
+    --leg-control-backend)
+      need_arg "$1" "${2:-}"
+      LEG_CONTROL_BACKEND="$2"
+      shift 2
+      ;;
     --network-iface)
       need_arg "$1" "${2:-}"
       NETWORK_IFACE="$2"
@@ -163,6 +171,17 @@ while [[ "$#" -gt 0 ]]; do
       ;;
   esac
 done
+
+case "${LEG_CONTROL_BACKEND}" in
+  lowcmd_policy)
+    ;;
+  sport_shadow)
+    DISABLE_SPORT_MODE=0
+    ;;
+  *)
+    die "--leg-control-backend must be lowcmd_policy or sport_shadow"
+    ;;
+esac
 
 require_command() {
   local command_name="$1"
@@ -259,7 +278,11 @@ run_builds() {
   source_ros_setup
   build_unitree_ros2
   build_robot_state
-  build_sport_mode_tool
+  if [[ "${LEG_CONTROL_BACKEND}" == "lowcmd_policy" ]]; then
+    build_sport_mode_tool
+  else
+    info "sport_shadow selected; not building the sport-mode disable tool"
+  fi
 }
 
 run_environment_check() {
@@ -340,7 +363,7 @@ check_spacemouse_input_device() {
 check_no_conflicting_control_processes() {
   require_command pgrep
   local pattern
-  pattern='[s]pacemouse_teleop.py|[r]un_arm_spacemouse_test.sh|[r]un_spacemouse_arm.py|[r]un_spacemouse_arm.sh|[r]un_wbc_leg12.py|[r]un_leg12_real.sh|[r]un_wbc.py'
+  pattern='[s]pacemouse_teleop.py|[r]un_arm_spacemouse_test.sh|[r]un_spacemouse_arm.py|[r]un_spacemouse_arm.sh|[r]un_wbc_leg12.py|[r]un_leg12_real.sh|[r]un_wbc.py|[g]o2_sport_client'
 
   local matches
   matches="$(pgrep -af "${pattern}" || true)"
@@ -462,6 +485,10 @@ check_go2_topics() {
   require_ros_topic "lowstate" "/lowstate" "lowstate" "/rt/lowstate" "rt/lowstate"
   require_ros_topic "wireless controller" "/wirelesscontroller" "wirelesscontroller"
   require_ros_topic "sport mode state" "/lf/sportmodestate" "lf/sportmodestate"
+  if [[ "${LEG_CONTROL_BACKEND}" == "sport_shadow" ]] \
+    && ! find_ros_topic "/api/sport/request" "api/sport/request" >/dev/null; then
+    die "missing Unitree sport request endpoint: /api/sport/request"
+  fi
 }
 
 check_wireless_joystick_motion() {
@@ -514,6 +541,10 @@ check_wireless_joystick_motion() {
 }
 
 disable_sport_mode() {
+  if [[ "${LEG_CONTROL_BACKEND}" == "sport_shadow" ]]; then
+    info "sport_shadow selected; leaving Unitree sport mode enabled"
+    return
+  fi
   if [[ "${DISABLE_SPORT_MODE}" -eq 0 ]]; then
     info "skipping sport-mode disable (--no-disable-sport-mode)"
     return
@@ -524,6 +555,12 @@ disable_sport_mode() {
 }
 
 print_next_steps() {
+  local leg_command
+  if [[ "${LEG_CONTROL_BACKEND}" == "sport_shadow" ]]; then
+    leg_command="scripts/run_leg12_flat_sport_shadow_real.sh --device cpu --pose_estimator none --joy-vx-axis ly --joy-vx-sign 1 --joy-vy-axis lx --joy-vy-sign -1 --joy-yaw-axis rx --joy-yaw-sign -1 --joy-deadzone 0.12 --joy-max-vx 0.50 --joy-max-vy 0.0 --joy-max-yaw 0.0 --arm-control-owner external_spacemouse --arm-state-topic /arm/state --arm-target-topic /arm/target_state --safety-topic /safety/estop --require-arm-state-for-rl --gripper-cmd 0.0 --arm_pose 0.0 0.5 0.3 0.0 0.0 0.0"
+  else
+    leg_command="scripts/run_leg12_real.sh --device cpu --pose_estimator none --standup-mode internal --base-command-source wireless_joystick --joy-vx-axis ly --joy-vx-sign 1 --joy-vy-axis lx --joy-vy-sign -1 --joy-yaw-axis rx --joy-yaw-sign -1 --joy-deadzone 0.12 --joy-max-vx 0.50 --joy-max-vy 0.0 --joy-max-yaw 0.0 --arm-control-owner external_spacemouse --arm-state-topic /arm/state --arm-target-topic /arm/target_state --safety-topic /safety/estop --require-arm-state-for-rl --gripper-cmd 0.0 --leg-kp 200 --leg-kd 10 --arm_pose 0.0 0.5 0.3 0.0 0.0 0.0"
+  fi
   cat <<EOF
 [gx-real] pre-run checks completed.
 [gx-real] Start the runtime commands in separate terminals and adjust only those arguments:
@@ -538,7 +575,7 @@ Terminal B:
   cd ${GX_REAL_ROOT}
   export GX_REAL_NETWORK_IFACE=${NETWORK_IFACE}
   source scripts/setup_env.sh
-  scripts/run_leg12_real.sh --device cpu --pose_estimator none --standup-mode internal --base-command-source wireless_joystick --joy-vx-axis ly --joy-vx-sign 1 --joy-vy-axis lx --joy-vy-sign -1 --joy-yaw-axis rx --joy-yaw-sign -1 --joy-deadzone 0.12 --joy-max-vx 0.50 --joy-max-vy 0.0 --joy-max-yaw 0.0 --arm-control-owner external_spacemouse --arm-state-topic /arm/state --arm-target-topic /arm/target_state --safety-topic /safety/estop --require-arm-state-for-rl --gripper-cmd 0.0 --leg-kp 200 --leg-kd 10 --arm_pose 0.0 0.5 0.3 0.0 0.0 0.0
+  ${leg_command}
 EOF
 }
 

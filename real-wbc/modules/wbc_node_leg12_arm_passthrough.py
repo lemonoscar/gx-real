@@ -54,6 +54,15 @@ from modules.runtime_safety import (
 )
 from modules.safety_state import SafetyState, SafetyStateMachine
 from modules.safety_lease import SafetyHeartbeat
+from modules.sport_shadow import (
+    SPORT_API_ID_MOVE,
+    SPORT_API_ID_STOP_MOVE,
+    SPORT_API_ID_SWITCH_JOYSTICK,
+    SPORT_SHADOW_HARD_LIMITS,
+    sport_move_parameter,
+    sport_switch_joystick_parameter,
+    validate_sport_command,
+)
 from transforms3d import affines, quaternions, euler
 
 MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -308,6 +317,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
     def __init__(
         self,
         policy_path: str,
+        leg_control_backend: str = "lowcmd_policy",
         arm_pose: Optional[List[float]] = None,
         arm_command_mode: str = "joint",
         arm_tcp_pose: Optional[List[float]] = None,
@@ -384,6 +394,37 @@ class WBCNodeLeg12ArmPassthrough(Node):
         final_command_contract: str = "config/go2_leg_safety_contract.yaml",
     ):
         super().__init__("deploy_node")  # type: ignore
+        self.leg_control_backend = str(leg_control_backend).lower()
+        if self.leg_control_backend not in {"lowcmd_policy", "sport_shadow"}:
+            raise ValueError(
+                "leg_control_backend must be lowcmd_policy or sport_shadow, got %r"
+                % leg_control_backend
+            )
+        self.is_sport_shadow = self.leg_control_backend == "sport_shadow"
+        if self.is_sport_shadow:
+            flat_policy_path = os.path.realpath(
+                os.path.join(GX_REAL_ROOT, "policies", "policy.onnx")
+            )
+            if os.path.realpath(policy_path) != flat_policy_path:
+                raise ValueError(
+                    "sport_shadow is flat-only and requires policies/policy.onnx"
+                )
+            if enable_height_scan:
+                raise ValueError(
+                    "sport_shadow is flat-only; height scan must remain disabled/zero"
+                )
+            if standup_mode not in {
+                "unitree_auto",
+                "unitree_recoverystand",
+                "unitree_standup",
+            }:
+                raise ValueError(
+                    "sport_shadow requires a Unitree sport stand-up mode"
+                )
+            if allow_unknown_sport_mode:
+                raise ValueError(
+                    "sport_shadow requires fresh sport state; unknown mode cannot be allowed"
+                )
         self.safety_state = SafetyStateMachine()
         self.safety_state.begin_preflight()
         self._safe_shutdown_complete = False
@@ -392,17 +433,22 @@ class WBCNodeLeg12ArmPassthrough(Node):
         if not os.path.isabs(contract_path):
             contract_path = os.path.join(GX_REAL_ROOT, contract_path)
         self.final_command_contract_path = contract_path
-        self.final_command_safety = build_final_leg_safety(
-            load_verified_leg_contract(contract_path),
-            expected_source="wbc_leg12",
-            expected_session_id=self.control_session_id,
-        )
+        self.final_command_safety = None
+        if not self.is_sport_shadow:
+            self.final_command_safety = build_final_leg_safety(
+                load_verified_leg_contract(contract_path),
+                expected_source="wbc_leg12",
+                expected_session_id=self.control_session_id,
+            )
         self.last_leg_command_generated_at = -1.0
         self.final_command_safety_primed = False
         self.last_final_limit_log_time = -1.0
         self.go2_owner_lock = HardwareOwnershipLock(
             "go2-lowcmd",
-            owner=f"deploy_node:{os.getpid()}:{self.control_session_id}",
+            owner=(
+                f"deploy_node:{self.leg_control_backend}:{os.getpid()}:"
+                f"{self.control_session_id}"
+            ),
         )
         self.go2_owner_lock.acquire()
         self.replay_speed = replay_speed
@@ -447,7 +493,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
                     "Ignoring invalid --arm-tcp-pose: %s",
                     parsed_tcp_pose,
                 )
-        self.standup_mode = standup_mode
+        self.standup_mode = str(standup_mode)
         self.allow_unknown_sport_mode = allow_unknown_sport_mode
         self.lowstate_watchdog_sec = require_finite_scalar(
             lowstate_watchdog_sec,
@@ -500,6 +546,18 @@ class WBCNodeLeg12ArmPassthrough(Node):
         )
         self.policy_takeover_commands = np.array([0.0, 0.0, 0.0], dtype=np.float64)
         self.policy_move_commands = np.array([cmd_vx, cmd_vy, cmd_yaw], dtype=np.float64)
+        self.sport_command_limits = np.array(
+            [joy_max_vx, joy_max_vy, joy_max_yaw], dtype=np.float64
+        )
+        if self.is_sport_shadow:
+            validate_sport_command(
+                self.sport_command_limits,
+                SPORT_SHADOW_HARD_LIMITS,
+            )
+            validate_sport_command(
+                self.policy_move_commands,
+                self.sport_command_limits,
+            )
         self.base_command_source = base_command_source.lower()
         if self.base_command_source not in {"fixed", "wireless_joystick"}:
             raise ValueError(
@@ -860,7 +918,10 @@ class WBCNodeLeg12ArmPassthrough(Node):
             low_state_history_depth,
         )
         self.sport_mode = -1
+        self.sport_error_code = -1
         self.sport_progress = 0.0
+        self.sport_velocity = np.zeros(3, dtype=np.float64)
+        self.sport_yaw_speed = 0.0
         self.sport_state_seen = False
         self.last_sport_state_time = -1.0
         self.awaiting_unitree_stand = False
@@ -879,7 +940,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
             low_state_history_depth,
         )
         self.sport_request_pub = None
-        if self.uses_unitree_standup:
+        if self.uses_unitree_standup or self.is_sport_shadow:
             if UnitreeRequest is None:
                 raise ImportError(
                     "standup_mode uses Unitree sport control, but unitree_api.msg.Request is unavailable"
@@ -903,9 +964,11 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.safety_heartbeat_pub = self.create_publisher(
             String, self.safety_heartbeat_topic, safety_qos
         )
-        self.motor_pub = self.create_publisher(
-            LowCmd, "lowcmd", low_state_history_depth
-        )
+        self.motor_pub = None
+        if not self.is_sport_shadow:
+            self.motor_pub = self.create_publisher(
+                LowCmd, "lowcmd", low_state_history_depth
+            )
         self.cmd_msg = LowCmd()
         self.cmd_msg.head = [0xFE, 0xEF]
         self.cmd_msg.level_flag = 0xFF
@@ -947,11 +1010,12 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.policy_handover_leg_start = self.stand_target_leg_pos.copy()
         self.policy_dt_slack = policy_dt_slack
         logging.info(
-            "Runtime targets | standup_mode=%s base_command_source=%s arm_control_owner=%s "
+            "Runtime targets | leg_backend=%s standup_mode=%s base_command_source=%s arm_control_owner=%s "
             "arm_observation_mode=%s "
             "arm_pose_source=%s arm_hold_pose=%s button_arm_pose=%s arm_reset_pose=%s "
             "commanded_leg_kp=%s commanded_leg_kd=%s move_commands=%s"
             % (
+                self.leg_control_backend,
                 self.standup_mode,
                 self.base_command_source,
                 self.arm_control_owner,
@@ -969,6 +1033,26 @@ class WBCNodeLeg12ArmPassthrough(Node):
                 np.array2string(self.policy_move_commands, precision=3, floatmode="fixed"),
             )
         )
+        logging.info(
+            "Leg execution contract | leg_backend=%s policy_inference=true "
+            "policy_executed=%s actual_actuator=%s height_scan=%s",
+            self.leg_control_backend,
+            str(not self.is_sport_shadow).lower(),
+            "unitree_sport_mode" if self.is_sport_shadow else "go2_lowcmd",
+            "zero" if not self.enable_height_scan else self.height_scan_source,
+        )
+        if self.is_sport_shadow:
+            logging.info(
+                "Sport shadow command contract | configured_limits=%s hard_limits=%s "
+                "request_topic=%s",
+                np.array2string(
+                    self.sport_command_limits,
+                    precision=3,
+                    floatmode="fixed",
+                ),
+                SPORT_SHADOW_HARD_LIMITS,
+                SPORT_REQUEST_TOPIC,
+            )
         if self.arm_observation_mode == "fixed_initial":
             logging.info(
                 "Arm observation mode: fixed_initial; policy arm pos/target are fixed to %s "
@@ -992,7 +1076,9 @@ class WBCNodeLeg12ArmPassthrough(Node):
 
         # Create a quick timer for steadier timer interval
         self.policy_timer = self.create_timer(1.0 / 1000.0, self.policy_timer_callback)
-        self.motor_timer = self.create_timer(1.0 / 500.0, self.motor_timer_callback)
+        self.motor_timer = None
+        if not self.is_sport_shadow:
+            self.motor_timer = self.create_timer(1.0 / 500.0, self.motor_timer_callback)
         self.safety_heartbeat_timer = self.create_timer(0.1, self.publish_safety_heartbeat)
 
         self.prev_policy_time = time.monotonic()
@@ -1005,7 +1091,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
             (1, self.obs_history_len, self.obs_dim), dtype=np.float32
         )
         self.obs_history_log: List[Dict[str, np.ndarray]] = []
-        self.action_history_log: List[Dict[str, np.ndarray]] = []
+        self.action_history_log: List[Dict[str, object]] = []
         self.logging_dir = os.path.abspath(logging_dir)
         os.makedirs(self.logging_dir, exist_ok=True)
         self.angular_velocity_filter = MovingWindowFilter(window_size=10, data_dim=3)
@@ -1383,6 +1469,9 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.cmd_msg.motor_cmd = self.motor_cmd.copy()
 
     def publish_passive_lowcmd_once(self) -> None:
+        if self.motor_pub is None:
+            logging.error("Passive lowcmd requested without a lowcmd publisher")
+            return
         try:
             self.cmd_msg.crc = get_crc(self.cmd_msg)
             self.motor_pub.publish(self.cmd_msg)
@@ -1394,6 +1483,12 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.reset_lowcmd_to_passive()
         for _ in range(count):
             self.publish_passive_lowcmd_once()
+
+    def stop_leg_backend(self) -> None:
+        if self.is_sport_shadow:
+            self.publish_bounded_sport_stop_sequence()
+        else:
+            self.publish_bounded_passive_sequence()
 
     def clear_all_motion_flags(self) -> None:
         self.start_policy = False
@@ -1415,7 +1510,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.teleop_base_target[:] = 0.0
         self.teleop_base_last_time = -1.0
         self.last_policy_diag_log_time = -1.0
-        self.publish_bounded_passive_sequence()
+        self.stop_leg_backend()
         self.safety_state.complete_stop()
 
     def trigger_safety_stop(self, reason: str, *, publish_estop: bool = True) -> None:
@@ -1440,7 +1535,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.clear_all_motion_flags()
         self.fixed_commands[:] = self.policy_takeover_commands
         self.command_safety_filter.reset(tuple(self.policy_takeover_commands), now=now)
-        self.publish_bounded_passive_sequence()
+        self.stop_leg_backend()
         if publish_estop:
             self.publish_safety_estop(repeat=True)
 
@@ -1712,8 +1807,28 @@ class WBCNodeLeg12ArmPassthrough(Node):
         return "unitree_mujoco get-up"
 
     def sport_state_cb(self, msg: SportModeState):
+        try:
+            sport_velocity = require_finite_vector(
+                msg.velocity,
+                size=3,
+                name="sport_state.velocity",
+            )
+            sport_yaw_speed = require_finite_scalar(
+                msg.yaw_speed,
+                "sport_state.yaw_speed",
+            )
+            sport_progress = require_finite_scalar(
+                msg.progress,
+                "sport_state.progress",
+            )
+        except RuntimeSafetyFault as exc:
+            self.trigger_safety_stop(str(exc))
+            return
         self.sport_mode = int(msg.mode)
-        self.sport_progress = float(msg.progress)
+        self.sport_error_code = int(msg.error_code)
+        self.sport_progress = sport_progress
+        self.sport_velocity = sport_velocity.copy()
+        self.sport_yaw_speed = sport_yaw_speed
         self.sport_state_seen = True
         self.last_sport_state_time = time.monotonic()
         if not self.awaiting_unitree_stand:
@@ -1738,10 +1853,16 @@ class WBCNodeLeg12ArmPassthrough(Node):
             self.unitree_stand_ready = True
             self.unitree_stand_completed_time = time.monotonic()
             logging.info(
-                f"Unitree {self.standup_label} completed; low-level policy can take over"
+                f"Unitree {self.standup_label} completed; policy start is now permitted"
             )
 
-    def publish_sport_request(self, api_id: int):
+    def publish_sport_request(
+        self,
+        api_id: int,
+        *,
+        parameter: str = "",
+        noreply: bool = True,
+    ) -> int:
         if self.sport_request_pub is None or UnitreeRequest is None:
             raise RuntimeError("sport request publisher is unavailable")
         req = UnitreeRequest()
@@ -1750,8 +1871,53 @@ class WBCNodeLeg12ArmPassthrough(Node):
         req.header.identity.api_id = api_id
         req.header.lease.id = self._sport_request_id
         req.header.policy.priority = 0
-        req.header.policy.noreply = True
+        req.header.policy.noreply = bool(noreply)
+        req.parameter = str(parameter)
         self.sport_request_pub.publish(req)
+        return self._sport_request_id
+
+    def publish_sport_move(self, command: np.ndarray) -> int:
+        if (
+            not self.is_sport_shadow
+            or self.safety_state.state != SafetyState.SHADOW_ACTIVE
+            or not self.safety_state.allows_motion_output()
+        ):
+            raise RuntimeSafetyFault(
+                "Sport Move is only permitted in an active sport_shadow safety state"
+            )
+        if self.count_subscribers(SPORT_REQUEST_TOPIC) < 1:
+            raise RuntimeSafetyFault(
+                "Unitree sport request endpoint has no active subscriber"
+            )
+        try:
+            validated = validate_sport_command(command, self.sport_command_limits)
+            parameter = sport_move_parameter(validated)
+        except ValueError as exc:
+            raise RuntimeSafetyFault(str(exc)) from exc
+        return self.publish_sport_request(
+            SPORT_API_ID_MOVE,
+            parameter=parameter,
+        )
+
+    def disable_unitree_joystick_for_shadow(self) -> None:
+        self.publish_sport_request(
+            SPORT_API_ID_SWITCH_JOYSTICK,
+            parameter=sport_switch_joystick_parameter(False),
+        )
+        logging.info("Requested Unitree direct joystick disable for sport_shadow arbitration")
+
+    def publish_bounded_sport_stop_sequence(self, count: Optional[int] = None) -> bool:
+        stop_count = self.estop_repeat_count if count is None else int(count)
+        stop_count = max(1, min(stop_count, 10))
+        for index in range(stop_count):
+            try:
+                self.publish_sport_request(SPORT_API_ID_STOP_MOVE)
+            except Exception as exc:
+                logging.error("Failed to publish Sport StopMove: %s", exc)
+                return False
+            if index + 1 < stop_count and self.estop_repeat_period_sec > 0.0:
+                time.sleep(self.estop_repeat_period_sec)
+        return True
 
     def start_unitree_standup(self, api_id: Optional[int] = None):
         if self.latest_tick == -1:
@@ -1921,6 +2087,90 @@ class WBCNodeLeg12ArmPassthrough(Node):
             )
         )
 
+    def start_shadow_policy(self) -> None:
+        if not self.is_sport_shadow:
+            raise RuntimeError("start_shadow_policy requires sport_shadow backend")
+        if self.latest_tick == -1:
+            logging.warning("Low-state is not ready yet; wait before pressing L2")
+            return
+        if not self.is_low_level_control_safe():
+            return
+        if self.start_policy:
+            logging.info("Shadow policy is already running")
+            return
+        if not self.is_arm_state_ready_for_rl():
+            return
+        if self.count_subscribers(SPORT_REQUEST_TOPIC) < 1:
+            logging.error(
+                "Refusing sport_shadow start: Unitree sport request endpoint has no subscriber"
+            )
+            return
+        now = time.monotonic()
+        if self.base_command_source == "wireless_joystick":
+            joystick_command = self.wireless_command_provider.update(now)
+            if not joystick_command.valid:
+                logging.error(
+                    "Refusing sport_shadow start: joystick command is invalid (%s)",
+                    joystick_command.reason,
+                )
+                return
+            if not self.wireless_command_provider.axes_centered():
+                logging.error(
+                    "Refusing sport_shadow start until all joystick axes are centered"
+                )
+                return
+        if not self.safety_state.arm():
+            logging.error(
+                "Refusing sport_shadow start from safety state %s",
+                self.safety_state.state.value,
+            )
+            return
+        try:
+            if not self.publish_bounded_sport_stop_sequence(count=3):
+                self.trigger_safety_stop(
+                    "sport_shadow arbitration setup failed: StopMove was not published"
+                )
+                return
+            self.disable_unitree_joystick_for_shadow()
+        except Exception as exc:
+            self.trigger_safety_stop(f"sport_shadow arbitration setup failed: {exc}")
+            return
+        if not self.safety_state.activate_shadow():
+            self.trigger_safety_stop("invalid safety transition into SHADOW_ACTIVE")
+            return
+
+        self.align_to_policy_active = False
+        self.pose_test_active = False
+        self.policy_handover_leg_start = self.interface_to_policy_leg_order(
+            self.quadruped_q
+        ).copy()
+        self.fixed_commands[:] = self.policy_takeover_commands
+        self.command_safety_filter.reset(
+            tuple(self.policy_takeover_commands),
+            now=now,
+        )
+        self.policy_command_start = self.policy_takeover_commands.copy()
+        self.policy_command_target = self.policy_takeover_commands.copy()
+        self.policy_command_ramp_start_time = now
+        self.policy_motion_started = True
+        self.prev_action[:] = 0.0
+        self.reset_sim2sim_action_state()
+        self.last_policy_diag_log_time = -1.0
+        self.last_policy_block_log_time = -1.0
+        self.last_startup_action_limit_log_time = -1.0
+        self.start_policy = True
+        self.start_policy_time = now
+        self.set_policy_command_target(
+            self.policy_move_commands,
+            "sport_shadow_start",
+            self.policy_command_ramp_duration,
+        )
+        self.policy_ctrl_iter = 0
+        logging.info(
+            "sport_shadow active | policy_inference=true policy_executed=false "
+            "actual_actuator=unitree_sport_mode height_scan=zero"
+        )
+
     def is_low_level_control_safe(self, now: Optional[float] = None) -> bool:
         stamp = time.monotonic() if now is None else float(now)
         if not self.sport_state_seen:
@@ -1944,6 +2194,14 @@ class WBCNodeLeg12ArmPassthrough(Node):
                 % (age, self.sport_state_watchdog_sec)
             )
             return False
+        if self.sport_error_code != 0:
+            logging.error(
+                "Refusing leg control because sport state reports error_code=%d",
+                self.sport_error_code,
+            )
+            return False
+        if self.is_sport_shadow:
+            return True
         if self.sport_mode != SPORT_MODE_IDLE or self.sport_progress > 0.0:
             logging.error(
                 "Refusing low-level rollout while sport_mode is still active: mode=%d progress=%.3f. "
@@ -2003,6 +2261,12 @@ class WBCNodeLeg12ArmPassthrough(Node):
     def update_wireless_joystick_policy_command(self):
         now = time.monotonic()
         raw_command = self.wireless_command_provider.update(now)
+        if self.is_sport_shadow and not raw_command.valid:
+            self.trigger_safety_stop(
+                "sport_shadow joystick command invalid: %s"
+                % (raw_command.reason or "unknown")
+            )
+            return
         gate = BaseCommandGate(
             standup_done=self.ready_to_start_policy,
             policy_running=self.start_policy,
@@ -2728,6 +2992,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
             SafetyState.ALIGNING,
             SafetyState.ARMED,
             SafetyState.RL_ACTIVE,
+            SafetyState.SHADOW_ACTIVE,
         }:
             return True
         obs = self.arm_observation_cache.get(time.monotonic() if now is None else now)
@@ -2879,7 +3144,10 @@ class WBCNodeLeg12ArmPassthrough(Node):
             elif self.uses_pose_test:
                 self.start_pose_test()
             elif self.ready_to_start_policy:
-                self.start_policy_alignment()
+                if self.is_sport_shadow:
+                    self.start_shadow_policy()
+                else:
+                    self.start_policy_alignment()
             elif self.uses_unitree_standup and self.awaiting_unitree_stand:
                 elapsed = time.monotonic() - self.unitree_stand_request_time
                 remaining = max(self.unitree_stand_min_wait - elapsed, 0.0)
@@ -3139,6 +3407,11 @@ class WBCNodeLeg12ArmPassthrough(Node):
         return True
 
     def motor_timer_callback(self):
+        if self.is_sport_shadow:
+            return
+        if self.motor_pub is None or self.final_command_safety is None:
+            self.trigger_safety_stop("lowcmd backend is missing its publisher or safety gate")
+            return
         if not self.safety_state.allows_motion_output():
             return
         if not self.low_level_control_active():
@@ -3234,7 +3507,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
 
     def control_phase_label(self) -> str:
         if self.start_policy:
-            return "policy"
+            return "sport_shadow" if self.is_sport_shadow else "policy"
         if self.align_to_policy_active:
             return "alignment"
         if self.pose_test_active:
@@ -3321,7 +3594,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.clear_all_motion_flags()
         if not first_trigger:
             return
-        self.publish_bounded_passive_sequence()
+        self.stop_leg_backend()
         self.publish_safety_estop(repeat=True)
         if self.arx5_joint_controller is not None and hasattr(
             self.arx5_joint_controller,
@@ -3340,7 +3613,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self._safe_shutdown_complete = True
         self.safety_state.begin_shutdown(reason)
         self.clear_all_motion_flags()
-        self.publish_bounded_passive_sequence()
+        self.stop_leg_backend()
         if self.arx5_joint_controller is not None and hasattr(
             self.arx5_joint_controller, "set_to_damping"
         ):
@@ -3674,6 +3947,36 @@ class WBCNodeLeg12ArmPassthrough(Node):
             > self.policy_dt * self.policy_ctrl_iter - self.policy_dt_slack
         ):
             self.update_policy_commands()
+            if not self.start_policy or not self.safety_state.allows_motion_output():
+                return
+            policy_input = self.obs.copy()
+            sport_command = None
+            if self.is_sport_shadow:
+                try:
+                    sport_command = np.asarray(
+                        validate_sport_command(
+                            self.fixed_commands,
+                            self.sport_command_limits,
+                        ),
+                        dtype=np.float64,
+                    )
+                except ValueError as exc:
+                    self.trigger_safety_stop(str(exc))
+                    return
+                self.fixed_commands[:] = sport_command
+                scaled_sport_command = sport_command * self.commands_scale
+                if np.any(np.abs(scaled_sport_command) > self.clip_obs):
+                    self.trigger_safety_stop(
+                        "sport_shadow scaled command exceeds the policy observation clip"
+                    )
+                    return
+                policy_input[9:12] = scaled_sport_command
+                height_start, height_end = self.height_scan_slice
+                if np.any(policy_input[height_start:height_end] != 0.0):
+                    self.trigger_safety_stop(
+                        "sport_shadow flat policy received a non-zero height scan"
+                    )
+                    return
             policy_elapsed = time.monotonic() - self.start_policy_time
             handover_ratio = max(
                 min(policy_elapsed / self.policy_handover_duration, 1.0), 0.0
@@ -3686,10 +3989,11 @@ class WBCNodeLeg12ArmPassthrough(Node):
                 base_kd = self.manual_takeover_kd
             blended_kp = _blend_arrays(base_kp, self.deploy_policy_kp, handover_ratio)
             blended_kd = _blend_arrays(base_kd, self.deploy_policy_kd, handover_ratio)
-            self.set_gains(kp=blended_kp, kd=blended_kd)
+            if not self.is_sport_shadow:
+                self.set_gains(kp=blended_kp, kd=blended_kd)
             try:
                 inference_start = time.monotonic()
-                raw_action = self.run_policy(self.obs)
+                raw_action = self.run_policy(policy_input)
                 inference_elapsed = time.monotonic() - inference_start
                 if inference_elapsed > self.policy_dt:
                     raise RuntimeSafetyFault(
@@ -3732,14 +4036,58 @@ class WBCNodeLeg12ArmPassthrough(Node):
             )
             wbc_action[:12] = commanded_leg_q
             wbc_action[12:] = self.arm_passthrough_pose.copy()
+            if self.is_sport_shadow:
+                self.latest_lowcmd_leg_q_policy = commanded_leg_q.copy()
+                self.latest_lowcmd_leg_q_hw = self.policy_to_interface_leg_order(
+                    commanded_leg_q
+                )
+                self.last_leg_command_generated_at = time.monotonic()
             current_leg_q = self.interface_to_policy_leg_order(self.quadruped_q).copy()
             current_leg_dq = self.interface_to_policy_leg_order(self.quadruped_dq).copy()
             leg_q_error = commanded_leg_q - current_leg_q
+            sport_request_id = None
+            sport_request_published_at = None
+            if self.is_sport_shadow:
+                try:
+                    sport_request_id = self.publish_sport_move(sport_command)
+                    sport_request_published_at = time.monotonic()
+                except Exception as exc:
+                    self.trigger_safety_stop(str(exc))
+                    return
             if (
                 self.last_policy_diag_log_time < 0.0
                 or (time.monotonic() - self.last_policy_diag_log_time)
                 >= self.policy_diag_log_interval
             ):
+                if self.is_sport_shadow:
+                    logging.info(
+                        "Shadow execution diag | leg_backend=sport_shadow "
+                        "policy_inference=true policy_executed=false "
+                        "tracking_semantics=counterfactual_not_joint_tracking "
+                        "actual_actuator=unitree_sport_mode requested_base_command=%s "
+                        "sport_request_command=%s sport_request_id=%d "
+                        "sport_mode=%d sport_error_code=%d "
+                        "sport_velocity=%s sport_yaw_speed=%.3f",
+                        np.array2string(
+                            sport_command,
+                            precision=3,
+                            floatmode="fixed",
+                        ),
+                        np.array2string(
+                            sport_command,
+                            precision=3,
+                            floatmode="fixed",
+                        ),
+                        sport_request_id,
+                        self.sport_mode,
+                        self.sport_error_code,
+                        np.array2string(
+                            self.sport_velocity,
+                            precision=3,
+                            floatmode="fixed",
+                        ),
+                        self.sport_yaw_speed,
+                    )
                 logging.info(
                     "Policy diag | handover=%.3f est_lin_vel=%s commands=%s raw_action=%s clipped_action=%s startup_limited_action=%s startup_limiter_active=%s startup_abs_clipped=%s startup_delta_clipped=%s timed_action=%s applied_action=%s startup_kick=%s target_leg_q=%s commanded_leg_q=%s current_leg_q=%s leg_q_error=%s current_leg_dq=%s current_tau_est=%s motor_mode=%s lowcmd_leg_q_policy=%s lowcmd_leg_q_hw=%s lowcmd_kp=%s lowcmd_kd=%s arm_target=%s arm_current=%s arm_smoothed_cmd=%s sim2sim_delay=%d hold_prob=%.3f foot_force=%s"
                     % (
@@ -3871,15 +4219,16 @@ class WBCNodeLeg12ArmPassthrough(Node):
                 self.last_policy_diag_log_time = time.monotonic()
             self.prev_action[:12] = leg_action
             self.prev_action[12:] = 0.0
-            self.set_motor_position(wbc_action, self.gripper_pos_cmd)
+            if not self.is_sport_shadow:
+                self.set_motor_position(wbc_action, self.gripper_pos_cmd)
             self.prev_policy_time = time.monotonic()
             self.prev_motor_time = time.monotonic()
             self.prev_action_tick_s = self.prev_obs_tick_s
             self.policy_ctrl_iter += 1
 
-            if self.debug_log:
+            if self.debug_log or self.is_sport_shadow:
                 action_dict = {
-                    "policy_input": self.obs.reshape(1, -1).copy(),
+                    "policy_input": policy_input.reshape(1, -1).copy(),
                     "raw_action": raw_action.copy(),
                     "clipped_action": clipped_action.copy(),
                     "startup_limited_action": startup_limited_action.copy(),
@@ -3889,6 +4238,41 @@ class WBCNodeLeg12ArmPassthrough(Node):
                     "timed_action": timed_action.copy(),
                     "applied_action": leg_action.copy(),
                     "reordered_wbc_action": wbc_action,
+                    "shadow_policy_raw_action": (
+                        raw_action.copy() if self.is_sport_shadow else None
+                    ),
+                    "shadow_policy_limited_action": (
+                        leg_action.copy() if self.is_sport_shadow else None
+                    ),
+                    "shadow_counterfactual_joint_target": (
+                        commanded_leg_q.copy() if self.is_sport_shadow else None
+                    ),
+                    "leg_backend": self.leg_control_backend,
+                    "policy_executed": not self.is_sport_shadow,
+                    "joint_delta_semantics": (
+                        "counterfactual_not_joint_tracking"
+                        if self.is_sport_shadow
+                        else "lowcmd_joint_tracking"
+                    ),
+                    "actual_actuator": (
+                        "unitree_sport_mode" if self.is_sport_shadow else "go2_lowcmd"
+                    ),
+                    "requested_base_command": self.fixed_commands.copy(),
+                    "sport_request_command": (
+                        None if sport_command is None else sport_command.copy()
+                    ),
+                    "sport_request_id": sport_request_id,
+                    "sport_request_published_at": sport_request_published_at,
+                    "actual_joint_position": current_leg_q.copy(),
+                    "actual_joint_velocity": current_leg_dq.copy(),
+                    "actual_joint_torque": self.interface_to_policy_leg_order(
+                        self.quadruped_tau
+                    ).copy(),
+                    "sport_mode": self.sport_mode,
+                    "sport_error_code": self.sport_error_code,
+                    "sport_velocity": self.sport_velocity.copy(),
+                    "sport_yaw_speed": self.sport_yaw_speed,
+                    "time_monotonic": time.monotonic(),
                 }
                 self.action_history_log.append(action_dict)
             # logging.info(f"Finish policy_timer_callback {time.monotonic() - cb_start_time:.04f}s")

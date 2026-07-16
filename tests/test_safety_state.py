@@ -56,6 +56,16 @@ def test_stop_requires_new_alignment_and_arm() -> None:
     assert not machine.activate_policy()
 
 
+def test_shadow_activation_is_explicit_and_allows_motion_output() -> None:
+    machine = SafetyStateMachine()
+    machine.begin_preflight()
+    machine.preflight_passed()
+    assert machine.arm()
+    assert machine.activate_shadow()
+    assert machine.state == SafetyState.SHADOW_ACTIVE
+    assert machine.allows_motion_output()
+
+
 @pytest.mark.parametrize("state", list(SafetyState))
 def test_estop_has_priority_from_every_state(state: SafetyState) -> None:
     machine = SafetyStateMachine()

@@ -11,6 +11,7 @@ class SafetyState(str, Enum):
     ALIGNING = "ALIGNING"
     ARMED = "ARMED"
     RL_ACTIVE = "RL_ACTIVE"
+    SHADOW_ACTIVE = "SHADOW_ACTIVE"
     STOPPING = "STOPPING"
     ESTOPPED = "ESTOPPED"
     FAULT = "FAULT"
@@ -18,7 +19,12 @@ class SafetyState(str, Enum):
 
 
 MOTION_STATES = frozenset(
-    {SafetyState.ALIGNING, SafetyState.ARMED, SafetyState.RL_ACTIVE}
+    {
+        SafetyState.ALIGNING,
+        SafetyState.ARMED,
+        SafetyState.RL_ACTIVE,
+        SafetyState.SHADOW_ACTIVE,
+    }
 )
 
 
@@ -106,6 +112,14 @@ class SafetyStateMachine:
         self._state = SafetyState.RL_ACTIVE
         self._output_enabled = True
         self._reason = "policy active"
+        return True
+
+    def activate_shadow(self) -> bool:
+        if self._state != SafetyState.ARMED or not self._may_operator_enable():
+            return False
+        self._state = SafetyState.SHADOW_ACTIVE
+        self._output_enabled = True
+        self._reason = "sport shadow active"
         return True
 
     def request_stop(self, reason: str) -> bool:
