@@ -1,5 +1,17 @@
 # gx-real 真机开发文档
 
+> **2026-07-16 入口变更：** 当前生产主线已经拆分为互斥的
+> `FlatDeployment` 和 `RoughDeployment`，X5 必须使用策略固定姿态的
+> `x5_fixed_hold` owner。旧的 `scripts/run_leg12_real.sh`、
+> `external_spacemouse` 和行走中 SpaceMouse 控臂流程均已硬阻断。
+> 请以 [最新上机使用指南](docs/上机使用指南.md) 为唯一操作依据；本文后续旧链路说明
+> 仅保留作历史背景。
+>
+> 当前 Flat/Rough manifest 均为 `UNRELEASED`，Rough perception contract
+> 仍为 `UNVERIFIED`。这表示仓库有意拒绝真实 LowCmd/CAN 输出，不是需要绕过的错误。
+> Rough LiDAR 生产后端已固定为 `GridMap/elevation`；Unitree HeightMap 仅诊断。
+> 依据见 [LiDAR / height-map 后端决策](docs/lidar_height_backend_decision_2026-07-16.md)。
+
 这份文档面向第一次接触本仓库的人，目标是把 `real` 目录下分散的上机、网络、硬件和策略替换说明整理成一条完整开发路径。默认部署环境是机器狗机身上的 Jetson Orin NX 开发板，路径按 `~/gx-real` 书写。当前主线不是原始 UMI-on-Legs 的完整末端轨迹控制链，而是 `Go2 + X5/ARX5` 真机上的分离控制链：WBC 主节点只写 Go2 腿部，独立 SpaceMouse Arm 节点独占 X5/ARX5。
 
 ## 1. 当前系统做什么
@@ -34,6 +46,14 @@ scripts/run_spacemouse_arm.sh         # 推荐 X5 控制入口，另开终端
 
 一句话理解：这个仓库保留了 UMI-on-Legs 的真机通信、状态读取、手柄流程、起身流程和急停框架，但把原来的 18 维 whole-body actor 换成了当前的 12 维腿部 ONNX policy；机械臂写控制已经从 WBC 主节点剥离，WBC 只消费外部 arm state/target。
 
+最近真机部署后的理论修正：
+
+- 当前主线是两个硬件写控制节点，而不是单个 18 维 whole-body 节点：WBC 只写 Go2，SpaceMouse Arm 节点只写 X5。
+- Go2 手柄 `/wirelesscontroller` 的摇杆只生成底盘速度；机械臂动作只来自 SpaceMouse。
+- `scripts/prepare_real_run.sh` 负责证明前置环境可运行；两个 runtime 命令才是调参层。
+- ROS2/DDS 是真机通信前提，runtime shell 必须显示 `rmw=rmw_cyclonedds_cpp` 和正确的 `cyclonedds_iface`。
+- `can0 UP` 只说明 SocketCAN 存在；`None of the motors are initialized` 说明 ARX5 SDK 没解析到可用电机状态，需继续查当前 CAN 回包、电源/急停/接线或 `--model` 配置。
+
 ## 2. 目录结构
 
 ```text
@@ -51,6 +71,7 @@ real/
     setup_env.sh                    # 设置 GX_REAL_ROOT、PYTHONPATH、ROS2、SDK 动态库路径
     check_env.sh                    # 调用 check_env.py 做环境预检
     check_env.py                    # 检查 policy、env.yaml、CRC、ROS2 type support 和 Python import
+    prepare_real_run.sh             # 封装真机前置构建、接口检查、CAN 和 sport mode 处理
     setup_arx_can.sh                # 配置 ARX5 SocketCAN can0
     disable_sports_mode_go2.sh      # 编译/调用 Unitree SDK 工具关闭 sport mode
     run_leg12_real.sh               # 当前推荐 Go2/WBC 启动入口
@@ -213,14 +234,26 @@ sudo systemctl start spacenavd.service
 
 ## 5. 每次上机前检查
 
-进入 Jetson 上的仓库并加载环境：
+推荐把所有可重复的前置构建和接口检查交给脚本：
 
 ```bash
 conda deactivate
 cd ~/gx-real
-git pull
-source scripts/setup_env.sh
+scripts/prepare_real_run.sh --network-iface eth0 --can-dev auto --can-if can0 --spacemouse
 ```
+
+这个脚本会顺序完成：
+
+- 编译/刷新 `unitree_ros2/cyclonedds_ws`、`real-wbc/ros2` 的 `robot_state` 消息和 `unitree_sdk2/build/disable_sports_mode_go2`。
+- 加载 `scripts/setup_env.sh` 并执行 `scripts/check_env.sh --spacemouse`。
+- 检查 `spacenavd`、互斥的 WBC/X5 写控制进程、`can0`、Go2 ROS2 topic。
+- 调用 `scripts/disable_sports_mode_go2.sh eth0` 关闭 sport mode。
+
+如果连接 Go2 的网卡不是 `eth0`，只改 `--network-iface`；如果 USB-CAN 不能自动识别，只改 `--can-dev`。下面的单项命令主要用于失败后的定位。
+
+如果要排查 Go2 手柄摇杆轴输入，在前置脚本后面加 `--check-joystick-motion`，并按提示在采样窗口内拨动摇杆；脚本会检查 `/wirelesscontroller` 的 `lx/ly/rx/ry` 是否真的变化。
+
+如果需要同步代码，先手动执行 `git pull`，再运行前置脚本；脚本本身不会隐式修改 Git 工作区。
 
 基础环境预检：
 
@@ -540,6 +573,7 @@ Shell 脚本语法检查：
 ```bash
 bash -n scripts/setup_env.sh
 bash -n scripts/check_env.sh
+bash -n scripts/prepare_real_run.sh
 bash -n scripts/setup_arx_can.sh
 bash -n scripts/disable_sports_mode_go2.sh
 bash -n scripts/run_leg12_real.sh

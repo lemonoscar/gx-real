@@ -9,3 +9,6 @@ float64 gripper_vel
 
 bool valid
 string source
+string session_id
+uint64 sequence
+float64 monotonic_timestamp

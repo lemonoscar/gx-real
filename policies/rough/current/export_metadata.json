@@ -1,0 +1,26 @@
+{
+  "activation": "elu",
+  "actor_hidden_dims": [
+    512,
+    256,
+    128
+  ],
+  "agent_config": "agent.yaml",
+  "agent_config_sha256": "a8c47b8c8595f6c355ae59eeb4a22f8099b7d71d23c06f2c70ab3868ae664cb9",
+  "checkpoint": "model_29500.pt",
+  "checkpoint_iteration": 29500,
+  "checkpoint_sha256": "6b257727fafb8c84d7b449bb389a61d24aff4cdaaa853ad83fe9627a2db77cfd",
+  "input_dim": 260,
+  "observation_normalizer": "identity",
+  "onnx_opset": 17,
+  "onnx_parity_max_abs_error": 2.6702880859375e-05,
+  "output_dim": 12,
+  "policy_onnx_sha256": "04b5b2d631b12dcb762c7e63242ec86499738acc7d5c9684ed4a614dc60e6970",
+  "policy_reference_sha256": "427423e41d73b89a51564f18250f38325c6c99aba3e2fbcda4e6474644a6088a",
+  "policy_torchscript_sha256": "a441d2b626f50d218fb65352023125b5208a90dc5eca9a18b8a797c6736406b7",
+  "reference_parity_max_abs_error": 5.364418029785156e-07,
+  "reference_sample_count": 1,
+  "schema_version": 1,
+  "source_reference": "height_scan_reference.npz",
+  "source_reference_sha256": "ae080f65fd278f6ae1e36485aa22eadc3702515aac2372352343f64a680db260"
+}

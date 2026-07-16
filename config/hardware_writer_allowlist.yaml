@@ -1,0 +1,14 @@
+schema_version: 1
+allowed_paths:
+  real-wbc/modules/wbc_node_leg12_arm_passthrough.py: guarded_production_writer
+  real-wbc/modules/spacemouse_arm_node.py: guarded_production_writer
+  real-wbc/modules/wbc_node.py: blocked_legacy_writer
+  real-wbc/scripts/run_wbc.py: blocked_legacy_entry
+  scripts/run_arm_spacemouse_test.sh: blocked_legacy_entry
+allowed_prefixes:
+  unitree_ros2/example/: vendor_examples_excluded_from_production
+  arx5-sdk/examples/: vendor_examples_excluded_from_production
+  arx5-sdk/python/examples/: vendor_examples_excluded_from_production
+  arx5-sdk/src/: vendor_library_internal
+  arx5-sdk/python/communication/: vendor_library_internal
+  tests/: mock_only_no_hardware

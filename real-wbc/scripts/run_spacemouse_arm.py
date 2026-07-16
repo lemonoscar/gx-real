@@ -25,13 +25,16 @@ def parse_bool(value: str) -> bool:
     raise argparse.ArgumentTypeError(f"expected boolean, got {value!r}")
 
 
-def parse_args():
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--model", default="X5")
+    parser.add_argument("--model", choices=["X5"], default="X5")
+    parser.add_argument("--artifact-manifest", default="config/artifact_manifest.yaml")
     parser.add_argument("--can-interface", default="can0")
     parser.add_argument("--safety-topic", default="/safety/estop")
+    parser.add_argument("--safety-heartbeat-topic", default="/safety/heartbeat")
+    parser.add_argument("--safety-lease-timeout-sec", type=float, default=0.5)
     parser.add_argument("--ctrl-freq", type=float, default=50.0)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--allow-missing-can", action="store_true")
@@ -52,6 +55,7 @@ def parse_args():
     parser.add_argument("--sm-rot-speed", type=float, default=0.15)
     parser.add_argument("--sm-deadzone", type=float, default=0.10)
     parser.add_argument("--sm-watchdog-sec", type=float, default=0.25)
+    parser.add_argument("--feedback-timeout-sec", type=float, default=0.25)
     parser.add_argument("--sm-max-value", type=float, default=500.0)
     parser.add_argument("--gripper-speed", type=float, default=0.03)
     parser.add_argument("--arm-command-frame", choices=["base", "world", "arm_base"], default="base")
@@ -60,7 +64,11 @@ def parse_args():
         default=os.environ.get("GX_REAL_LOG_DIR", DEFAULT_LOG_DIR),
         help="Directory used to store one timestamped SpaceMouse Arm log folder per run.",
     )
-    return parser.parse_args()
+    return parser
+
+
+def parse_args():
+    return build_parser().parse_args()
 
 
 def configure_logging(log_root: str) -> str:
@@ -85,6 +93,17 @@ def main() -> int:
     args = parse_args()
     configure_logging(args.logging_dir)
 
+    from pathlib import Path
+    from modules.artifact_manifest import validate_repository_manifest
+
+    manifest_path = args.artifact_manifest
+    if not os.path.isabs(manifest_path):
+        manifest_path = os.path.join(GX_REAL_ROOT, manifest_path)
+    verified_hashes = validate_repository_manifest(
+        manifest_path, root=Path(GX_REAL_ROOT), expected_x5_model=args.model
+    )
+    logging.info("Verified production artifact hashes: %s", verified_hashes)
+
     import rclpy
 
     mapping = SpaceMouseMapping(
@@ -103,6 +122,8 @@ def main() -> int:
         arm_command_frame=args.arm_command_frame,
         can_interface=args.can_interface,
         safety_topic=args.safety_topic,
+        safety_heartbeat_topic=args.safety_heartbeat_topic,
+        safety_lease_timeout_sec=args.safety_lease_timeout_sec,
         model=args.model,
         ctrl_freq=args.ctrl_freq,
         sm_use_raw_frame=args.sm_use_raw_frame,
@@ -111,6 +132,7 @@ def main() -> int:
         max_value=args.sm_max_value,
         dry_run=args.dry_run,
         require_can=not args.allow_missing_can,
+        feedback_timeout_sec=args.feedback_timeout_sec,
     )
     try:
         rclpy.spin(node.node)

@@ -78,7 +78,6 @@ if __name__ == "__main__":
     logging.basicConfig(
         level="INFO", format=FORMAT, datefmt="[%X]", handlers=[RichHandler()]
     )
-    rclpy.init(args=None)
     parser = argparse.ArgumentParser()
     parser.add_argument("--ckpt_path", type=str, required=True)
     parser.add_argument("--pickle_path", type=str, required=True)
@@ -87,7 +86,22 @@ if __name__ == "__main__":
     parser.add_argument("--fix_at_init_pose", action="store_true")
     parser.add_argument("--use_realtime_target", action="store_true")
     parser.add_argument("--pose_estimator", type=str, default="iphone")
+    parser.add_argument(
+        "--offline-legacy-only",
+        action="store_true",
+        help="Required acknowledgement for offline analysis of this blocked legacy writer.",
+    )
     args = parser.parse_args()
+    if (
+        not args.offline_legacy_only
+        or os.environ.get("GX_REAL_HARDWARE_MODE", "production") != "offline"
+    ):
+        raise SystemExit(
+            "BLOCKED: legacy eef_traj/18D whole-body writer is prohibited in production. "
+            "Use run_wbc_leg12.py; offline analysis requires --offline-legacy-only and "
+            "GX_REAL_HARDWARE_MODE=offline."
+        )
+    rclpy.init(args=None)
     wbc_node = WBCNode(**vars(args))
     logging.info("Deploy node ready")
     lowstate = wbc_node.arx5_joint_controller.get_state()

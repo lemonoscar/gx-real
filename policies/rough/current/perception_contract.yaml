@@ -1,0 +1,52 @@
+schema_version: 1
+verification_status: UNVERIFIED
+policy_kind: rough
+production_source: grid_map
+topics:
+  lidar_points_deskewed: /lidar/points_deskewed
+  lidar_imu: /lidar/imu_raw
+  elevation_map: /terrain/elevation_map
+  robot_pose: /localization/pose
+grid_map:
+  message_type: grid_map_msgs/msg/GridMap
+  layer: elevation
+  matrix_storage: column_major
+  circular_buffer_indices: required
+unitree_height_map:
+  role: diagnostic_ab_only
+  message_type: unitree_go/msg/HeightMap
+  may_grant_motion_permission: false
+frames:
+  world: odom
+  robot: base_link
+  sampling: base_yaw_aligned
+  lidar: lidar
+timing:
+  require_source_stamp: true
+  max_message_age_sec: 0.25
+  max_pose_map_skew_sec: 0.03
+  required_consecutive_valid_frames: 5
+  max_last_valid_age_sec: 0.10
+coverage:
+  min_global_valid_ratio: 0.60
+  min_critical_valid_ratio: 0.95
+  max_critical_sentinel_cells: 0
+fallback:
+  may_feed_zero_to_policy: false
+  may_feed_fallback_to_policy: false
+  action: revoke_motion_permission_and_latch_fault
+calibration:
+  lidar_model: UNSET
+  lidar_firmware: UNSET
+  lidar_to_base_extrinsic: UNSET
+  self_filter: UNSET
+mapping:
+  implementation: UNSET
+  configuration_hash: UNSET
+evidence: >-
+  UNVERIFIED until the selected LiDAR, rigid mount, 6DoF extrinsic,
+  Point-LIO/elevation-map configuration, latency distribution, coverage and
+  hardware perception-parity tests are recorded and independently reviewed.
+  The Unitree HeightMap topic remains diagnostic-only because its public IDL
+  does not define the data-axis, origin-cell or scaling semantics required to
+  prove Go2-X5-lab input parity.

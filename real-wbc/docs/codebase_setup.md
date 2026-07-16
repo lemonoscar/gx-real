@@ -7,9 +7,9 @@
 当前仓库面向 `Go2 + X5/ARX5` 真机部署：
 
 - Go2 腿部：12 维 RL policy 输出目标关节位置。
-- X5 机械臂：默认保持指定关节姿态，运行中可通过手柄切换目标。
+- X5 机械臂：由独立 SpaceMouse Arm 节点控制；WBC 只消费 `/arm/state` 和 `/arm/target_state`。
 - Go2 通信：ROS2 `lowstate/lowcmd`。
-- X5 通信：SocketCAN `can0` + `arx5_interface`。
+- X5 通信：SocketCAN `can0` + `arx5_interface`，默认不由 WBC 打开。
 - policy 文件：`policies/policy.onnx`。
 - policy 配置：`policies/env.yaml`。
 
@@ -20,6 +20,10 @@ scripts/run_leg12_real.sh
   -> scripts/setup_env.sh
   -> real-wbc/scripts/run_wbc_leg12.py
   -> real-wbc/modules/wbc_node_leg12_arm_passthrough.py
+
+scripts/run_spacemouse_arm.sh
+  -> real-wbc/scripts/run_spacemouse_arm.py
+  -> real-wbc/modules/spacemouse_arm_node.py
 ```
 
 ## 2. 目录说明
@@ -127,12 +131,18 @@ scripts/run_leg12_real.sh \
   --cmd-vx 0.5 \
   --cmd-vy 0.0 \
   --cmd-yaw 0.0 \
+  --base-command-source fixed \
+  --arm-control-owner external_spacemouse \
   --gripper-cmd 0.0 \
   --leg-kp 200 \
   --leg-kd 10 \
-  --arm_pose 0.0 0.5 0.3 0.0 0.0 0.0 \
-  --arm-reset-pose 0.0 0.5 0.3 0.0 0.0 0.0 \
-  --button-arm-pose 0.4 2.8 1.5 1.3 0.4 0.4
+  --arm_pose 0.0 0.5 0.3 0.0 0.0 0.0
+```
+
+X5/ARX5 默认由另一个终端运行：
+
+```bash
+scripts/run_spacemouse_arm.sh --can-interface can0 --sm-use-raw-frame true
 ```
 
 启动后手柄流程：
@@ -146,11 +156,10 @@ scripts/run_leg12_real.sh \
 
 - `L1`：紧急停止。
 - `R1`：internal 起身。
-- `L2`：起身结束后启动 policy；rollout 中再次按下可恢复配置的速度命令。
-- `A`：机械臂去 `--button-arm-pose`。
-- `X`：机械臂回 `--arm-reset-pose`。
-- `Y`：底盘 command 平滑切到 `0 0 0`，policy 保持运行。
+- `L2`：起身结束后启动 policy；fixed 模式 rollout 中再次按下可恢复配置的速度命令。
+- `Y`：底盘 command 平滑切到 `0 0 0`，policy 保持运行；joystick 模式会 inhibit 到摇杆回中。
 - `R2`：停止 policy 并保持最后姿态。
+- `A/B/X/↑/↓`：默认 no-op，不再控制机械臂。
 
 ## 6. 关键配置
 
@@ -185,10 +194,10 @@ scripts/run_leg12_real.sh \
 
 默认行为：
 
-- ARX5 初始化成功：正常下发 arm pose。
-- ARX5 初始化失败：打印错误并继续 body-only，`A/X` 机械臂按键被忽略。
-- 需要机械臂不在线就中止：加 `--require-arm`。
-- 明确不启用机械臂：加 `--disable-arm`。
+- `--arm-control-owner external_spacemouse`：WBC 不初始化 ARX5 写控制器，不打开 `can0`，只订阅 `/arm/state` 和 `/arm/target_state`。
+- `--arm_pose` / `--gripper-cmd` 只作为 observation fallback，不下发给 X5。
+- 需要进入 RL 前强制收到 fresh arm state：加 `--require-arm-state-for-rl`。
+- legacy 回退才使用 `--arm-control-owner wbc`；此时 WBC 会重新打开 ARX5 写控制器。
 
 如果看到：
 
@@ -208,4 +217,4 @@ None of the motors are initialized. Please check the connection or power of the 
 - `real-wbc/ros2/robot_state`
 - SpaceMouse / EEF trajectory / iPhone / MoCap 任务空间轨迹链路
 
-这些不是当前 `leg12 + arm passthrough` 主流程。除非明确要恢复原始 whole-body trajectory tracking，不建议在当前上机流程里使用。
+这些不是当前 `leg12 + external_spacemouse arm` 主流程。除非明确要恢复原始 whole-body trajectory tracking，不建议在当前上机流程里使用。

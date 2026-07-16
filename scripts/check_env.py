@@ -14,6 +14,11 @@ def parse_args():
         action="store_true",
         help="Also check optional SpaceMouse teleop Python dependencies.",
     )
+    parser.add_argument(
+        "--rough",
+        action="store_true",
+        help="Also require GridMap and pose message type support for rough deployment.",
+    )
     return parser.parse_args()
 
 
@@ -71,6 +76,12 @@ def main() -> int:
         TeleopEEFDelta.__class__.__import_type_support__()
         TeleopGripperCommand.__class__.__import_type_support__()
         TeleopMode.__class__.__import_type_support__()
+        if args.rough:
+            from geometry_msgs.msg import PoseStamped  # noqa: F401
+            from grid_map_msgs.msg import GridMap  # noqa: F401
+
+            PoseStamped.__class__.__import_type_support__()
+            GridMap.__class__.__import_type_support__()
         if args.spacemouse:
             if shutil.which("spacenavd") is None:
                 raise ImportError("spacenavd command not found")
@@ -110,6 +121,8 @@ def main() -> int:
     print("[gx-real] python imports OK")
     if args.spacemouse:
         print("[gx-real] spacemouse imports OK")
+    if args.rough:
+        print("[gx-real] rough GridMap imports OK")
     print(f"[gx-real] policy={policy_path}")
     print(f"[gx-real] policy_env={policy_env_path}")
     return 0

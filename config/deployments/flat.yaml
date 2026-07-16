@@ -1,0 +1,18 @@
+schema_version: 1
+deployment_kind: flat
+policy_default: policies/policy.onnx
+artifact_manifest_default: config/artifact_manifest.yaml
+height_observation:
+  mode: zero_constant
+  dimension: 187
+  slice: [66, 253]
+  create_provider: false
+arm_observation:
+  mode: fixed_hold
+  joint_pose: [0.0, 0.3, 0.5, 0.0, 0.0, 0.0]
+  gripper_target: 0.0
+  required_source: x5_fixed_hold
+  max_tracking_error_rad: 0.10
+leg_reference:
+  offset_mode: legacy_real_calibrated
+  allow_live_ready_pose_calibration: true

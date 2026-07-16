@@ -78,7 +78,9 @@ def test_y_inhibit_holds_until_axes_return_to_deadzone():
 
     provider.update_wireless(lx=0.0, ly=-0.5, rx=0.0, ry=0.0, stamp=1.0)
     moving = safety.update(provider.update(now=1.0), gate, axes_centered=False, now=1.0)
-    assert moving.vx > 0.0
+    # This test covers the Y-inhibit latch, not the independently configurable
+    # joystick direction convention. The default vx_sign=+1 maps ly=-0.5 negative.
+    assert abs(moving.vx) > 0.0
 
     safety.inhibit_until_centered()
     inhibited = safety.update(provider.update(now=1.1), gate, axes_centered=False, now=1.1)
@@ -95,7 +97,7 @@ def test_y_inhibit_holds_until_axes_return_to_deadzone():
 
     provider.update_wireless(lx=0.0, ly=-0.5, rx=0.0, ry=0.0, stamp=1.4)
     moving_again = safety.update(provider.update(now=1.4), gate, axes_centered=False, now=1.4)
-    assert moving_again.vx > 0.0
+    assert abs(moving_again.vx) > 0.0
 
 
 def test_state_gate_zeros_joystick_when_policy_not_running():

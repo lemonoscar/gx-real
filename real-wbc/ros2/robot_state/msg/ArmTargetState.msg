@@ -8,3 +8,6 @@ string command_frame
 string source
 
 bool valid
+string session_id
+uint64 sequence
+float64 monotonic_timestamp

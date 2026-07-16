@@ -239,6 +239,180 @@ def _print_snapshot(msg, pose_msg, contract, sample: dict, args: argparse.Namesp
     )
 
 
+def _relative_height_cm_grid(contract, sample: dict) -> tuple[np.ndarray, float, float]:
+    raw = sample["raw_heights"]
+    rel_cm = np.full((int(contract.height_scan_dim),), np.nan, dtype=np.float32)
+    if raw.size:
+        median = float(np.median(raw))
+        flatness = float(np.percentile(raw, 95) - np.percentile(raw, 5))
+        for index, value in enumerate(sample["relative_source"]):
+            if value is not None:
+                rel_cm[index] = (float(value) - median) * 100.0
+    else:
+        median = float("nan")
+        flatness = float("inf")
+    xs = np.unique(np.round(contract.grid_xy[:, 0], 6))
+    ys = np.unique(np.round(contract.grid_xy[:, 1], 6))
+    return rel_cm.reshape((len(ys), len(xs))), median, flatness
+
+
+def _status_grid(contract, sample: dict) -> np.ndarray:
+    xs = np.unique(np.round(contract.grid_xy[:, 0], 6))
+    ys = np.unique(np.round(contract.grid_xy[:, 1], 6))
+    status = np.zeros((int(contract.height_scan_dim),), dtype=np.int32)
+    for index, mark in enumerate(sample["marks"]):
+        if mark == "#":
+            status[index] = 0
+        elif mark == "F":
+            status[index] = 1
+        elif mark == "X":
+            status[index] = 2
+        else:
+            status[index] = 3
+    return status.reshape((len(ys), len(xs)))
+
+
+def _save_snapshot_npz(path: str, msg, pose_msg, contract, sample: dict, args: argparse.Namespace) -> None:
+    rel_cm_grid, median, flatness = _relative_height_cm_grid(contract, sample)
+    status = _status_grid(contract, sample)
+    diag = sample["diag"]
+    output_dir = os.path.dirname(os.path.abspath(path))
+    os.makedirs(output_dir, exist_ok=True)
+    np.savez_compressed(
+        path,
+        grid_xy=np.asarray(contract.grid_xy, dtype=np.float32),
+        relative_height_cm=rel_cm_grid.astype(np.float32),
+        status=status.astype(np.int32),
+        raw_heights_m=np.asarray(sample["raw_heights"], dtype=np.float32),
+        z_base_values_m=np.asarray(sample["z_base_values"], dtype=np.float32),
+        raw_height_median_m=np.float32(median),
+        raw_flatness_p95_minus_p05_m=np.float32(flatness),
+        pose_xyz=np.asarray(
+            [
+                float(pose_msg.pose.position.x),
+                float(pose_msg.pose.position.y),
+                float(pose_msg.pose.position.z),
+            ],
+            dtype=np.float32,
+        ),
+        yaw=np.float32(sample["yaw"]),
+        map_origin_xy=np.asarray(msg.origin, dtype=np.float32),
+        map_resolution=np.float32(msg.resolution),
+        raw_valid_ratio=np.float32(diag.get("raw_valid_ratio", 0.0)),
+        critical_valid_ratio=np.float32(diag.get("critical_valid_ratio", 0.0)),
+        critical_accepted_ratio=np.float32(diag.get("critical_accepted_ratio", 0.0)),
+        critical_sentinel_cells=np.int32(diag.get("critical_sentinel_cells", 0)),
+        sentinel_cells=np.int32(sample["sentinel_count"]),
+        footprint_sentinel_cells=np.int32(sample["footprint_sentinel_count"]),
+        nonfootprint_sentinel_cells=np.int32(sample["nonfootprint_sentinel_count"]),
+    )
+    print("saved_npz:", path)
+
+
+def _save_snapshot_plot(path: str, msg, pose_msg, contract, sample: dict, args: argparse.Namespace) -> None:
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from matplotlib.colors import ListedColormap, BoundaryNorm
+    except Exception as exc:
+        raise RuntimeError(
+            "matplotlib is required for --save-plot. Install python3-matplotlib on the robot or use --save-npz."
+        ) from exc
+
+    xs = np.unique(np.round(contract.grid_xy[:, 0], 6))
+    ys = np.unique(np.round(contract.grid_xy[:, 1], 6))
+    rel_cm_grid, median, flatness = _relative_height_cm_grid(contract, sample)
+    status = _status_grid(contract, sample)
+    diag = sample["diag"]
+    output_dir = os.path.dirname(os.path.abspath(path))
+    os.makedirs(output_dir, exist_ok=True)
+
+    vlim = float(args.plot_vlim_cm)
+    fig, axes = plt.subplots(1, 2, figsize=(14.0, 5.8), constrained_layout=True)
+    extent = [
+        float(xs[0] - 0.05),
+        float(xs[-1] + 0.05),
+        float(ys[0] - 0.05),
+        float(ys[-1] + 0.05),
+    ]
+
+    masked_rel = np.ma.masked_invalid(rel_cm_grid)
+    heat = axes[0].imshow(
+        masked_rel,
+        origin="lower",
+        extent=extent,
+        cmap="coolwarm",
+        vmin=-vlim,
+        vmax=vlim,
+        interpolation="nearest",
+        aspect="equal",
+    )
+    axes[0].set_title("Relative ground height (cm)")
+    axes[0].set_xlabel("base x forward (m)")
+    axes[0].set_ylabel("base y left (m)")
+    fig.colorbar(heat, ax=axes[0], label="cm vs median")
+
+    status_cmap = ListedColormap(["#d9f0d3", "#fdae61", "#d7191c", "#7f7f7f"])
+    status_norm = BoundaryNorm([-0.5, 0.5, 1.5, 2.5, 3.5], status_cmap.N)
+    mask_img = axes[1].imshow(
+        status,
+        origin="lower",
+        extent=extent,
+        cmap=status_cmap,
+        norm=status_norm,
+        interpolation="nearest",
+        aspect="equal",
+    )
+    axes[1].set_title("Coverage mask")
+    axes[1].set_xlabel("base x forward (m)")
+    axes[1].set_ylabel("base y left (m)")
+    cbar = fig.colorbar(mask_img, ax=axes[1], ticks=[0, 1, 2, 3])
+    cbar.ax.set_yticklabels(["valid", "footprint unknown", "unknown", "outside"])
+
+    for row_i, y in enumerate(ys):
+        for col_i, x in enumerate(xs):
+            if np.isfinite(rel_cm_grid[row_i, col_i]):
+                label = "%+d" % int(round(float(rel_cm_grid[row_i, col_i])))
+                color = "black" if abs(float(rel_cm_grid[row_i, col_i])) < (0.7 * vlim) else "white"
+                axes[0].text(float(x), float(y), label, ha="center", va="center", fontsize=7, color=color)
+            mark = sample["marks"].reshape((len(ys), len(xs)))[row_i, col_i]
+            axes[1].text(float(x), float(y), str(mark), ha="center", va="center", fontsize=8, color="black")
+
+    raw_valid = int(sample["raw_heights"].size)
+    total = int(contract.height_scan_dim)
+    fig.suptitle(
+        "Height-map snapshot noise evidence | "
+        f"ok={bool(diag.get('ok', False))} reason={diag.get('failure_reason', 'none')} | "
+        f"flatness_p95-p05={flatness * 100.0:.1f}cm | "
+        f"raw_valid={raw_valid}/{total} | "
+        f"sentinel={int(sample['sentinel_count'])} | "
+        f"critical_sentinel={int(diag.get('critical_sentinel_cells', 0))}",
+        fontsize=11,
+    )
+    for ax in axes:
+        ax.set_xticks(xs)
+        ax.set_yticks(ys)
+        ax.tick_params(axis="x", labelrotation=45, labelsize=7)
+        ax.tick_params(axis="y", labelsize=7)
+        ax.grid(color="black", alpha=0.20, linewidth=0.5)
+
+    fig.text(
+        0.01,
+        0.01,
+        "A flat floor should have low cm spread and few non-footprint unknown cells. "
+        f"map_frame={msg.frame_id!r} pose_frame={pose_msg.header.frame_id!r} "
+        f"pose=({float(pose_msg.pose.position.x):.3f}, {float(pose_msg.pose.position.y):.3f}, "
+        f"{float(pose_msg.pose.position.z):.3f}) yaw={float(sample['yaw']):.3f} "
+        f"median_height={median:.3f}m",
+        fontsize=8,
+    )
+    fig.savefig(path, dpi=int(args.plot_dpi))
+    plt.close(fig)
+    print("saved_plot:", path)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--contract", default=_default_contract_path())
@@ -254,6 +428,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--footprint-x-max", type=float, default=0.25)
     parser.add_argument("--footprint-y-min", type=float, default=-0.25)
     parser.add_argument("--footprint-y-max", type=float, default=0.25)
+    parser.add_argument("--save-plot", default="", help="Optional PNG path for a 187-cell heatmap and coverage mask.")
+    parser.add_argument("--plot-vlim-cm", type=float, default=15.0, help="Symmetric color scale for relative height heatmap.")
+    parser.add_argument("--plot-dpi", type=int, default=160)
+    parser.add_argument("--save-npz", default="", help="Optional NPZ path with sampled 187-cell values and diagnostics.")
     return parser.parse_args()
 
 
@@ -270,6 +448,10 @@ def main() -> None:
         raise RuntimeError("timed out waiting for: " + ", ".join(missing))
     sample = _sample_grid(msg, pose_msg, contract, args)
     _print_snapshot(msg, pose_msg, contract, sample, args)
+    if args.save_npz:
+        _save_snapshot_npz(args.save_npz, msg, pose_msg, contract, sample, args)
+    if args.save_plot:
+        _save_snapshot_plot(args.save_plot, msg, pose_msg, contract, sample, args)
 
 
 if __name__ == "__main__":

@@ -4,25 +4,29 @@ from dataclasses import dataclass
 import logging
 import math
 import os
+import threading
 import time
+import uuid
 from multiprocessing.managers import SharedMemoryManager
 from typing import Optional, Sequence, Tuple
 
 import numpy as np
 
-from modules.can_owner_lock import CanOwnerLock
+from modules.hardware_ownership import HardwareOwnershipLock, HardwareOwnershipSet
 from modules.runtime_safety import (
     RuntimeSafetyFault,
     require_finite_scalar,
     require_finite_vector,
 )
+from modules.safety_state import SafetyStateMachine
+from modules.safety_lease import SafetyHeartbeat, SafetyLeaseFault, SafetyLeaseMonitor
+from modules.x5_preflight import X5FeedbackSnapshot, validate_x5_preflight
 
 
 TRANSLATION_AXES = ("x", "y", "z")
 ROTATION_AXES = ("rx", "ry", "rz")
 GRIPPER_MIN = 0.0
 GRIPPER_MAX_FALLBACK = 0.08
-ARM_HOME_SETTLE_SEC = 0.7
 BUTTON_HOME_JOINT_POSE = np.array([0.0, 0.3, 0.5, 0.0, 0.0, 0.0], dtype=np.float64)
 BUTTON_HOME_JOINT_SPEED = 0.5
 BUTTON_HOME_MIN_DURATION_SEC = 1.0
@@ -121,7 +125,7 @@ class SpaceMouseArmNode:
         mapping: SpaceMouseMapping,
         arm_command_frame: str = "base",
         can_interface: str = "can0",
-        model: str = "X5_umi",
+        model: str = "X5",
         ctrl_freq: float = 50.0,
         sm_use_raw_frame: bool = True,
         sm_watchdog_sec: float = 0.25,
@@ -130,14 +134,35 @@ class SpaceMouseArmNode:
         dry_run: bool = False,
         require_can: bool = True,
         safety_topic: str = "/safety/estop",
+        safety_heartbeat_topic: str = "/safety/heartbeat",
+        safety_lease_timeout_sec: float = 0.5,
+        feedback_timeout_sec: float = 0.25,
+        control_mode: str = "spacemouse",
+        fixed_hold_joint_pose: Optional[Sequence[float]] = None,
+        fixed_hold_gripper: float = 0.0,
+        fixed_hold_enable_topic: str = "/arm/fixed_hold/enable",
+        fixed_hold_max_start_error_rad: float = 0.35,
+        fixed_hold_tracking_error_rad: float = 0.10,
+        fixed_hold_joint_speed_rad_s: float = 0.30,
     ):
         import rclpy
         from rclpy.node import Node
         from robot_state.msg import ArmState, ArmTargetState
-        from std_msgs.msg import Bool
+        from std_msgs.msg import Bool, String
+        from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 
         self.rclpy = rclpy
-        self.node = Node("spacemouse_arm_node")
+        self.control_mode = str(control_mode).lower()
+        if self.control_mode not in {"spacemouse", "fixed_hold"}:
+            raise ValueError(
+                f"control_mode must be spacemouse or fixed_hold, got {control_mode!r}"
+            )
+        node_name = (
+            "x5_fixed_hold_node"
+            if self.control_mode == "fixed_hold"
+            else "spacemouse_arm_node"
+        )
+        self.node = Node(node_name)
         self.ArmState = ArmState
         self.ArmTargetState = ArmTargetState
         self.mapping = mapping
@@ -152,16 +177,55 @@ class SpaceMouseArmNode:
         self.dry_run = bool(dry_run)
         self.require_can = bool(require_can)
         self.safety_topic = str(safety_topic)
+        self.safety_heartbeat_topic = str(safety_heartbeat_topic)
+        self.safety_lease = SafetyLeaseMonitor(timeout_sec=safety_lease_timeout_sec)
+        self.feedback_timeout_sec = float(feedback_timeout_sec)
+        self.fixed_hold_enable_topic = str(fixed_hold_enable_topic)
+        self.fixed_hold_joint_pose = require_finite_vector(
+            BUTTON_HOME_JOINT_POSE
+            if fixed_hold_joint_pose is None
+            else fixed_hold_joint_pose,
+            size=6,
+            name="fixed_hold_joint_pose",
+        )
+        self.fixed_hold_gripper = require_finite_scalar(
+            fixed_hold_gripper,
+            "fixed_hold_gripper",
+        )
+        self.fixed_hold_max_start_error_rad = require_finite_scalar(
+            fixed_hold_max_start_error_rad,
+            "fixed_hold_max_start_error_rad",
+        )
+        self.fixed_hold_tracking_error_rad = require_finite_scalar(
+            fixed_hold_tracking_error_rad,
+            "fixed_hold_tracking_error_rad",
+        )
+        self.fixed_hold_joint_speed_rad_s = require_finite_scalar(
+            fixed_hold_joint_speed_rad_s,
+            "fixed_hold_joint_speed_rad_s",
+        )
+        if (
+            self.fixed_hold_max_start_error_rad <= 0.0
+            or self.fixed_hold_tracking_error_rad <= 0.0
+            or self.fixed_hold_joint_speed_rad_s <= 0.0
+        ):
+            raise ValueError("fixed-hold limits and speed must be positive")
+        self.fixed_hold_command_deadline = -1.0
+        if self.model != "X5":
+            raise RuntimeError(f"real SpaceMouse arm node only permits model X5, got {self.model!r}")
         self.shared_memory_manager: Optional[SharedMemoryManager] = None
         self.spacemouse = None
         self.controller = None
         self.arx5 = None
-        self.can_owner_lock: Optional[CanOwnerLock] = None
+        self.hardware_owner_locks: Optional[HardwareOwnershipSet] = None
         self.target_pose6d = np.zeros(6, dtype=np.float64)
         self.target_joint = np.zeros(6, dtype=np.float64)
         self.target_gripper = 0.0
         self.gripper_min = GRIPPER_MIN
         self.gripper_max = GRIPPER_MAX_FALLBACK
+        if self.control_mode == "fixed_hold":
+            self.target_joint = self.fixed_hold_joint_pose.copy()
+            self.target_gripper = float(self.fixed_hold_gripper)
         self.last_update_time = time.monotonic()
         self.last_motion_time = self.last_update_time
         self.last_spacemouse_sample_time = self.last_update_time
@@ -171,23 +235,53 @@ class SpaceMouseArmNode:
         self.spacemouse_home_buttons_pressed = False
         self.spacemouse_watchdog_damped = False
         self.arm_position_control_enabled = False
+        self.output_enabled = False
         self.last_spacemouse_command_log_time = -1.0
         self.last_spacemouse_stale_log_time = -1.0
         self.estopped = False
+        self.estop_latched = False
+        self._shutdown_complete = False
+        self._safety_lock = threading.RLock()
+        self.safety_state = SafetyStateMachine()
+        self.safety_state.begin_preflight()
         self.last_spacemouse_button_state: Optional[np.ndarray] = None
         self.tick = 0
+        self.arm_session_id = str(uuid.uuid4())
+        self.arm_state_sequence = 0
+        self.arm_target_sequence = 0
 
         self.state_pub = self.node.create_publisher(ArmState, "/arm/state", 10)
         self.target_pub = self.node.create_publisher(ArmTargetState, "/arm/target_state", 10)
+        safety_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
         self.safety_sub = self.node.create_subscription(
             Bool,
             self.safety_topic,
             self._safety_estop_cb,
-            10,
+            safety_qos,
         )
+        self.safety_heartbeat_sub = self.node.create_subscription(
+            String,
+            self.safety_heartbeat_topic,
+            self._safety_heartbeat_cb,
+            safety_qos,
+        )
+        self.fixed_hold_enable_sub = None
+        if self.control_mode == "fixed_hold":
+            self.fixed_hold_enable_sub = self.node.create_subscription(
+                Bool,
+                self.fixed_hold_enable_topic,
+                self._fixed_hold_enable_cb,
+                10,
+            )
 
         self._log_startup_config()
         self._init_inputs_and_controller()
+        self.safety_state.preflight_passed()
         self.timer = self.node.create_timer(1.0 / self.ctrl_freq, self.timer_callback)
 
     def _log_info(self, message: str) -> None:
@@ -203,6 +297,20 @@ class SpaceMouseArmNode:
         logging.error(message)
 
     def _log_startup_config(self) -> None:
+        if self.control_mode == "fixed_hold":
+            self._log_info(f"Arm control owner: x5_fixed_hold ({self.can_interface})")
+            self._log_info(
+                "fixed-hold joint pose: "
+                + np.array2string(
+                    self.fixed_hold_joint_pose,
+                    precision=3,
+                    floatmode="fixed",
+                )
+            )
+            self._log_info(f"fixed-hold gripper: {self.fixed_hold_gripper:.3f}")
+            self._log_info(f"operator enable topic: {self.fixed_hold_enable_topic}")
+            self._log_info(f"safety estop topic: {self.safety_topic}")
+            return
         frame_source = "raw" if self.sm_use_raw_frame else "transformed"
         self._log_info(f"Arm control owner: spacemouse_arm_node ({self.can_interface})")
         self._log_info(f"SpaceMouse frame source: {frame_source}")
@@ -219,20 +327,23 @@ class SpaceMouseArmNode:
 
     def _init_inputs_and_controller(self) -> None:
         if self.dry_run:
-            self._log_warning("SpaceMouse Arm Node dry-run: not opening SpaceMouse or ARX5")
+            self._log_warning(
+                f"X5 {self.control_mode} dry-run: not opening input device or ARX5"
+            )
             return
         if self.require_can and not can_interface_exists(self.can_interface):
             raise RuntimeError(f"CAN interface {self.can_interface!r} does not exist")
 
+        os.environ["ARX5_REQUIRE_INIT_FEEDBACK"] = "1"
         import arx5_interface as arx5
-        from modules.spacemouse_shared_memory import Spacemouse
 
         self.arx5 = arx5
-        self.can_owner_lock = CanOwnerLock(
-            self.can_interface,
-            owner=f"{self.node.get_name()}:{os.getpid()}",
+        lock_owner = f"{self.node.get_name()}:{os.getpid()}:{self.can_interface}"
+        self.hardware_owner_locks = HardwareOwnershipSet(
+            HardwareOwnershipLock(resource, owner=lock_owner)
+            for resource in ("x5-can", "x5-gripper")
         )
-        self.can_owner_lock.acquire()
+        self.hardware_owner_locks.acquire()
 
         try:
             robot_config = arx5.RobotConfigFactory.get_instance().get_config(self.model)
@@ -256,9 +367,15 @@ class SpaceMouseArmNode:
                 controller_config,
                 self.can_interface,
             )
+            self._set_to_damping()
+            self._validate_controller_feedback(robot_config)
             self._refresh_targets_from_controller_state()
-            self._enable_current_pose_hold(controller_config)
 
+            if self.control_mode == "fixed_hold":
+                self._configure_fixed_hold_target(robot_config)
+                return
+
+            from modules.spacemouse_shared_memory import Spacemouse
             self.shared_memory_manager = SharedMemoryManager()
             self.shared_memory_manager.start()
             self.spacemouse = Spacemouse(
@@ -276,6 +393,11 @@ class SpaceMouseArmNode:
         dt = min(max(now - self.last_update_time, 1e-3), 0.05)
         self.last_update_time = now
         self.tick += 1
+        if self.control_mode == "fixed_hold":
+            self._fixed_hold_timer(now)
+            return
+        if not self.dry_run and not self._check_safety_lease(now):
+            self.output_enabled = False
 
         if not self.estopped:
             spacemouse_input = self._read_spacemouse_input(now=now)
@@ -299,6 +421,12 @@ class SpaceMouseArmNode:
             )
             buttons_request = self._buttons_request_gripper_motion()
             home_request = self._buttons_request_home_pose()
+            if not self.output_enabled:
+                if home_request:
+                    self._operator_arm()
+                motion_command = False
+                buttons_request = False
+                home_request = False
             if home_request:
                 motion_command = False
                 buttons_request = False
@@ -306,7 +434,7 @@ class SpaceMouseArmNode:
                 try:
                     self._refresh_targets_from_controller_state()
                 except RuntimeSafetyFault as exc:
-                    self._trigger_estop(f"invalid X5 state before command: {exc}", return_home=False)
+                    self._trigger_estop(f"invalid X5 state before command: {exc}")
                     return
             home_commanded = False
             if home_request:
@@ -333,28 +461,111 @@ class SpaceMouseArmNode:
         self._publish_arm_state(joint_pos, joint_vel, joint_tau, gripper_pos, gripper_vel, arm_state_valid)
         self._publish_arm_target()
 
+    def _fixed_hold_timer(self, now: float) -> None:
+        lease_healthy = self.dry_run or self._check_safety_lease(now)
+        if not lease_healthy and self.output_enabled:
+            self._trigger_fault("safety heartbeat lease unavailable during fixed hold")
+
+        joint_pos, joint_vel, joint_tau, gripper_pos, gripper_vel, state_valid = (
+            self._read_arm_state()
+        )
+        if not state_valid:
+            self._trigger_fault("fixed-hold feedback is invalid")
+        target_valid = bool(
+            self.output_enabled
+            and self._get_safety_state().allows_motion_output()
+            and lease_healthy
+        )
+        if target_valid and now >= self.fixed_hold_command_deadline:
+            tracking_error = float(
+                np.max(np.abs(joint_pos - self.fixed_hold_joint_pose))
+            )
+            if not state_valid or tracking_error > self.fixed_hold_tracking_error_rad:
+                self._trigger_fault(
+                    "fixed-hold tracking failed: "
+                    f"valid={state_valid} error={tracking_error:.6f}rad "
+                    f"limit={self.fixed_hold_tracking_error_rad:.6f}rad"
+                )
+                target_valid = False
+        self._publish_arm_state(
+            joint_pos,
+            joint_vel,
+            joint_tau,
+            gripper_pos,
+            gripper_vel,
+            state_valid,
+        )
+        self._publish_arm_target(valid_override=target_valid)
+
+    def _fixed_hold_enable_cb(self, msg: Any) -> None:
+        if bool(getattr(msg, "data", False)):
+            self._operator_arm_fixed_hold()
+            return
+        if self.safety_state.request_stop("operator disabled fixed hold"):
+            self.output_enabled = False
+            self.arm_position_control_enabled = False
+            self._set_to_damping()
+            self.safety_state.complete_stop()
+            self._log_info("Operator disabled X5 fixed hold; arm is in damping mode")
+
     def _safety_estop_cb(self, msg) -> None:
         if bool(getattr(msg, "data", False)):
             self._trigger_estop(f"{self.safety_topic}=true")
 
-    def _trigger_estop(self, source: str, *, return_home: bool = True) -> None:
-        if self.estopped:
+    def _safety_heartbeat_cb(self, msg) -> None:
+        try:
+            heartbeat = SafetyHeartbeat.from_json(str(msg.data))
+            self.safety_lease.observe(heartbeat, received_at=time.monotonic())
+            if heartbeat.estop_latched:
+                self._trigger_estop("safety heartbeat reports latched ESTOP")
+        except SafetyLeaseFault as exc:
+            self._trigger_fault(f"invalid safety lease: {exc}")
+
+    def _check_safety_lease(self, now: float) -> bool:
+        if not self.safety_lease.has_session:
+            return False
+        if (
+            hasattr(self.node, "count_publishers")
+            and self.node.count_publishers(self.safety_heartbeat_topic) == 0
+        ):
+            self._trigger_fault("safety heartbeat publisher disappeared")
+            return False
+        if not self.safety_lease.is_healthy(now=now):
+            self._trigger_fault("safety heartbeat lease expired")
+            return False
+        return True
+
+    def _trigger_estop(self, source: str) -> None:
+        with self._get_safety_lock():
+            safety_state = self._get_safety_state()
+            first_trigger = safety_state.trigger_estop(source)
+            self.estop_latched = True
+            self.estopped = True
+            self.output_enabled = False
+            self.arm_position_control_enabled = False
+        if not first_trigger:
             return
-        self.estopped = True
-        self._log_error(f"Emergency stop received from {source}; stopping X5 arm")
-        if return_home:
-            self._return_home_before_damping(source)
+        self._log_error(f"Software ESTOP received from {source}; damping X5 arm")
         self._set_to_damping()
 
     def _handle_spacemouse_watchdog(self) -> None:
         if self.spacemouse_watchdog_damped:
             return
         self.spacemouse_watchdog_damped = True
-        self._log_warning("SpaceMouse watchdog expired; holding X5 arm")
-        self._hold_current_pose()
+        self._trigger_fault("SpaceMouse input watchdog expired")
+
+    def _trigger_fault(self, source: str) -> None:
+        with self._get_safety_lock():
+            first_trigger = self._get_safety_state().trigger_fault(source)
+            self.output_enabled = False
+            self.arm_position_control_enabled = False
+        if not first_trigger:
+            return
+        self._log_error(f"X5 runtime fault: {source}; damping arm")
+        self._set_to_damping()
 
     def _hold_current_pose(self) -> None:
-        if self.controller is None or self.arx5 is None:
+        if self.controller is None or self.arx5 is None or not self.output_enabled:
             return
         if self.arm_position_control_enabled:
             return
@@ -373,30 +584,6 @@ class SpaceMouseArmNode:
             self.arm_position_control_enabled = False
         except Exception as exc:
             self._log_error(f"Failed to set X5 arm damping mode: {exc}")
-
-    def _return_home_before_damping(self, source: str) -> None:
-        if self.controller is None or not hasattr(self.controller, "reset_to_home"):
-            return
-        try:
-            self._log_info(f"Returning X5 arm to joint home before damping ({source})")
-            self.controller.reset_to_home()
-            time.sleep(ARM_HOME_SETTLE_SEC)
-            self.target_joint = np.zeros(6, dtype=np.float64)
-            eef_cmd = self.controller.get_eef_cmd()
-            self.target_pose6d = require_finite_vector(
-                eef_cmd.pose_6d(),
-                size=6,
-                name="x5_home_pose6d",
-            )
-            self.target_gripper = self._clamp_gripper(
-                require_finite_scalar(
-                    getattr(eef_cmd, "gripper_pos", self.target_gripper),
-                    "x5_home_gripper",
-                )
-            )
-            self._log_info("X5 arm returned to joint home")
-        except Exception as exc:
-            self._log_error(f"Failed to return X5 arm home before damping: {exc}")
 
     def _read_spacemouse_motion(self, *, now: Optional[float] = None) -> Optional[np.ndarray]:
         spacemouse_input = self._read_spacemouse_input(now=now)
@@ -590,6 +777,126 @@ class SpaceMouseArmNode:
         self._sync_target_joint_from_controller()
         self._log_info("X5 position hold enabled")
 
+    def _validate_controller_feedback(self, robot_config) -> None:
+        if self.controller is None:
+            raise RuntimeSafetyFault("X5 controller is unavailable")
+        state = self.controller.get_joint_state()
+        validate_x5_preflight(
+            configured_model=self.model,
+            robot_model=str(robot_config.robot_model),
+            joint_dof=int(robot_config.joint_dof),
+            motor_ids=robot_config.motor_id,
+            feedback=X5FeedbackSnapshot(
+                joint_position=state.pos(),
+                joint_velocity=state.vel(),
+                joint_torque=state.torque(),
+                feedback_timestamp=getattr(state, "timestamp", 0.0),
+                controller_timestamp=self.controller.get_timestamp(),
+            ),
+            max_feedback_age_sec=self.feedback_timeout_sec,
+        )
+
+    def _operator_arm(self) -> bool:
+        if self.estop_latched or self.safety_state.fault_latched:
+            return False
+        if not self.dry_run and not self._check_safety_lease(time.monotonic()):
+            self._log_error("Operator ARM rejected: no healthy safety session")
+            return False
+        try:
+            robot_config = self.controller.get_robot_config()
+            self._validate_controller_feedback(robot_config)
+            self._refresh_targets_from_controller_state()
+            if not self.safety_state.arm():
+                return False
+            self.output_enabled = True
+            self._enable_current_pose_hold(self.controller.get_controller_config())
+            self._log_info("Operator ARM accepted; X5 position output enabled")
+            return True
+        except Exception as exc:
+            self.output_enabled = False
+            self.safety_state.trigger_fault(f"X5 operator ARM preflight failed: {exc}")
+            self._set_to_damping()
+            self._log_error(f"Operator ARM rejected: {exc}")
+            return False
+
+    def _configure_fixed_hold_target(self, robot_config: Any) -> None:
+        if self.arx5 is None:
+            return
+        solver = self.arx5.Arx5Solver(
+            robot_config.urdf_path,
+            robot_config.joint_dof,
+            robot_config.joint_pos_min,
+            robot_config.joint_pos_max,
+            robot_config.base_link_name,
+            robot_config.eef_link_name,
+            robot_config.gravity_vector,
+        )
+        self.target_pose6d = require_finite_vector(
+            solver.forward_kinematics(self.fixed_hold_joint_pose),
+            size=6,
+            name="x5_fixed_hold_pose6d",
+        )
+        self.target_joint = self.fixed_hold_joint_pose.copy()
+        self.target_gripper = self._clamp_gripper(self.fixed_hold_gripper)
+
+    def _operator_arm_fixed_hold(self) -> bool:
+        if self.control_mode != "fixed_hold":
+            return False
+        if self.estop_latched or self.safety_state.fault_latched:
+            return False
+        if not self.dry_run and not self._check_safety_lease(time.monotonic()):
+            self._log_error("Operator fixed-hold ARM rejected: no healthy safety session")
+            return False
+        try:
+            if self.dry_run:
+                current_joint = self.fixed_hold_joint_pose.copy()
+            else:
+                robot_config = self.controller.get_robot_config()
+                self._validate_controller_feedback(robot_config)
+                current_joint = require_finite_vector(
+                    self.controller.get_joint_state().pos(),
+                    size=6,
+                    name="x5_current_joint_for_fixed_hold",
+                )
+                self._configure_fixed_hold_target(robot_config)
+            start_error = float(
+                np.max(np.abs(current_joint - self.fixed_hold_joint_pose))
+            )
+            if start_error > self.fixed_hold_max_start_error_rad:
+                raise RuntimeSafetyFault(
+                    "X5 is too far from the policy fixed-hold pose: "
+                    f"error={start_error:.6f}rad "
+                    f"limit={self.fixed_hold_max_start_error_rad:.6f}rad"
+                )
+            if not self.safety_state.arm():
+                return False
+            self.output_enabled = True
+            duration = max(
+                0.5,
+                start_error / self.fixed_hold_joint_speed_rad_s,
+            )
+            if not self.dry_run:
+                self._enable_current_pose_hold(self.controller.get_controller_config())
+                self._configure_fixed_hold_target(self.controller.get_robot_config())
+                cmd = self.arx5.EEFState()
+                cmd.pose_6d()[:] = self.target_pose6d
+                cmd.gripper_pos = self.target_gripper
+                cmd.timestamp = self.controller.get_timestamp() + duration
+                self.controller.set_eef_cmd(cmd)
+                self.arm_position_control_enabled = True
+            self.fixed_hold_command_deadline = time.monotonic() + duration + 0.5
+            self._log_info(
+                "Operator ARM accepted; X5 moving to policy fixed-hold pose over "
+                f"{duration:.2f}s"
+            )
+            return True
+        except Exception as exc:
+            self.output_enabled = False
+            self.safety_state.trigger_fault(f"X5 fixed-hold ARM preflight failed: {exc}")
+            self._set_to_damping()
+            self._log_error(f"Operator fixed-hold ARM rejected: {exc}")
+            return False
+
     def _should_apply_motion_command(
         self,
         motion_sequence: Optional[int],
@@ -664,6 +971,12 @@ class SpaceMouseArmNode:
         return self.spacemouse_buttons_armed and left_pressed != right_pressed
 
     def _command_button_home_pose(self) -> bool:
+        if (
+            self.estopped
+            or getattr(self, "estop_latched", False)
+            or not getattr(self, "output_enabled", True)
+        ):
+            return False
         if self.controller is None or self.arx5 is None:
             return False
         try:
@@ -715,7 +1028,11 @@ class SpaceMouseArmNode:
             return False
 
     def _send_target(self) -> None:
-        if self.estopped:
+        if (
+            self.estopped
+            or not self.output_enabled
+            or not self._get_safety_state().allows_motion_output()
+        ):
             return
         if self.dry_run or self.controller is None or self.arx5 is None:
             return
@@ -733,7 +1050,7 @@ class SpaceMouseArmNode:
                 require_finite_scalar(self.target_gripper, "x5_target_gripper")
             )
         except RuntimeSafetyFault as exc:
-            self._trigger_estop(f"invalid X5 target: {exc}", return_home=False)
+            self._trigger_estop(f"invalid X5 target: {exc}")
             return
         cmd.pose_6d()[:] = self.target_pose6d
         cmd.gripper_pos = self.target_gripper
@@ -843,10 +1160,14 @@ class SpaceMouseArmNode:
         msg.gripper_pos = float(gripper_pos)
         msg.gripper_vel = float(gripper_vel)
         msg.valid = bool(valid)
-        msg.source = "spacemouse_arm_node_dry_run" if self.dry_run else "spacemouse_arm_node"
+        msg.source = self._producer_source()
+        self.arm_state_sequence += 1
+        msg.session_id = self.arm_session_id
+        msg.sequence = self.arm_state_sequence
+        msg.monotonic_timestamp = time.monotonic()
         self.state_pub.publish(msg)
 
-    def _publish_arm_target(self) -> None:
+    def _publish_arm_target(self, *, valid_override: Optional[bool] = None) -> None:
         msg = self.ArmTargetState()
         msg.header.stamp = self.node.get_clock().now().to_msg()
         msg.header.frame_id = self.arm_command_frame
@@ -877,13 +1198,27 @@ class SpaceMouseArmNode:
         self.target_gripper = gripper_target
         msg.gripper_target = float(gripper_target)
         msg.command_frame = self.arm_command_frame
-        msg.source = "spacemouse_arm_node_dry_run" if self.dry_run else "spacemouse_arm_node"
-        msg.valid = bool(valid)
+        msg.source = self._producer_source()
+        msg.valid = bool(valid if valid_override is None else valid and valid_override)
+        self.arm_target_sequence += 1
+        msg.session_id = self.arm_session_id
+        msg.sequence = self.arm_target_sequence
+        msg.monotonic_timestamp = time.monotonic()
         self.target_pub.publish(msg)
 
+    def _producer_source(self) -> str:
+        source = "x5_fixed_hold" if self.control_mode == "fixed_hold" else "spacemouse_arm_node"
+        return source + "_dry_run" if self.dry_run else source
+
     def shutdown(self) -> None:
+        with self._get_safety_lock():
+            if getattr(self, "_shutdown_complete", False):
+                return
+            self._shutdown_complete = True
+            self._get_safety_state().begin_shutdown("arm node shutdown")
+            self.output_enabled = False
+            self.arm_position_control_enabled = False
         try:
-            self._return_home_before_damping("node shutdown")
             self._set_to_damping()
             if self.spacemouse is not None:
                 self.spacemouse.stop()
@@ -895,6 +1230,9 @@ class SpaceMouseArmNode:
 
     def _cleanup_inputs_and_lock(self) -> None:
         try:
+            self.output_enabled = False
+            self.arm_position_control_enabled = False
+            self._set_to_damping()
             if self.spacemouse is not None:
                 self.spacemouse.stop()
             if self.shared_memory_manager is not None:
@@ -904,10 +1242,27 @@ class SpaceMouseArmNode:
             self.shared_memory_manager = None
             self._release_can_owner_lock()
 
+    def _get_safety_lock(self):
+        lock = getattr(self, "_safety_lock", None)
+        if lock is None:
+            lock = threading.RLock()
+            self._safety_lock = lock
+        return lock
+
+    def _get_safety_state(self) -> SafetyStateMachine:
+        state = getattr(self, "safety_state", None)
+        if state is None:
+            state = SafetyStateMachine()
+            state.begin_preflight()
+            state.preflight_passed()
+            self.safety_state = state
+        return state
+
     def _release_can_owner_lock(self) -> None:
-        if self.can_owner_lock is not None:
-            self.can_owner_lock.release()
-            self.can_owner_lock = None
+        locks = getattr(self, "hardware_owner_locks", None)
+        if locks is not None:
+            locks.release()
+            self.hardware_owner_locks = None
 
     def _log_stale_spacemouse(self, reason: str) -> None:
         now = time.monotonic()

@@ -39,6 +39,13 @@ def fake_ros_modules(monkeypatch):
     monkeypatch.setitem(sys.modules, "unitree_go", unitree_go)
     monkeypatch.setitem(sys.modules, "unitree_go.msg", unitree_go_msg)
 
+    grid_map_msgs = types.ModuleType("grid_map_msgs")
+    grid_map_msgs_msg = types.ModuleType("grid_map_msgs.msg")
+    grid_map_msgs_msg.GridMap = type("GridMap", (), {})
+    grid_map_msgs.msg = grid_map_msgs_msg
+    monkeypatch.setitem(sys.modules, "grid_map_msgs", grid_map_msgs)
+    monkeypatch.setitem(sys.modules, "grid_map_msgs.msg", grid_map_msgs_msg)
+
     geometry_msgs = types.ModuleType("geometry_msgs")
     geometry_msgs_msg = types.ModuleType("geometry_msgs.msg")
     geometry_msgs_msg.PoseStamped = type("PoseStamped", (), {})
@@ -63,6 +70,18 @@ class FakeNode:
         self.subscriptions = subscriptions
         self.subscription = (msg_type, topic, callback, qos_profile)
         return object()
+
+
+class StampedFakeNode(FakeNode):
+    def __init__(self, ros_time_s):
+        self.ros_time_s = float(ros_time_s)
+
+    def get_clock(self):
+        return SimpleNamespace(
+            now=lambda: SimpleNamespace(
+                nanoseconds=int(round(self.ros_time_s * 1.0e9))
+            )
+        )
 
 
 class FakeTfBuffer:
@@ -102,7 +121,7 @@ def _provider(**kwargs):
 
 def _height_map_provider(**kwargs):
     return HeightScanProvider(
-        FakeNode(),
+        kwargs.pop("node", FakeNode()),
         contract_path=str(CONTRACT_PATH),
         source="height_map_array",
         topic="/height_map",
@@ -111,6 +130,24 @@ def _height_map_provider(**kwargs):
         min_valid_ratio=kwargs.pop("min_valid_ratio", 0.90),
         min_critical_valid_ratio=kwargs.pop("min_critical_valid_ratio", 0.95),
         max_critical_sentinel_cells=kwargs.pop("max_critical_sentinel_cells", 10),
+        fallback=kwargs.pop("fallback", "last_valid_then_zero"),
+        max_last_valid_age_s=kwargs.pop("max_last_valid_age_s", 0.5),
+        **kwargs,
+    )
+
+
+def _grid_map_provider(**kwargs):
+    return HeightScanProvider(
+        kwargs.pop("node", FakeNode()),
+        contract_path=str(CONTRACT_PATH),
+        source="grid_map",
+        topic="/elevation_map",
+        pose_topic="/pose",
+        map_layer=kwargs.pop("map_layer", "elevation"),
+        timeout_s=kwargs.pop("timeout_s", 0.25),
+        min_valid_ratio=kwargs.pop("min_valid_ratio", 0.90),
+        min_critical_valid_ratio=kwargs.pop("min_critical_valid_ratio", 0.95),
+        max_critical_sentinel_cells=kwargs.pop("max_critical_sentinel_cells", 0),
         fallback=kwargs.pop("fallback", "last_valid_then_zero"),
         max_last_valid_age_s=kwargs.pop("max_last_valid_age_s", 0.5),
         **kwargs,
@@ -143,12 +180,20 @@ def _valid_points(height=0.10):
     )
 
 
-def _height_map_msg(data, *, frame_id="odom", origin=(-2.0, -2.0), resolution=0.1):
+def _height_map_msg(
+    data,
+    *,
+    frame_id="odom",
+    origin=(-2.0, -2.0),
+    resolution=0.1,
+    stamp=0.0,
+):
     array = np.asarray(data, dtype=np.float32)
     if array.ndim != 2:
         raise ValueError("height map test data must be 2-D")
     return SimpleNamespace(
         frame_id=frame_id,
+        stamp=float(stamp),
         resolution=float(resolution),
         width=int(array.shape[1]),
         height=int(array.shape[0]),
@@ -161,16 +206,82 @@ def _flat_height_map(width=41, height=41, value=0.0):
     return np.full((height, width), float(value), dtype=np.float32)
 
 
+def _grid_map_layer(matrix, *, labels=("column_index", "row_index")):
+    matrix = np.asarray(matrix, dtype=np.float32)
+    rows, columns = matrix.shape
+    return SimpleNamespace(
+        layout=SimpleNamespace(
+            dim=[
+                SimpleNamespace(label=labels[0], size=columns, stride=rows * columns),
+                SimpleNamespace(label=labels[1], size=rows, stride=rows),
+            ],
+            data_offset=0,
+        ),
+        data=matrix.reshape(-1, order="F").tolist(),
+    )
+
+
+def _grid_map_msg(
+    matrix,
+    *,
+    frame_id="odom",
+    resolution=0.1,
+    center=(0.0, 0.0),
+    start=(0, 0),
+    stamp=0.0,
+    layers=("elevation",),
+    orientation=(0.0, 0.0, 0.0, 1.0),
+):
+    matrix = np.asarray(matrix, dtype=np.float32)
+    sec = int(stamp)
+    nanosec = int(round((float(stamp) - sec) * 1.0e9))
+    x, y, z, w = orientation
+    return SimpleNamespace(
+        header=SimpleNamespace(
+            frame_id=frame_id,
+            stamp=SimpleNamespace(sec=sec, nanosec=nanosec),
+        ),
+        info=SimpleNamespace(
+            resolution=float(resolution),
+            length_x=float(matrix.shape[0] * resolution),
+            length_y=float(matrix.shape[1] * resolution),
+            pose=SimpleNamespace(
+                position=SimpleNamespace(x=float(center[0]), y=float(center[1]), z=0.0),
+                orientation=SimpleNamespace(x=x, y=y, z=z, w=w),
+            ),
+        ),
+        layers=list(layers),
+        basic_layers=["elevation"],
+        data=[_grid_map_layer(matrix) for _ in layers],
+        outer_start_index=int(start[0]),
+        inner_start_index=int(start[1]),
+    )
+
+
 def _set_height_map_cell(data, xy, value, *, origin=(-2.0, -2.0), resolution=0.1):
     ix = int(round((float(xy[0]) - origin[0]) / resolution))
     iy = int(round((float(xy[1]) - origin[1]) / resolution))
     data[iy, ix] = float(value)
 
 
-def _pose_msg(*, frame_id="odom", x=0.0, y=0.0, z=0.5, yaw=0.0):
+def _pose_msg(
+    *,
+    frame_id="odom",
+    x=0.0,
+    y=0.0,
+    z=0.5,
+    yaw=0.0,
+    stamp=0.0,
+):
     half_yaw = 0.5 * float(yaw)
     return SimpleNamespace(
-        header=SimpleNamespace(frame_id=frame_id),
+        header=SimpleNamespace(
+            frame_id=frame_id,
+            stamp=SimpleNamespace(
+                sec=int(stamp),
+                nanosec=int(round((float(stamp) - int(stamp)) * 1.0e9)),
+            ),
+        ),
         pose=SimpleNamespace(
             position=SimpleNamespace(x=float(x), y=float(y), z=float(z)),
             orientation=SimpleNamespace(x=0.0, y=0.0, z=float(np.sin(half_yaw)), w=float(np.cos(half_yaw))),
@@ -272,6 +383,112 @@ def test_height_map_array_all_valid_is_accepted():
     assert diag["valid_ratio"] == 1.0
     assert diag["critical_valid_ratio"] == 1.0
     assert diag["sentinel_cells"] == 0
+
+
+def test_grid_map_elevation_layer_with_circular_buffer_is_accepted():
+    provider = _grid_map_provider()
+    matrix = np.zeros((40, 40), dtype=np.float32)
+
+    provider._pose_callback(_pose_msg())
+    provider._height_map_callback(_grid_map_msg(matrix, start=(7, 13)))
+    scan, diag = provider.get_scan()
+
+    assert scan.shape == (187,)
+    assert diag["height_scan_ok"] is True
+    assert diag["height_scan_source"] == "grid_map"
+    assert diag["map_layer"] == "elevation"
+    assert diag["transform_status"] == "grid_map_pose"
+    assert diag["grid_map_outer_start_index"] == 7
+    assert diag["grid_map_inner_start_index"] == 13
+    assert diag["footprint_filled_cells"] == 0
+
+
+def test_grid_map_missing_selected_layer_fails_closed():
+    provider = _grid_map_provider(map_layer="elevation")
+    matrix = np.zeros((40, 40), dtype=np.float32)
+
+    provider._pose_callback(_pose_msg())
+    provider._height_map_callback(_grid_map_msg(matrix, layers=("variance",)))
+    _, diag = provider.get_scan()
+
+    assert provider.last_scan is None
+    assert diag["height_scan_ok"] is False
+    assert diag["failure_reason"] == "invalid_grid_map"
+    assert "exactly one 'elevation' layer" in diag["error"]
+
+
+def test_grid_map_rotated_info_pose_fails_closed():
+    provider = _grid_map_provider()
+    matrix = np.zeros((40, 40), dtype=np.float32)
+    half_yaw = 0.05
+
+    provider._pose_callback(_pose_msg())
+    provider._height_map_callback(
+        _grid_map_msg(
+            matrix,
+            orientation=(0.0, 0.0, float(np.sin(half_yaw)), float(np.cos(half_yaw))),
+        )
+    )
+    _, diag = provider.get_scan()
+
+    assert provider.last_scan is None
+    assert diag["height_scan_ok"] is False
+    assert diag["failure_reason"] == "invalid_grid_map"
+    assert "rotated GridMap poses are unsupported" in diag["error"]
+
+
+def test_height_map_source_and_pose_stamps_are_required_and_synchronized():
+    provider = _height_map_provider(
+        node=StampedFakeNode(ros_time_s=100.0),
+        require_source_stamp=True,
+        max_pose_map_skew_s=0.03,
+        required_consecutive_valid_frames=1,
+    )
+    data = _flat_height_map()
+
+    provider._pose_callback(_pose_msg(stamp=99.98))
+    provider._height_map_callback(_height_map_msg(data, stamp=99.99))
+    _, diag = provider.get_scan()
+
+    assert diag["height_scan_ok"] is True
+    assert diag["source_stamp_valid"] is True
+    assert diag["source_age_s"] == pytest.approx(0.01)
+    assert diag["pose_map_skew_s"] == pytest.approx(0.01)
+    assert diag["consecutive_valid_frames"] == 1
+
+
+def test_height_map_pose_stamp_skew_fails_closed():
+    provider = _height_map_provider(
+        node=StampedFakeNode(ros_time_s=100.0),
+        require_source_stamp=True,
+        max_pose_map_skew_s=0.03,
+    )
+    data = _flat_height_map()
+
+    provider._pose_callback(_pose_msg(stamp=99.90))
+    provider._height_map_callback(_height_map_msg(data, stamp=99.99))
+    _, diag = provider.get_scan()
+
+    assert diag["height_scan_ok"] is False
+    assert diag["failure_reason"] == "pose_map_stamp_skew"
+    assert diag["pose_map_skew_s"] > provider.max_pose_map_skew_s
+    assert diag["consecutive_valid_frames"] == 0
+
+
+def test_stale_height_map_source_stamp_fails_closed():
+    provider = _height_map_provider(
+        node=StampedFakeNode(ros_time_s=100.0),
+        require_source_stamp=True,
+    )
+    data = _flat_height_map()
+
+    provider._pose_callback(_pose_msg(stamp=99.0))
+    provider._height_map_callback(_height_map_msg(data, stamp=99.0))
+    _, diag = provider.get_scan()
+
+    assert diag["height_scan_ok"] is False
+    assert diag["failure_reason"] == "source_stamp_invalid"
+    assert diag["source_age_s"] > provider.timeout_s
 
 
 def test_height_map_array_noncritical_sentinel_is_reported_but_accepted():
@@ -412,6 +629,33 @@ def test_stale_last_valid_scan_is_not_reused(monkeypatch):
     assert "stale_last_valid" in diag["fallback_reason"]
     assert diag["last_valid_age_s"] > provider.max_last_valid_age_s
     assert diag["stale_last_valid_age_s"] == diag["last_valid_age_s"]
+
+
+def test_stale_stream_resets_consecutive_valid_frame_warmup(monkeypatch):
+    now = [250.0]
+    monkeypatch.setattr(height_scan_provider_module.time, "monotonic", lambda: now[0])
+    provider = _height_map_provider(
+        timeout_s=0.25,
+        required_consecutive_valid_frames=2,
+    )
+    data = _flat_height_map()
+
+    for _ in range(2):
+        provider._pose_callback(_pose_msg())
+        provider._height_map_callback(_height_map_msg(data))
+    _, ready_diag = provider.get_scan()
+    assert ready_diag["consecutive_valid_frames"] == 2
+
+    now[0] += 0.30
+    _, stale_diag = provider.get_scan()
+    assert stale_diag["height_scan_ok"] is False
+    assert stale_diag["consecutive_valid_frames"] == 0
+    assert provider.consecutive_valid_frames == 0
+
+    provider._pose_callback(_pose_msg())
+    provider._height_map_callback(_height_map_msg(data))
+    _, recovered_diag = provider.get_scan()
+    assert recovered_diag["consecutive_valid_frames"] == 1
 
 
 def test_height_map_critical_unknown_short_gap_may_reuse_last_valid(monkeypatch):

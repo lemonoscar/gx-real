@@ -12,8 +12,6 @@ except ImportError:
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REAL_WBC_DIR = os.path.dirname(SCRIPT_DIR)
 GX_REAL_ROOT = os.path.dirname(REAL_WBC_DIR)
-DEFAULT_POLICY_PATH = os.path.join(GX_REAL_ROOT, "policies", "policy.onnx")
-DEFAULT_HEIGHT_SCAN_CONTRACT = os.path.join(GX_REAL_ROOT, "policies", "height_scan_contract.yaml")
 DEFAULT_LOG_DIR = os.path.join(GX_REAL_ROOT, "logs")
 
 
@@ -41,7 +39,31 @@ def configure_logging(log_root: str) -> str:
     return run_log_dir
 
 
-if __name__ == "__main__":
+def _root_path(path: str) -> str:
+    return path if os.path.isabs(path) else os.path.join(GX_REAL_ROOT, path)
+
+
+def main(deployment_kind: str) -> None:
+    if deployment_kind not in {"flat", "rough"}:
+        raise RuntimeError(f"unsupported deployment kind: {deployment_kind!r}")
+
+    from modules.deployment_profile import (
+        load_deployment_config,
+        load_deployment_profile,
+    )
+
+    deployment_config_path = os.path.join(
+        GX_REAL_ROOT,
+        "config",
+        "deployments",
+        f"{deployment_kind}.yaml",
+    )
+    deployment_config = load_deployment_config(deployment_config_path)
+    deployment_profile = load_deployment_profile(
+        deployment_config_path,
+        expected_kind=deployment_kind,
+    )
+    height_config = deployment_config["height_observation"]
 
     np.set_printoptions(precision=3)
     parser = argparse.ArgumentParser(
@@ -50,10 +72,19 @@ if __name__ == "__main__":
     parser.add_argument(
         "--policy_path",
         type=str,
-        default=DEFAULT_POLICY_PATH,
+        default=_root_path(deployment_config["policy_default"]),
+    )
+    parser.add_argument(
+        "--artifact-manifest",
+        default=_root_path(deployment_config["artifact_manifest_default"]),
     )
     parser.add_argument("--device", type=str, default="cpu")
-    parser.add_argument("--arm_pose", type=float, nargs=6, default=None)
+    parser.add_argument(
+        "--arm_pose",
+        type=float,
+        nargs=6,
+        default=deployment_profile.arm_joint_pose.astype(float).tolist(),
+    )
     parser.add_argument(
         "--arm-command-mode",
         choices=["joint", "cartesian"],
@@ -110,15 +141,29 @@ if __name__ == "__main__":
     parser.add_argument("--joy-acc-yaw", type=float, default=0.6)
     parser.add_argument("--joy-watchdog-sec", type=float, default=0.25)
     parser.add_argument("--joy-dry-run", action="store_true")
-    parser.add_argument("--gripper-cmd", type=float, default=0.0)
+    parser.add_argument(
+        "--gripper-cmd",
+        type=float,
+        default=deployment_profile.arm_gripper,
+    )
     parser.add_argument(
         "--arm-control-owner",
-        choices=["none", "wbc", "external_spacemouse"],
-        default="external_spacemouse",
+        choices=["none", "wbc", "external_spacemouse", "external_fixed_hold"],
+        default="external_fixed_hold",
     )
     parser.add_argument("--arm-state-topic", type=str, default="/arm/state")
     parser.add_argument("--arm-target-topic", type=str, default="/arm/target_state")
     parser.add_argument("--safety-topic", type=str, default="/safety/estop")
+    parser.add_argument("--safety-heartbeat-topic", type=str, default="/safety/heartbeat")
+    parser.add_argument(
+        "--arm-observation-mode",
+        choices=["live", "fixed_initial"],
+        default="live",
+        help=(
+            "How policy arm observations are populated. live consumes arm topics; "
+            "fixed_initial feeds --arm_pose as constant arm pos/target with zero vel/tau."
+        ),
+    )
     parser.add_argument("--arm-state-timeout-sec", type=float, default=0.25)
     parser.add_argument("--arm-target-timeout-sec", type=float, default=0.25)
     parser.add_argument(
@@ -132,37 +177,37 @@ if __name__ == "__main__":
         dest="require_arm_state_for_rl",
         action="store_false",
     )
-    parser.add_argument("--enable-height-scan", action="store_true")
-    parser.add_argument(
-        "--height-scan-contract",
-        type=str,
-        default=DEFAULT_HEIGHT_SCAN_CONTRACT,
-    )
-    parser.add_argument(
-        "--height-scan-source",
-        choices=["pointcloud2", "height_map_array"],
-        default="pointcloud2",
-    )
-    parser.add_argument("--height-scan-topic", type=str, default="/unilidar/cloud")
-    parser.add_argument("--height-scan-pose-topic", type=str, default="/utlidar/robot_pose")
-    parser.add_argument("--height-scan-base-frame", type=str, default="base")
-    parser.add_argument("--height-scan-lidar-frame", type=str, default="unilidar_lidar")
-    parser.add_argument(
-        "--height-scan-extrinsic",
-        type=str,
-        default=None,
-    )
-    parser.add_argument("--height-scan-timeout", type=float, default=0.25)
-    parser.add_argument("--height-scan-min-valid-ratio", type=float, default=0.60)
-    parser.add_argument("--height-scan-min-critical-valid-ratio", type=float, default=0.95)
-    parser.add_argument("--height-scan-max-critical-sentinel-cells", type=int, default=10)
-    parser.add_argument("--height-scan-sentinel-abs-threshold", type=float, default=5.0)
-    parser.add_argument(
-        "--height-scan-fallback",
-        choices=["last_valid_then_zero", "zero"],
-        default="last_valid_then_zero",
-    )
-    parser.add_argument("--height-scan-max-last-valid-age", type=float, default=0.5)
+    if deployment_kind == "rough":
+        parser.add_argument(
+            "--height-scan-contract",
+            type=str,
+            default=_root_path(height_config["contract_default"]),
+        )
+        parser.set_defaults(height_scan_source=height_config["production_source"])
+        parser.add_argument(
+            "--height-scan-topic",
+            type=str,
+            default=height_config["topic_default"],
+        )
+        parser.add_argument(
+            "--height-scan-pose-topic",
+            type=str,
+            default=height_config["pose_topic_default"],
+        )
+        parser.add_argument(
+            "--height-scan-map-layer",
+            type=str,
+            default=height_config["layer_default"],
+        )
+        parser.add_argument("--height-scan-base-frame", type=str, default="base_link")
+        parser.add_argument("--height-scan-lidar-frame", type=str, default="lidar")
+        parser.add_argument("--height-scan-extrinsic", type=str, default=None)
+        parser.add_argument("--height-scan-timeout", type=float, default=0.25)
+        parser.add_argument("--height-scan-min-valid-ratio", type=float, default=0.60)
+        parser.add_argument("--height-scan-min-critical-valid-ratio", type=float, default=0.95)
+        parser.add_argument("--height-scan-max-critical-sentinel-cells", type=int, default=0)
+        parser.add_argument("--height-scan-sentinel-abs-threshold", type=float, default=5.0)
+        parser.add_argument("--height-scan-max-last-valid-age", type=float, default=0.1)
     parser.add_argument(
         "--leg-kp",
         type=float,
@@ -220,10 +265,15 @@ if __name__ == "__main__":
     parser.add_argument("--estop-repeat-count", type=int, default=5)
     parser.add_argument("--estop-repeat-period-sec", type=float, default=0.02)
     parser.add_argument(
+        "--final-command-contract",
+        default="config/go2_leg_safety_contract.yaml",
+        help="Version-controlled VERIFIED Go2 joint/rate safety contract.",
+    )
+    parser.add_argument(
         "--no-live-ready-calibration",
         dest="live_ready_pose_calibration",
         action="store_false",
-        default=True,
+        default=deployment_profile.allow_live_ready_pose_calibration,
         help=(
             "Do not use the current standing leg pose as the runtime policy ready/action "
             "offset when R1 is pressed in internal mode."
@@ -249,25 +299,62 @@ if __name__ == "__main__":
         ],
     )
     args = parser.parse_args()
+    args.deployment_profile = deployment_profile
+    if args.arm_control_owner != "external_fixed_hold":
+        parser.error(
+            "production requires the x5_fixed_hold owner; SpaceMouse motion is outside "
+            "this policy's training distribution"
+        )
+    if args.arm_observation_mode != "live":
+        parser.error("production requires live arm state; fixed_initial is offline-only")
+    if not args.require_arm_state_for_rl:
+        parser.error("production requires continuous /arm/state and /arm/target_state freshness")
     run_log_dir = configure_logging(args.logging_dir)
     args.logging_dir = run_log_dir
     logging.info(f"Run logs: {run_log_dir}")
+
+    from modules.artifact_manifest import validate_repository_manifest
+
+    manifest_path = args.artifact_manifest
+    if not os.path.isabs(manifest_path):
+        manifest_path = os.path.join(GX_REAL_ROOT, manifest_path)
+    verified_hashes = validate_repository_manifest(
+        manifest_path,
+        root=__import__("pathlib").Path(GX_REAL_ROOT),
+        expected_x5_model="X5",
+        expected_policy_kind=deployment_kind,
+        runtime_policy_path=args.policy_path,
+    )
+    logging.info("Verified production artifact hashes: %s", verified_hashes)
+    delattr(args, "artifact_manifest")
 
     import rclpy
     from modules.wbc_node_leg12_arm_passthrough import WBCNodeLeg12ArmPassthrough
 
     rclpy.init(args=None)
-    wbc_node = WBCNodeLeg12ArmPassthrough(**vars(args))
-    logging.info("Deploy node ready")
-    if wbc_node.arm_enabled:
-        lowstate = wbc_node.get_arm_joint_state()
-        if (lowstate.pos() == 0.0).all() and (lowstate.vel() == 0.0).all():
-            logging.error("Arm is not connected!")
-            exit(1)
+    wbc_node = None
     try:
+        wbc_node = WBCNodeLeg12ArmPassthrough(**vars(args))
+        logging.info("Deploy node ready in STANDBY; operator action is required")
+        if wbc_node.arm_enabled:
+            lowstate = wbc_node.get_arm_joint_state()
+            if (lowstate.pos() == 0.0).all() and (lowstate.vel() == 0.0).all():
+                raise RuntimeError("Arm feedback is all zero; refusing startup")
         rclpy.spin(wbc_node)
     finally:
-        if wbc_node.obs_history_log or wbc_node.action_history_log:
-            wbc_node.dump_logs()
-        wbc_node.release_can_owner_lock()
+        if wbc_node is not None:
+            wbc_node.safe_shutdown("run_wbc_leg12 finally")
+            if wbc_node.obs_history_log or wbc_node.action_history_log:
+                try:
+                    wbc_node.dump_logs()
+                except Exception:
+                    logging.exception("Log dump failed after outputs were disabled")
+            wbc_node.destroy_node()
         rclpy.shutdown()
+
+
+if __name__ == "__main__":
+    raise SystemExit(
+        "run_wbc_leg12.py is an internal shared entrypoint; use run_wbc_flat.py or "
+        "run_wbc_rough.py"
+    )

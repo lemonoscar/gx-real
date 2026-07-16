@@ -1,0 +1,12 @@
+services:
+  gx-real:
+    volumes:
+      - type: bind
+        source: /run/lock/gx-real
+        target: /run/lock/gx-real
+        bind:
+          create_host_path: false
+    environment:
+      GX_REAL_LOCK_DIR: /run/lock/gx-real
+      # Set this to the host `stat -c '%d:%i' /run/lock/gx-real` value.
+      GX_REAL_LOCK_DIR_DEV_INO: "REQUIRED"
