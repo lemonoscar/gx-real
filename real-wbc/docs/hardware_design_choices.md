@@ -14,13 +14,13 @@
 
 - 负载能力有限，机械臂会明显增加前腿负担。
 - 长时间站立或高增益调试时容易发热。
-- sport mode 和低层 `lowcmd` 不能同时抢控制权。
+- 内置 MCF motion mode 和低层 `lowcmd` 不能同时抢控制权。
 - 每次上电后的姿态校准会影响低层控制稳定性。
 
 维护建议：
 
 - 上机前先确认 Go2 姿态和自校准状态。
-- 跑低层 policy 前关闭 sport mode。
+- 跑低层 policy 前用 `MotionSwitcherClient::ReleaseMode()` 释放 MCF。
 - 如果关节长期跟不上目标，不要只继续加 Kp；同时检查控制权、力矩限制、电池、关节顺序和站姿 offset。
 
 ## 2. X5/ARX5 作为机载机械臂
@@ -91,7 +91,7 @@ GoPro、采集卡、fin-ray gripper 属于原 UMI 数据采集和模仿学习链
 短期维护重点：
 
 1. Go2 低层通信稳定。
-2. sport mode 关闭逻辑可靠。
+2. MCF 释放逻辑可靠且经过 `CheckMode()` 复核。
 3. X5 `can0` 和供电可靠。
 4. `policy.onnx + env.yaml` 的动作/观测映射清楚。
 5. 上机日志足够支持定位腿部和机械臂问题。
