@@ -7,7 +7,8 @@ GX_REAL_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 usage() {
   cat <<'EOF'
 Usage:
-  scripts/prepare_real_run.sh [options]
+  scripts/prepare_flat_run.sh [options]
+  scripts/prepare_rough_run.sh [options]
 
 This wraps the repeated pre-run work before starting the real control nodes:
   - build Unitree ROS2 messages, robot_state messages, and the sport-mode tool
@@ -38,8 +39,11 @@ Options:
   --allow-non-jetson        Do not fail when uname -m is not aarch64.
   -h, --help                Show this help.
 
-After this script succeeds, only start/adjust the real run commands in the two
-runtime terminals:
+This file is the shared implementation. Direct invocation is blocked because
+the policy kind would be ambiguous.
+
+After a mode-specific script succeeds, start the external X5 owner and exactly
+one matching leg deployment entrypoint.
   scripts/run_spacemouse_arm.sh ...
   scripts/run_leg12_real.sh ...
 EOF
@@ -53,6 +57,7 @@ CHECK_SPACEMOUSE=1
 CHECK_GO2_TOPICS=1
 CHECK_JOYSTICK_MOTION=0
 REQUIRE_JETSON=1
+DEPLOYMENT_KIND="${GX_REAL_DEPLOYMENT_KIND:-}"
 
 NETWORK_IFACE="${GX_REAL_NETWORK_IFACE:-eth0}"
 CAN_DEV="${CAN_DEV:-auto}"
@@ -61,6 +66,10 @@ SLCAN_SPEED_CODE="${SLCAN_SPEED_CODE:-8}"
 ROS_TOPIC_TIMEOUT="${ROS_TOPIC_TIMEOUT:-4}"
 JOYSTICK_MOTION_TIMEOUT="${JOYSTICK_MOTION_TIMEOUT:-6}"
 JOYSTICK_MOTION_THRESHOLD="${JOYSTICK_MOTION_THRESHOLD:-0.20}"
+ROUGH_LIDAR_POINTS_TOPIC="${GX_REAL_ROUGH_LIDAR_POINTS_TOPIC:-/lidar/points_deskewed}"
+ROUGH_LIDAR_IMU_TOPIC="${GX_REAL_ROUGH_LIDAR_IMU_TOPIC:-/lidar/imu_raw}"
+ROUGH_HEIGHT_TOPIC="${GX_REAL_ROUGH_HEIGHT_TOPIC:-/terrain/elevation_map}"
+ROUGH_POSE_TOPIC="${GX_REAL_ROUGH_POSE_TOPIC:-/localization/pose}"
 
 info() {
   printf '[gx-real] %s\n' "$*"
@@ -340,7 +349,7 @@ check_spacemouse_input_device() {
 check_no_conflicting_control_processes() {
   require_command pgrep
   local pattern
-  pattern='[s]pacemouse_teleop.py|[r]un_arm_spacemouse_test.sh|[r]un_spacemouse_arm.py|[r]un_spacemouse_arm.sh|[r]un_wbc_leg12.py|[r]un_leg12_real.sh|[r]un_wbc.py'
+  pattern='[s]pacemouse_teleop.py|[r]un_arm_spacemouse_test.sh|[r]un_spacemouse_arm.py|[r]un_spacemouse_arm.sh|[r]un_wbc_(flat|rough|leg12).py|[r]un_leg12_(flat|rough)_real.sh|[r]un_wbc.py'
 
   local matches
   matches="$(pgrep -af "${pattern}" || true)"
@@ -464,6 +473,21 @@ check_go2_topics() {
   require_ros_topic "sport mode state" "/lf/sportmodestate" "lf/sportmodestate"
 }
 
+check_rough_perception_topics() {
+  if [[ "${DEPLOYMENT_KIND}" != "rough" ]]; then
+    info "flat deployment selected; perception topics are intentionally not required"
+    return
+  fi
+
+  if [[ -z "${ROS_TOPICS_CACHE}" ]]; then
+    load_ros_topics
+  fi
+  require_ros_topic "deskewed LiDAR points" "${ROUGH_LIDAR_POINTS_TOPIC}"
+  require_ros_topic "LiDAR IMU" "${ROUGH_LIDAR_IMU_TOPIC}"
+  require_ros_topic "rough elevation map" "${ROUGH_HEIGHT_TOPIC}"
+  require_ros_topic "rough localization pose" "${ROUGH_POSE_TOPIC}"
+}
+
 check_wireless_joystick_motion() {
   if [[ "${CHECK_JOYSTICK_MOTION}" -eq 0 ]]; then
     return
@@ -524,8 +548,14 @@ disable_sport_mode() {
 }
 
 print_next_steps() {
+  local leg_command
+  if [[ "${DEPLOYMENT_KIND}" == "rough" ]]; then
+    leg_command="scripts/run_leg12_rough_real.sh"
+  else
+    leg_command="scripts/run_leg12_flat_real.sh"
+  fi
   cat <<EOF
-[gx-real] pre-run checks completed.
+[gx-real] ${DEPLOYMENT_KIND} pre-run checks completed.
 [gx-real] Start the runtime commands in separate terminals and adjust only those arguments:
 
 Terminal A:
@@ -538,11 +568,15 @@ Terminal B:
   cd ${GX_REAL_ROOT}
   export GX_REAL_NETWORK_IFACE=${NETWORK_IFACE}
   source scripts/setup_env.sh
-  scripts/run_leg12_real.sh --device cpu --pose_estimator none --standup-mode internal --base-command-source wireless_joystick --joy-vx-axis ly --joy-vx-sign 1 --joy-vy-axis lx --joy-vy-sign -1 --joy-yaw-axis rx --joy-yaw-sign -1 --joy-deadzone 0.12 --joy-max-vx 0.50 --joy-max-vy 0.0 --joy-max-yaw 0.0 --arm-control-owner external_spacemouse --arm-state-topic /arm/state --arm-target-topic /arm/target_state --safety-topic /safety/estop --require-arm-state-for-rl --gripper-cmd 0.0 --leg-kp 200 --leg-kd 10 --arm_pose 0.0 0.5 0.3 0.0 0.0 0.0
+  ${leg_command} --device cpu --pose_estimator none --standup-mode internal --base-command-source wireless_joystick --joy-vx-axis ly --joy-vx-sign 1 --joy-vy-axis lx --joy-vy-sign -1 --joy-yaw-axis rx --joy-yaw-sign -1 --joy-deadzone 0.12 --joy-max-vx 0.50 --joy-max-vy 0.0 --joy-max-yaw 0.0 --arm-control-owner external_spacemouse --arm-state-topic /arm/state --arm-target-topic /arm/target_state --safety-topic /safety/estop --require-arm-state-for-rl --gripper-cmd 0.0 --leg-kp 200 --leg-kd 10 --arm_pose 0.0 0.5 0.3 0.0 0.0 0.0
 EOF
 }
 
 main() {
+  if [[ "${DEPLOYMENT_KIND}" != "flat" && "${DEPLOYMENT_KIND}" != "rough" ]]; then
+    die "ambiguous deployment kind; use scripts/prepare_flat_run.sh or scripts/prepare_rough_run.sh"
+  fi
+  info "deployment_kind=${DEPLOYMENT_KIND}"
   info "root=${GX_REAL_ROOT}"
   check_host
   run_builds
@@ -555,6 +589,7 @@ main() {
   check_no_conflicting_control_processes
   ensure_can_ready
   check_go2_topics
+  check_rough_perception_topics
   check_wireless_joystick_motion
   disable_sport_mode
   print_next_steps

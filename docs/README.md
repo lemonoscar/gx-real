@@ -26,6 +26,7 @@ scripts/run_leg12_real.sh
 
 ## 专题文档
 
+- [Flat / Rough 双真机部署方案](flat_rough_real_deployment_comparison_and_plan_2026-07-16.md)：对比 phase 工程，定义两类互斥策略部署、Rough height map、X5/传感器接入、完整通信拓扑和分阶段验收。
 - [上机使用指南](上机使用指南.md)：真机操作步骤、启动命令、按键流程和常见故障。
 - [260维输入设计](260维输入设计.md)：当前 `260D obs -> 12D action` 的观测拼接契约。
 - [小替换代码清单](小替换代码清单.md)：把原 UMI WBC 改成 `leg12 + arm passthrough` 的最小改造说明。

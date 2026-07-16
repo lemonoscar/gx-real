@@ -270,7 +270,12 @@ class ArmObservationCache:
 
 
 def should_initialize_wbc_arm_controller(arm_control_owner: str, disable_arm: bool) -> bool:
-    if arm_control_owner not in {"none", "wbc", "external_spacemouse"}:
+    if arm_control_owner not in {
+        "none",
+        "wbc",
+        "external_spacemouse",
+        "external_fixed_hold",
+    }:
         raise ValueError(f"invalid arm_control_owner: {arm_control_owner!r}")
     return arm_control_owner == "wbc" and not bool(disable_arm)
 

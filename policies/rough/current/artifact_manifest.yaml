@@ -1,0 +1,61 @@
+schema_version: 1
+release_status: UNRELEASED
+policy_kind: rough
+git_commit: UNSET
+dirty_worktree_policy: REJECT
+policy:
+  path: policies/rough/current/policy.onnx
+  sha256: 04b5b2d631b12dcb762c7e63242ec86499738acc7d5c9684ed4a614dc60e6970
+environment_config:
+  path: policies/rough/current/env.yaml
+  sha256: d0f99275b86c169d1f6bc6a88d3b199fc7975337c6fbd44fd520d4257ad1bf07
+height_observation:
+  mode: live_elevation_map
+  dimension: 187
+  slice: [66, 253]
+height_scan_contract:
+  path: policies/rough/current/height_scan_contract.yaml
+  sha256: 7c0d6379b2ef156e1a776b100425c02fc9d0224a7c73b09521cfaabdbeab7131
+height_scan_reference:
+  path: policies/rough/current/height_scan_reference.npz
+  sha256: ae080f65fd278f6ae1e36485aa22eadc3702515aac2372352343f64a680db260
+perception_contract:
+  path: policies/rough/current/perception_contract.yaml
+  sha256: 7dfbbcbbda1ad6c08bd216b1d07bac04c6ce498e7b6c486628b03516268f2746
+training_checkpoint:
+  path: policies/rough/current/model_29500.pt
+  sha256: 6b257727fafb8c84d7b449bb389a61d24aff4cdaaa853ad83fe9627a2db77cfd
+training_agent_config:
+  path: policies/rough/current/agent.yaml
+  sha256: a8c47b8c8595f6c355ae59eeb4a22f8099b7d71d23c06f2c70ab3868ae664cb9
+export_metadata:
+  path: policies/rough/current/export_metadata.json
+  sha256: 890c49f670d9c04a650d37e8ba606785170d5c59ae83b524b0275672fb244d1c
+expected_observation_shape: [260]
+expected_action_shape: [12]
+expected_joint_order:
+  - FR_hip_joint
+  - FR_thigh_joint
+  - FR_calf_joint
+  - FL_hip_joint
+  - FL_thigh_joint
+  - FL_calf_joint
+  - RR_hip_joint
+  - RR_thigh_joint
+  - RR_calf_joint
+  - RL_hip_joint
+  - RL_thigh_joint
+  - RL_calf_joint
+expected_x5_model: X5
+unitree_sdk_snapshot: UNSET
+arx5_sdk_snapshot: UNSET
+shared_libraries: []
+python_version: UNSET
+onnxruntime_version: UNSET
+rmw_implementation: rmw_cyclonedds_cpp
+cyclonedds_config:
+  path: unitree_ros2/cyclonedds_ws/src/cyclonedds.xml
+  sha256: UNSET
+go2_leg_safety_contract:
+  path: config/go2_leg_safety_contract.yaml
+  sha256: UNSET

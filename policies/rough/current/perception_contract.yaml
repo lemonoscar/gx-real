@@ -1,0 +1,40 @@
+schema_version: 1
+verification_status: UNVERIFIED
+policy_kind: rough
+production_source: height_map_array
+topics:
+  lidar_points_deskewed: /lidar/points_deskewed
+  lidar_imu: /lidar/imu_raw
+  elevation_map: /terrain/elevation_map
+  robot_pose: /localization/pose
+frames:
+  world: odom
+  robot: base_link
+  sampling: base_yaw_aligned
+  lidar: lidar
+timing:
+  require_source_stamp: true
+  max_message_age_sec: 0.25
+  max_pose_map_skew_sec: 0.03
+  required_consecutive_valid_frames: 5
+  max_last_valid_age_sec: 0.10
+coverage:
+  min_global_valid_ratio: 0.60
+  min_critical_valid_ratio: 0.95
+  max_critical_sentinel_cells: 0
+fallback:
+  may_feed_zero_to_policy: false
+  may_feed_fallback_to_policy: false
+  action: revoke_motion_permission_and_latch_fault
+calibration:
+  lidar_model: UNSET
+  lidar_firmware: UNSET
+  lidar_to_base_extrinsic: UNSET
+  self_filter: UNSET
+mapping:
+  implementation: UNSET
+  configuration_hash: UNSET
+evidence: >-
+  UNVERIFIED until the selected LiDAR, rigid mount, 6DoF extrinsic,
+  Point-LIO/elevation-map configuration, latency distribution, coverage and
+  hardware perception-parity tests are recorded and independently reviewed.

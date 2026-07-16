@@ -63,6 +63,20 @@ def _yaw_from_ros_quat(quat: Any) -> float:
     return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
 
 
+def _stamp_to_seconds(stamp: Any) -> float | None:
+    if stamp is None:
+        return None
+    if isinstance(stamp, (int, float)):
+        value = float(stamp)
+    elif hasattr(stamp, "sec") and hasattr(stamp, "nanosec"):
+        value = float(stamp.sec) + float(stamp.nanosec) * 1.0e-9
+    else:
+        return None
+    if not math.isfinite(value) or value <= 0.0:
+        return None
+    return value
+
+
 def load_static_transform(path: str | None) -> Optional[StaticTransform]:
     if not path:
         return None
@@ -154,6 +168,9 @@ class HeightScanProvider:
         sentinel_abs_threshold: float = 5.0,
         fallback: str = "last_valid_then_zero",
         max_last_valid_age_s: float = 0.5,
+        required_consecutive_valid_frames: int = 1,
+        require_source_stamp: bool = False,
+        max_pose_map_skew_s: float = 0.03,
         qos_profile: int = 10,
     ):
         if source not in {"pointcloud2", "height_map_array"}:
@@ -168,6 +185,12 @@ class HeightScanProvider:
             raise ValueError(
                 f"max_critical_sentinel_cells must be non-negative, got {max_critical_sentinel_cells}"
             )
+        required_consecutive_valid_frames = int(required_consecutive_valid_frames)
+        if required_consecutive_valid_frames <= 0:
+            raise ValueError("required_consecutive_valid_frames must be positive")
+        max_pose_map_skew_s = float(max_pose_map_skew_s)
+        if max_pose_map_skew_s < 0.0 or not math.isfinite(max_pose_map_skew_s):
+            raise ValueError("max_pose_map_skew_s must be finite and non-negative")
         self.node = node
         self.contract: HeightScanContract = load_height_scan_contract(contract_path)
         self.source = source
@@ -182,6 +205,10 @@ class HeightScanProvider:
         self.sentinel_abs_threshold = float(sentinel_abs_threshold)
         self.fallback = fallback
         self.max_last_valid_age_s = max_last_valid_age_s
+        self.required_consecutive_valid_frames = required_consecutive_valid_frames
+        self.require_source_stamp = bool(require_source_stamp)
+        self.max_pose_map_skew_s = max_pose_map_skew_s
+        self.consecutive_valid_frames = 0
         self.static_transform = load_static_transform(extrinsic_path)
         self.last_scan: np.ndarray | None = None
         self.last_valid_scan: np.ndarray | None = None
@@ -190,6 +217,7 @@ class HeightScanProvider:
         self.last_valid_monotonic_time: float | None = None
         self.last_pose_msg: Any | None = None
         self.last_pose_time: float | None = None
+        self.last_pose_source_stamp_s: float | None = None
 
         self.tf_buffer = None
         self.tf_listener = None
@@ -247,25 +275,87 @@ class HeightScanProvider:
             "noncritical_sentinel_cells": 0,
             "height_scan_clean": False,
             "height_scan_ok": False,
+            "source_stamp_valid": False,
+            "source_stamp_s": float("nan"),
+            "source_age_s": float("inf"),
+            "pose_stamp_s": float("nan"),
+            "pose_map_skew_s": float("inf"),
+            "consecutive_valid_frames": 0,
+            "required_consecutive_valid_frames": (
+                self.required_consecutive_valid_frames
+                if hasattr(self, "required_consecutive_valid_frames")
+                else 1
+            ),
         }
 
-    def _lookup_tf_transform(self, source_frame: str) -> tuple[StaticTransform | None, str]:
+    def _ros_now_seconds(self) -> float | None:
+        try:
+            return float(self.node.get_clock().now().nanoseconds) * 1.0e-9
+        except Exception:
+            return None
+
+    def _source_stamp_diagnostic(self, source_stamp_s: float | None) -> dict[str, Any]:
+        ros_now_s = self._ros_now_seconds()
+        if source_stamp_s is None:
+            return {
+                "source_stamp_valid": False,
+                "source_stamp_s": float("nan"),
+                "source_age_s": float("inf"),
+            }
+        source_age_s = (
+            float("nan") if ros_now_s is None else float(ros_now_s - source_stamp_s)
+        )
+        valid = ros_now_s is not None and -0.05 <= source_age_s <= self.timeout_s
+        return {
+            "source_stamp_valid": bool(valid),
+            "source_stamp_s": float(source_stamp_s),
+            "source_age_s": source_age_s,
+        }
+
+    def _record_frame_health(self, diag: dict[str, Any]) -> None:
+        if bool(diag.get("height_scan_ok", False)):
+            self.consecutive_valid_frames += 1
+        else:
+            self.consecutive_valid_frames = 0
+        diag["consecutive_valid_frames"] = self.consecutive_valid_frames
+        diag["required_consecutive_valid_frames"] = self.required_consecutive_valid_frames
+
+    def _lookup_tf_transform(
+        self,
+        source_frame: str,
+        source_stamp: Any | None,
+    ) -> tuple[StaticTransform | None, str]:
         if self.tf_buffer is None:
             return None, "transform_unavailable"
         try:
             import rclpy
 
-            msg = self.tf_buffer.lookup_transform(self.base_frame, source_frame, rclpy.time.Time())
+            if source_stamp is None:
+                if self.require_source_stamp:
+                    return None, "source_stamp_missing"
+                lookup_time = rclpy.time.Time()
+            else:
+                lookup_time = rclpy.time.Time.from_msg(source_stamp)
+            msg = self.tf_buffer.lookup_transform(
+                self.base_frame,
+                source_frame,
+                lookup_time,
+            )
             return _transform_from_ros_msg(msg), "tf"
         except Exception as exc:
             return None, f"transform_unavailable: {exc}"
 
-    def _points_to_base(self, points: np.ndarray, source_frame: str) -> tuple[np.ndarray | None, str]:
+    def _points_to_base(
+        self,
+        points: np.ndarray,
+        source_frame: str,
+        source_stamp: Any | None,
+    ) -> tuple[np.ndarray | None, str]:
         if source_frame == self.base_frame:
             return points, "identity"
         if not self.base_frame:
             return None, "missing_base_transform"
-        tf_transform, tf_status = self._lookup_tf_transform(source_frame)
+        tf_transform, tf_status = self._lookup_tf_transform(source_frame, source_stamp)
         if tf_transform is not None:
             return _transform_points(points, tf_transform), tf_status
         if self.static_transform is not None:
@@ -275,9 +365,32 @@ class HeightScanProvider:
     def _cloud_callback(self, msg: Any) -> None:
         now = time.monotonic()
         source_frame = msg.header.frame_id or self.lidar_frame
+        source_stamp = getattr(msg.header, "stamp", None)
+        source_stamp_diag = self._source_stamp_diagnostic(
+            _stamp_to_seconds(source_stamp)
+        )
+        if self.require_source_stamp and not source_stamp_diag["source_stamp_valid"]:
+            diag = self._base_diag("source_stamp_invalid")
+            diag.update(source_stamp_diag)
+            diag.update(
+                {
+                    "age_s": 0.0,
+                    "source_frame": source_frame,
+                    "height_scan_ok": False,
+                    "failure_reason": "source_stamp_invalid",
+                }
+            )
+            self._record_frame_health(diag)
+            self.last_msg_time = now
+            self.last_diag = diag
+            return
         try:
             points = pointcloud2_to_xyz(msg)
-            points_base, transform_status = self._points_to_base(points, source_frame)
+            points_base, transform_status = self._points_to_base(
+                points,
+                source_frame,
+                source_stamp,
+            )
             if points_base is None:
                 diag = self._base_diag("missing_base_transform")
                 diag.update(
@@ -293,6 +406,8 @@ class HeightScanProvider:
                         "failure_reason": "missing_base_transform",
                     }
                 )
+                diag.update(source_stamp_diag)
+                self._record_frame_health(diag)
                 self.last_msg_time = now
                 self.last_diag = diag
                 return
@@ -313,11 +428,15 @@ class HeightScanProvider:
                     ),
                 }
             )
+            diag.update(source_stamp_diag)
+            if not self.require_source_stamp and _stamp_to_seconds(source_stamp) is None:
+                diag["source_stamp_valid"] = False
             if not diag["height_scan_ok"]:
                 if diag.get("critical_valid_ratio", 0.0) < self.min_critical_valid_ratio:
                     diag["failure_reason"] = "sparse_critical"
                 elif diag.get("valid_ratio", 0.0) < self.min_valid_ratio:
                     diag["failure_reason"] = "sparse_pointcloud"
+            self._record_frame_health(diag)
             self.last_msg_time = now
             self.last_diag = diag
             if diag["height_scan_ok"]:
@@ -337,12 +456,17 @@ class HeightScanProvider:
                     "failure_reason": "invalid_cloud",
                 }
             )
+            diag.update(source_stamp_diag)
+            self._record_frame_health(diag)
             self.last_msg_time = now
             self.last_diag = diag
 
     def _pose_callback(self, msg: Any) -> None:
         self.last_pose_msg = msg
         self.last_pose_time = time.monotonic()
+        self.last_pose_source_stamp_s = _stamp_to_seconds(
+            getattr(getattr(msg, "header", None), "stamp", None)
+        )
 
     def _height_map_pose(self, now: float) -> tuple[tuple[float, float, float, float] | None, str, str, float]:
         if self.last_pose_msg is None or self.last_pose_time is None:
@@ -367,6 +491,42 @@ class HeightScanProvider:
     def _height_map_callback(self, msg: Any) -> None:
         now = time.monotonic()
         map_frame = getattr(msg, "frame_id", "")
+        map_stamp_s = _stamp_to_seconds(getattr(msg, "stamp", None))
+        source_stamp_diag = self._source_stamp_diagnostic(map_stamp_s)
+        pose_map_skew_s = (
+            float("inf")
+            if map_stamp_s is None or self.last_pose_source_stamp_s is None
+            else abs(map_stamp_s - self.last_pose_source_stamp_s)
+        )
+        stamp_gate_ok = bool(source_stamp_diag["source_stamp_valid"])
+        pose_stamp_ok = self.last_pose_source_stamp_s is not None
+        skew_ok = pose_map_skew_s <= self.max_pose_map_skew_s
+        if self.require_source_stamp and not (stamp_gate_ok and pose_stamp_ok and skew_ok):
+            if not stamp_gate_ok:
+                reason = "source_stamp_invalid"
+            elif not pose_stamp_ok:
+                reason = "pose_stamp_invalid"
+            else:
+                reason = "pose_map_stamp_skew"
+            diag = self._base_diag(reason)
+            diag.update(source_stamp_diag)
+            diag.update(
+                {
+                    "pose_stamp_s": (
+                        float("nan")
+                        if self.last_pose_source_stamp_s is None
+                        else self.last_pose_source_stamp_s
+                    ),
+                    "pose_map_skew_s": pose_map_skew_s,
+                    "map_frame": map_frame,
+                    "height_scan_ok": False,
+                    "failure_reason": reason,
+                }
+            )
+            self._record_frame_health(diag)
+            self.last_msg_time = now
+            self.last_diag = diag
+            return
         robot_pose, pose_frame, pose_status, pose_age_s = self._height_map_pose(now)
         if robot_pose is None:
             diag = self._base_diag(pose_status)
@@ -383,6 +543,14 @@ class HeightScanProvider:
                     "failure_reason": pose_status,
                 }
             )
+            diag.update(source_stamp_diag)
+            diag["pose_stamp_s"] = (
+                float("nan")
+                if self.last_pose_source_stamp_s is None
+                else self.last_pose_source_stamp_s
+            )
+            diag["pose_map_skew_s"] = pose_map_skew_s
+            self._record_frame_health(diag)
             self.last_msg_time = now
             self.last_diag = diag
             return
@@ -401,6 +569,14 @@ class HeightScanProvider:
                     "failure_reason": "frame_mismatch",
                 }
             )
+            diag.update(source_stamp_diag)
+            diag["pose_stamp_s"] = (
+                float("nan")
+                if self.last_pose_source_stamp_s is None
+                else self.last_pose_source_stamp_s
+            )
+            diag["pose_map_skew_s"] = pose_map_skew_s
+            self._record_frame_health(diag)
             self.last_msg_time = now
             self.last_diag = diag
             return
@@ -432,6 +608,14 @@ class HeightScanProvider:
                     "transform_status": "height_map_pose",
                 }
             )
+            diag.update(source_stamp_diag)
+            diag["pose_stamp_s"] = (
+                float("nan")
+                if self.last_pose_source_stamp_s is None
+                else self.last_pose_source_stamp_s
+            )
+            diag["pose_map_skew_s"] = pose_map_skew_s
+            self._record_frame_health(diag)
             self.last_msg_time = now
             self.last_diag = diag
             if diag["height_scan_ok"]:
@@ -453,6 +637,14 @@ class HeightScanProvider:
                     "failure_reason": "invalid_height_map",
                 }
             )
+            diag.update(source_stamp_diag)
+            diag["pose_stamp_s"] = (
+                float("nan")
+                if self.last_pose_source_stamp_s is None
+                else self.last_pose_source_stamp_s
+            )
+            diag["pose_map_skew_s"] = pose_map_skew_s
+            self._record_frame_health(diag)
             self.last_msg_time = now
             self.last_diag = diag
 
@@ -522,7 +714,8 @@ class HeightScanProvider:
                 failure_reason = "invalid_or_sparse"
             return self._fallback_scan(str(failure_reason), now)
         scan = self.last_scan.copy()
-        scan = np.nan_to_num(scan, nan=0.0, posinf=self.contract.clip[1], neginf=self.contract.clip[0])
+        if not np.isfinite(scan).all():
+            return self._fallback_scan("nonfinite", now)
         scan = np.clip(scan, self.contract.clip[0], self.contract.clip[1]).astype(np.float32)
         diag = dict(self.last_diag)
         diag.update({"age_s": float(age_s), "used_fallback": False, "fallback_reason": "none"})

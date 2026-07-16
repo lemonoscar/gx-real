@@ -1,7 +1,8 @@
 doc/
-policies/*
-!policies/
-!policies/env.yaml
+policies/*.onnx
+policies/*.pt
+policies/*.npz
+policies/height_scan_contract.yaml
 __pycache__/
 *.pyc
 logs/

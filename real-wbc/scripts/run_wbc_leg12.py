@@ -12,8 +12,6 @@ except ImportError:
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REAL_WBC_DIR = os.path.dirname(SCRIPT_DIR)
 GX_REAL_ROOT = os.path.dirname(REAL_WBC_DIR)
-DEFAULT_POLICY_PATH = os.path.join(GX_REAL_ROOT, "policies", "policy.onnx")
-DEFAULT_HEIGHT_SCAN_CONTRACT = os.path.join(GX_REAL_ROOT, "policies", "height_scan_contract.yaml")
 DEFAULT_LOG_DIR = os.path.join(GX_REAL_ROOT, "logs")
 
 
@@ -41,7 +39,31 @@ def configure_logging(log_root: str) -> str:
     return run_log_dir
 
 
-if __name__ == "__main__":
+def _root_path(path: str) -> str:
+    return path if os.path.isabs(path) else os.path.join(GX_REAL_ROOT, path)
+
+
+def main(deployment_kind: str) -> None:
+    if deployment_kind not in {"flat", "rough"}:
+        raise RuntimeError(f"unsupported deployment kind: {deployment_kind!r}")
+
+    from modules.deployment_profile import (
+        load_deployment_config,
+        load_deployment_profile,
+    )
+
+    deployment_config_path = os.path.join(
+        GX_REAL_ROOT,
+        "config",
+        "deployments",
+        f"{deployment_kind}.yaml",
+    )
+    deployment_config = load_deployment_config(deployment_config_path)
+    deployment_profile = load_deployment_profile(
+        deployment_config_path,
+        expected_kind=deployment_kind,
+    )
+    height_config = deployment_config["height_observation"]
 
     np.set_printoptions(precision=3)
     parser = argparse.ArgumentParser(
@@ -50,11 +72,19 @@ if __name__ == "__main__":
     parser.add_argument(
         "--policy_path",
         type=str,
-        default=DEFAULT_POLICY_PATH,
+        default=_root_path(deployment_config["policy_default"]),
     )
-    parser.add_argument("--artifact-manifest", default="config/artifact_manifest.yaml")
+    parser.add_argument(
+        "--artifact-manifest",
+        default=_root_path(deployment_config["artifact_manifest_default"]),
+    )
     parser.add_argument("--device", type=str, default="cpu")
-    parser.add_argument("--arm_pose", type=float, nargs=6, default=None)
+    parser.add_argument(
+        "--arm_pose",
+        type=float,
+        nargs=6,
+        default=deployment_profile.arm_joint_pose.astype(float).tolist(),
+    )
     parser.add_argument(
         "--arm-command-mode",
         choices=["joint", "cartesian"],
@@ -111,11 +141,15 @@ if __name__ == "__main__":
     parser.add_argument("--joy-acc-yaw", type=float, default=0.6)
     parser.add_argument("--joy-watchdog-sec", type=float, default=0.25)
     parser.add_argument("--joy-dry-run", action="store_true")
-    parser.add_argument("--gripper-cmd", type=float, default=0.0)
+    parser.add_argument(
+        "--gripper-cmd",
+        type=float,
+        default=deployment_profile.arm_gripper,
+    )
     parser.add_argument(
         "--arm-control-owner",
-        choices=["none", "wbc", "external_spacemouse"],
-        default="external_spacemouse",
+        choices=["none", "wbc", "external_spacemouse", "external_fixed_hold"],
+        default="external_fixed_hold",
     )
     parser.add_argument("--arm-state-topic", type=str, default="/arm/state")
     parser.add_argument("--arm-target-topic", type=str, default="/arm/target_state")
@@ -143,37 +177,32 @@ if __name__ == "__main__":
         dest="require_arm_state_for_rl",
         action="store_false",
     )
-    parser.add_argument("--enable-height-scan", action="store_true")
-    parser.add_argument(
-        "--height-scan-contract",
-        type=str,
-        default=DEFAULT_HEIGHT_SCAN_CONTRACT,
-    )
-    parser.add_argument(
-        "--height-scan-source",
-        choices=["pointcloud2", "height_map_array"],
-        default="pointcloud2",
-    )
-    parser.add_argument("--height-scan-topic", type=str, default="/unilidar/cloud")
-    parser.add_argument("--height-scan-pose-topic", type=str, default="/utlidar/robot_pose")
-    parser.add_argument("--height-scan-base-frame", type=str, default="base")
-    parser.add_argument("--height-scan-lidar-frame", type=str, default="unilidar_lidar")
-    parser.add_argument(
-        "--height-scan-extrinsic",
-        type=str,
-        default=None,
-    )
-    parser.add_argument("--height-scan-timeout", type=float, default=0.25)
-    parser.add_argument("--height-scan-min-valid-ratio", type=float, default=0.60)
-    parser.add_argument("--height-scan-min-critical-valid-ratio", type=float, default=0.95)
-    parser.add_argument("--height-scan-max-critical-sentinel-cells", type=int, default=10)
-    parser.add_argument("--height-scan-sentinel-abs-threshold", type=float, default=5.0)
-    parser.add_argument(
-        "--height-scan-fallback",
-        choices=["last_valid_then_zero", "zero"],
-        default="last_valid_then_zero",
-    )
-    parser.add_argument("--height-scan-max-last-valid-age", type=float, default=0.5)
+    if deployment_kind == "rough":
+        parser.add_argument(
+            "--height-scan-contract",
+            type=str,
+            default=_root_path(height_config["contract_default"]),
+        )
+        parser.set_defaults(height_scan_source=height_config["production_source"])
+        parser.add_argument(
+            "--height-scan-topic",
+            type=str,
+            default=height_config["topic_default"],
+        )
+        parser.add_argument(
+            "--height-scan-pose-topic",
+            type=str,
+            default=height_config["pose_topic_default"],
+        )
+        parser.add_argument("--height-scan-base-frame", type=str, default="base_link")
+        parser.add_argument("--height-scan-lidar-frame", type=str, default="lidar")
+        parser.add_argument("--height-scan-extrinsic", type=str, default=None)
+        parser.add_argument("--height-scan-timeout", type=float, default=0.25)
+        parser.add_argument("--height-scan-min-valid-ratio", type=float, default=0.60)
+        parser.add_argument("--height-scan-min-critical-valid-ratio", type=float, default=0.95)
+        parser.add_argument("--height-scan-max-critical-sentinel-cells", type=int, default=0)
+        parser.add_argument("--height-scan-sentinel-abs-threshold", type=float, default=5.0)
+        parser.add_argument("--height-scan-max-last-valid-age", type=float, default=0.1)
     parser.add_argument(
         "--leg-kp",
         type=float,
@@ -239,7 +268,7 @@ if __name__ == "__main__":
         "--no-live-ready-calibration",
         dest="live_ready_pose_calibration",
         action="store_false",
-        default=True,
+        default=deployment_profile.allow_live_ready_pose_calibration,
         help=(
             "Do not use the current standing leg pose as the runtime policy ready/action "
             "offset when R1 is pressed in internal mode."
@@ -265,8 +294,12 @@ if __name__ == "__main__":
         ],
     )
     args = parser.parse_args()
-    if args.arm_control_owner == "wbc":
-        parser.error("production WBC-owned X5 writer is blocked; use external_spacemouse")
+    args.deployment_profile = deployment_profile
+    if args.arm_control_owner != "external_fixed_hold":
+        parser.error(
+            "production requires the x5_fixed_hold owner; SpaceMouse motion is outside "
+            "this policy's training distribution"
+        )
     if args.arm_observation_mode != "live":
         parser.error("production requires live arm state; fixed_initial is offline-only")
     if not args.require_arm_state_for_rl:
@@ -284,6 +317,7 @@ if __name__ == "__main__":
         manifest_path,
         root=__import__("pathlib").Path(GX_REAL_ROOT),
         expected_x5_model="X5",
+        expected_policy_kind=deployment_kind,
         runtime_policy_path=args.policy_path,
     )
     logging.info("Verified production artifact hashes: %s", verified_hashes)
@@ -312,3 +346,10 @@ if __name__ == "__main__":
                     logging.exception("Log dump failed after outputs were disabled")
             wbc_node.destroy_node()
         rclpy.shutdown()
+
+
+if __name__ == "__main__":
+    raise SystemExit(
+        "run_wbc_leg12.py is an internal shared entrypoint; use run_wbc_flat.py or "
+        "run_wbc_rough.py"
+    )

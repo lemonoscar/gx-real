@@ -1,5 +1,6 @@
 schema_version: 1
 release_status: UNRELEASED
+policy_kind: flat
 git_commit: 264f10cc7c65be5af7f0d88a6db0043113265c97
 dirty_worktree_policy: REJECT
 policy:
@@ -8,6 +9,10 @@ policy:
 environment_config:
   path: policies/env.yaml
   sha256: bdd88ccbf71d862b72183d70fa6fabdc64a5b270c42c7fb37295e463b7bb2462
+height_observation:
+  mode: zero_constant
+  dimension: 187
+  slice: [66, 253]
 expected_observation_shape: [260]
 expected_action_shape: [12]
 expected_joint_order:

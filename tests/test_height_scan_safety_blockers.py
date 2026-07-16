@@ -65,6 +65,18 @@ class FakeNode:
         return object()
 
 
+class StampedFakeNode(FakeNode):
+    def __init__(self, ros_time_s):
+        self.ros_time_s = float(ros_time_s)
+
+    def get_clock(self):
+        return SimpleNamespace(
+            now=lambda: SimpleNamespace(
+                nanoseconds=int(round(self.ros_time_s * 1.0e9))
+            )
+        )
+
+
 class FakeTfBuffer:
     def __init__(self, translation):
         self.translation = translation
@@ -102,7 +114,7 @@ def _provider(**kwargs):
 
 def _height_map_provider(**kwargs):
     return HeightScanProvider(
-        FakeNode(),
+        kwargs.pop("node", FakeNode()),
         contract_path=str(CONTRACT_PATH),
         source="height_map_array",
         topic="/height_map",
@@ -143,12 +155,20 @@ def _valid_points(height=0.10):
     )
 
 
-def _height_map_msg(data, *, frame_id="odom", origin=(-2.0, -2.0), resolution=0.1):
+def _height_map_msg(
+    data,
+    *,
+    frame_id="odom",
+    origin=(-2.0, -2.0),
+    resolution=0.1,
+    stamp=0.0,
+):
     array = np.asarray(data, dtype=np.float32)
     if array.ndim != 2:
         raise ValueError("height map test data must be 2-D")
     return SimpleNamespace(
         frame_id=frame_id,
+        stamp=float(stamp),
         resolution=float(resolution),
         width=int(array.shape[1]),
         height=int(array.shape[0]),
@@ -167,10 +187,24 @@ def _set_height_map_cell(data, xy, value, *, origin=(-2.0, -2.0), resolution=0.1
     data[iy, ix] = float(value)
 
 
-def _pose_msg(*, frame_id="odom", x=0.0, y=0.0, z=0.5, yaw=0.0):
+def _pose_msg(
+    *,
+    frame_id="odom",
+    x=0.0,
+    y=0.0,
+    z=0.5,
+    yaw=0.0,
+    stamp=0.0,
+):
     half_yaw = 0.5 * float(yaw)
     return SimpleNamespace(
-        header=SimpleNamespace(frame_id=frame_id),
+        header=SimpleNamespace(
+            frame_id=frame_id,
+            stamp=SimpleNamespace(
+                sec=int(stamp),
+                nanosec=int(round((float(stamp) - int(stamp)) * 1.0e9)),
+            ),
+        ),
         pose=SimpleNamespace(
             position=SimpleNamespace(x=float(x), y=float(y), z=float(z)),
             orientation=SimpleNamespace(x=0.0, y=0.0, z=float(np.sin(half_yaw)), w=float(np.cos(half_yaw))),
@@ -272,6 +306,60 @@ def test_height_map_array_all_valid_is_accepted():
     assert diag["valid_ratio"] == 1.0
     assert diag["critical_valid_ratio"] == 1.0
     assert diag["sentinel_cells"] == 0
+
+
+def test_height_map_source_and_pose_stamps_are_required_and_synchronized():
+    provider = _height_map_provider(
+        node=StampedFakeNode(ros_time_s=100.0),
+        require_source_stamp=True,
+        max_pose_map_skew_s=0.03,
+        required_consecutive_valid_frames=1,
+    )
+    data = _flat_height_map()
+
+    provider._pose_callback(_pose_msg(stamp=99.98))
+    provider._height_map_callback(_height_map_msg(data, stamp=99.99))
+    _, diag = provider.get_scan()
+
+    assert diag["height_scan_ok"] is True
+    assert diag["source_stamp_valid"] is True
+    assert diag["source_age_s"] == pytest.approx(0.01)
+    assert diag["pose_map_skew_s"] == pytest.approx(0.01)
+    assert diag["consecutive_valid_frames"] == 1
+
+
+def test_height_map_pose_stamp_skew_fails_closed():
+    provider = _height_map_provider(
+        node=StampedFakeNode(ros_time_s=100.0),
+        require_source_stamp=True,
+        max_pose_map_skew_s=0.03,
+    )
+    data = _flat_height_map()
+
+    provider._pose_callback(_pose_msg(stamp=99.90))
+    provider._height_map_callback(_height_map_msg(data, stamp=99.99))
+    _, diag = provider.get_scan()
+
+    assert diag["height_scan_ok"] is False
+    assert diag["failure_reason"] == "pose_map_stamp_skew"
+    assert diag["pose_map_skew_s"] > provider.max_pose_map_skew_s
+    assert diag["consecutive_valid_frames"] == 0
+
+
+def test_stale_height_map_source_stamp_fails_closed():
+    provider = _height_map_provider(
+        node=StampedFakeNode(ros_time_s=100.0),
+        require_source_stamp=True,
+    )
+    data = _flat_height_map()
+
+    provider._pose_callback(_pose_msg(stamp=99.0))
+    provider._height_map_callback(_height_map_msg(data, stamp=99.0))
+    _, diag = provider.get_scan()
+
+    assert diag["height_scan_ok"] is False
+    assert diag["failure_reason"] == "source_stamp_invalid"
+    assert diag["source_age_s"] > provider.timeout_s
 
 
 def test_height_map_array_noncritical_sentinel_is_reported_but_accepted():

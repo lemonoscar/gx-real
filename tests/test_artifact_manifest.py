@@ -28,10 +28,16 @@ def _manifest(root: Path) -> dict:
     return {
         "schema_version": 1,
         "release_status": "RELEASED",
+        "policy_kind": "flat",
         "git_commit": "abc",
         "dirty_worktree_policy": "REJECT",
         "policy": _write(root, "policy.onnx", b"policy"),
         "environment_config": _write(root, "env.yaml", b"env"),
+        "height_observation": {
+            "mode": "zero_constant",
+            "dimension": 187,
+            "slice": [66, 253],
+        },
         "expected_observation_shape": [260],
         "expected_action_shape": [12],
         "expected_joint_order": EXPECTED_GO2_JOINT_ORDER.copy(),
@@ -56,6 +62,7 @@ def _verify(root: Path, manifest: dict, **changes):
         actual_onnxruntime_version="1.16.0",
         actual_rmw_implementation="rmw_cyclonedds_cpp",
         expected_x5_model="X5",
+        expected_policy_kind="flat",
     )
     runtime.update(changes)
     return verify_manifest(manifest, **runtime)
@@ -78,6 +85,7 @@ def test_joint_order_model_dirty_and_runtime_version_mismatches_fail(tmp_path: P
     mutations = [
         (lambda m: m.update(expected_joint_order=list(reversed(m["expected_joint_order"]))), {}),
         (lambda m: m.update(expected_x5_model="L5"), {}),
+        (lambda m: m.update(policy_kind="rough"), {}),
         (lambda m: None, {"worktree_dirty": True}),
         (lambda m: None, {"actual_onnxruntime_version": "other"}),
     ]
@@ -86,6 +94,54 @@ def test_joint_order_model_dirty_and_runtime_version_mismatches_fail(tmp_path: P
         mutate(manifest)
         with pytest.raises(ArtifactManifestFault):
             _verify(tmp_path, manifest, **runtime)
+
+
+def test_rough_manifest_requires_hashed_height_and_perception_contracts(tmp_path: Path) -> None:
+    manifest = _manifest(tmp_path)
+    manifest["policy_kind"] = "rough"
+    manifest["height_observation"] = {
+        "mode": "live_elevation_map",
+        "dimension": 187,
+        "slice": [66, 253],
+    }
+
+    with pytest.raises(ArtifactManifestFault, match="height_scan_contract"):
+        _verify(tmp_path, manifest, expected_policy_kind="rough")
+
+    manifest["height_scan_contract"] = _write(
+        tmp_path,
+        "height_scan_contract.yaml",
+        b"height",
+    )
+    manifest["perception_contract"] = _write(
+        tmp_path,
+        "perception_contract.yaml",
+        b"perception",
+    )
+    manifest["height_scan_reference"] = _write(
+        tmp_path,
+        "height_scan_reference.npz",
+        b"reference",
+    )
+    manifest["training_checkpoint"] = _write(
+        tmp_path,
+        "model_29500.pt",
+        b"checkpoint",
+    )
+    manifest["training_agent_config"] = _write(
+        tmp_path,
+        "agent.yaml",
+        b"agent",
+    )
+    manifest["export_metadata"] = _write(
+        tmp_path,
+        "export_metadata.json",
+        b"metadata",
+    )
+
+    verified = _verify(tmp_path, manifest, expected_policy_kind="rough")
+    assert "height_scan_contract" in verified
+    assert "perception_contract" in verified
 
 
 def test_missing_library_and_manifest_field_fail(tmp_path: Path) -> None:

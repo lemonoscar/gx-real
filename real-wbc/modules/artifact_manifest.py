@@ -18,10 +18,12 @@ REQUIRED_FIELDS = frozenset(
     {
         "schema_version",
         "release_status",
+        "policy_kind",
         "git_commit",
         "dirty_worktree_policy",
         "policy",
         "environment_config",
+        "height_observation",
         "expected_observation_shape",
         "expected_action_shape",
         "expected_joint_order",
@@ -43,6 +45,15 @@ EXPECTED_GO2_JOINT_ORDER = [
     "RR_hip_joint", "RR_thigh_joint", "RR_calf_joint",
     "RL_hip_joint", "RL_thigh_joint", "RL_calf_joint",
 ]
+
+ROUGH_HASHED_ARTIFACTS = (
+    "height_scan_contract",
+    "height_scan_reference",
+    "perception_contract",
+    "training_checkpoint",
+    "training_agent_config",
+    "export_metadata",
+)
 
 
 def sha256_file(path: Path) -> str:
@@ -76,6 +87,7 @@ def verify_manifest(
     actual_onnxruntime_version: str,
     actual_rmw_implementation: str,
     expected_x5_model: str,
+    expected_policy_kind: str | None = None,
 ) -> dict[str, str]:
     if manifest["release_status"] != "RELEASED":
         raise ArtifactManifestFault("artifact manifest is not RELEASED")
@@ -93,6 +105,25 @@ def verify_manifest(
         raise ArtifactManifestFault("expected joint order does not match Go2 interface order")
     if manifest["expected_x5_model"] != expected_x5_model:
         raise ArtifactManifestFault("X5 model does not match artifact manifest")
+    policy_kind = str(manifest["policy_kind"]).lower()
+    if policy_kind not in {"flat", "rough"}:
+        raise ArtifactManifestFault(f"unsupported policy_kind: {policy_kind!r}")
+    if expected_policy_kind is not None and policy_kind != str(expected_policy_kind).lower():
+        raise ArtifactManifestFault(
+            f"policy kind mismatch: expected {expected_policy_kind}, got {policy_kind}"
+        )
+    height_observation = manifest["height_observation"]
+    if not isinstance(height_observation, dict):
+        raise ArtifactManifestFault("height_observation must be a mapping")
+    if int(height_observation.get("dimension", -1)) != 187:
+        raise ArtifactManifestFault("height_observation dimension must be 187")
+    if list(height_observation.get("slice", [])) != [66, 253]:
+        raise ArtifactManifestFault("height_observation slice must be [66, 253]")
+    expected_height_mode = "zero_constant" if policy_kind == "flat" else "live_elevation_map"
+    if height_observation.get("mode") != expected_height_mode:
+        raise ArtifactManifestFault(
+            f"{policy_kind} policy requires height_observation mode {expected_height_mode}"
+        )
     versions = {
         "python_version": actual_python_version,
         "onnxruntime_version": actual_onnxruntime_version,
@@ -111,6 +142,13 @@ def verify_manifest(
     ):
         artifact = manifest[label]
         _verify_hashed_artifact(root, label, artifact, verified)
+    if policy_kind == "rough":
+        for label in ROUGH_HASHED_ARTIFACTS:
+            if label not in manifest:
+                raise ArtifactManifestFault(
+                    f"rough artifact manifest missing {label}"
+                )
+            _verify_hashed_artifact(root, label, manifest[label], verified)
     libraries = manifest["shared_libraries"]
     if not isinstance(libraries, list) or not libraries:
         raise ArtifactManifestFault("shared_libraries must be non-empty")
@@ -128,6 +166,7 @@ def validate_repository_manifest(
     *,
     root: Path,
     expected_x5_model: str,
+    expected_policy_kind: str | None = None,
     runtime_policy_path: str | Path | None = None,
 ) -> dict[str, str]:
     manifest = load_manifest(path)
@@ -153,6 +192,7 @@ def validate_repository_manifest(
         actual_onnxruntime_version=ort_version,
         actual_rmw_implementation=str(__import__("os").environ.get("RMW_IMPLEMENTATION", "")),
         expected_x5_model=expected_x5_model,
+        expected_policy_kind=expected_policy_kind,
     )
 
 
