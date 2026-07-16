@@ -71,7 +71,7 @@ class DeploymentProfile:
     ) -> None:
         raise NotImplementedError
 
-    def validate_height_source(self, source: str) -> None:
+    def validate_height_source(self, source: str, map_layer: str | None = None) -> None:
         raise NotImplementedError
 
     def height_observation(
@@ -146,7 +146,8 @@ class FlatDeployment(DeploymentProfile):
             f"flat deployment found unsupported height_scan policy: {label} func={actual_func!r}"
         )
 
-    def validate_height_source(self, source: str) -> None:
+    def validate_height_source(self, source: str, map_layer: str | None = None) -> None:
+        del map_layer
         if str(source).lower() not in {"", "none", "zero_constant"}:
             raise DeploymentProfileFault(
                 f"flat deployment has no height source, got {source!r}"
@@ -220,11 +221,15 @@ class RoughDeployment(DeploymentProfile):
             f"rough deployment found unsupported height_scan policy: {label} func={actual_func!r}"
         )
 
-    def validate_height_source(self, source: str) -> None:
-        if source != "height_map_array":
+    def validate_height_source(self, source: str, map_layer: str | None = "elevation") -> None:
+        if source != "grid_map":
             raise DeploymentProfileFault(
-                "rough production source must be height_map_array; "
-                f"direct pointcloud is diagnostic-only, got {source!r}"
+                "rough production source must be grid_map; direct pointcloud and "
+                f"Unitree HeightMap are diagnostic-only, got {source!r}"
+            )
+        if map_layer != "elevation":
+            raise DeploymentProfileFault(
+                f"rough production GridMap layer must be 'elevation', got {map_layer!r}"
             )
 
     def height_observation(
@@ -242,6 +247,10 @@ class RoughDeployment(DeploymentProfile):
             return self._unavailable("height_provider_exception", error=str(exc))
 
         diag = dict(diag_value or {})
+        if diag.get("height_scan_source") != "grid_map":
+            return self._unavailable("height_scan_source_not_grid_map", source_diag=diag)
+        if diag.get("map_layer") != "elevation":
+            return self._unavailable("height_scan_layer_not_elevation", source_diag=diag)
         if not bool(diag.get("height_scan_ok", False)):
             return self._unavailable(
                 str(diag.get("failure_reason") or diag.get("fallback_reason") or "height_scan_invalid"),
@@ -342,9 +351,13 @@ def load_deployment_profile(
         raise DeploymentProfileFault(
             "rough deployment must use live_elevation_map with create_provider=true"
         )
-    if height.get("production_source") != "height_map_array":
+    if height.get("production_source") != "grid_map":
         raise DeploymentProfileFault(
-            "rough deployment production_source must be height_map_array"
+            "rough deployment production_source must be grid_map"
+        )
+    if height.get("layer_default") != "elevation":
+        raise DeploymentProfileFault(
+            "rough deployment layer_default must be elevation"
         )
     return RoughDeployment(
         required_consecutive_valid_frames=int(

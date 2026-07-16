@@ -280,6 +280,30 @@ def _verify_rough_perception_release_contract(root: Path, artifact: Any) -> None
         raise ArtifactManifestFault("rough perception contract must be a YAML mapping")
     if str(data.get("verification_status", "")).upper() != "VERIFIED":
         raise ArtifactManifestFault("rough perception contract is not VERIFIED")
+    if data.get("production_source") != "grid_map":
+        raise ArtifactManifestFault(
+            "rough perception contract production_source must be grid_map"
+        )
+
+    grid_map = data.get("grid_map")
+    if not isinstance(grid_map, dict):
+        raise ArtifactManifestFault("rough perception contract requires grid_map section")
+    expected_grid_map = {
+        "message_type": "grid_map_msgs/msg/GridMap",
+        "layer": "elevation",
+        "matrix_storage": "column_major",
+        "circular_buffer_indices": "required",
+    }
+    mismatched_grid_map = [
+        name
+        for name, expected in expected_grid_map.items()
+        if grid_map.get(name) != expected
+    ]
+    if mismatched_grid_map:
+        raise ArtifactManifestFault(
+            "rough perception contract has invalid GridMap wire contract: "
+            f"{mismatched_grid_map}"
+        )
 
     calibration = data.get("calibration")
     mapping = data.get("mapping")

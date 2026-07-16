@@ -30,7 +30,7 @@ policy_torchscript:
   sha256: a441d2b626f50d218fb65352023125b5208a90dc5eca9a18b8a797c6736406b7
 perception_contract:
   path: policies/rough/current/perception_contract.yaml
-  sha256: 7dfbbcbbda1ad6c08bd216b1d07bac04c6ce498e7b6c486628b03516268f2746
+  sha256: 451ae99746184e5c58047f5ebb416771686b28d3215ff9d353544b032791a9e7
 training_checkpoint:
   path: policies/rough/current/model_29500.pt
   sha256: 6b257727fafb8c84d7b449bb389a61d24aff4cdaaa853ad83fe9627a2db77cfd

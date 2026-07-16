@@ -1,13 +1,18 @@
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "real-wbc"))
 
 from modules.height_scan_core import (  # noqa: E402
+    HeightScanContract,
+    grid_map_multi_array_to_matrix,
+    grid_map_to_height_scan,
     height_map_to_height_scan,
     load_height_scan_contract,
     make_plane_points,
@@ -29,6 +34,26 @@ def _set_map_cell(data, origin, resolution, xy, value):
     ix = int(round((float(xy[0]) - origin[0]) / resolution))
     iy = int(round((float(xy[1]) - origin[1]) / resolution))
     data[iy, ix] = float(value)
+
+
+def _set_grid_map_cell(buffer, resolution, center, start, xy, value):
+    size = np.asarray(buffer.shape, dtype=np.int64)
+    length = size.astype(np.float64) * float(resolution)
+    delta = np.asarray(center) + 0.5 * length - np.asarray(xy)
+    assert np.all(delta >= 0.0) and np.all(delta < length)
+    unwrapped = np.floor(delta / float(resolution)).astype(np.int64)
+    index = (unwrapped + np.asarray(start, dtype=np.int64)) % size
+    buffer[int(index[0]), int(index[1])] = float(value)
+    return tuple(index.tolist())
+
+
+def _grid_map_query_xy(contract, robot_pose):
+    robot_x, robot_y, yaw, _ = robot_pose
+    cosine = np.cos(yaw)
+    sine = np.sin(yaw)
+    x = robot_x + cosine * contract.grid_xy[:, 0] - sine * contract.grid_xy[:, 1]
+    y = robot_y + sine * contract.grid_xy[:, 0] + cosine * contract.grid_xy[:, 1]
+    return np.column_stack((x, y))
 
 
 def test_plane_output_shape_finite_and_valid_ratio():
@@ -232,3 +257,199 @@ def test_height_map_bounded_critical_sentinel_can_be_tolerated():
     assert diag["critical_sentinel_over_limit_cells"] == 0
     assert diag["critical_accepted_ratio"] >= 0.95
     assert diag["failure_reason"] == "none"
+
+
+def test_grid_map_multi_array_decodes_grid_map_ros_converter_column_major_layout():
+    expected = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], dtype=np.float32)
+    message = SimpleNamespace(
+        layout=SimpleNamespace(
+            dim=[
+                SimpleNamespace(label="column_index", size=3, stride=6),
+                SimpleNamespace(label="row_index", size=2, stride=2),
+            ],
+            data_offset=0,
+        ),
+        data=expected.reshape(-1, order="F").tolist(),
+    )
+
+    decoded = grid_map_multi_array_to_matrix(message)
+
+    assert np.array_equal(decoded, expected)
+
+
+def test_grid_map_multi_array_rejects_non_converter_storage_order():
+    message = SimpleNamespace(
+        layout=SimpleNamespace(
+            dim=[
+                SimpleNamespace(label="row_index", size=2, stride=6),
+                SimpleNamespace(label="column_index", size=3, stride=3),
+            ],
+            data_offset=0,
+        ),
+        data=[0.0] * 6,
+    )
+
+    with pytest.raises(ValueError, match="column-major labels"):
+        grid_map_multi_array_to_matrix(message)
+
+
+def test_grid_map_indices_match_upstream_grid_map_core_circular_buffer_fixture():
+    # Values and expected buffer indices mirror GridMapMathTest.IndexFromPosition/CircularBuffer.
+    contract = HeightScanContract(
+        obs_dim=2,
+        height_scan_dim=2,
+        grid_xy=np.array([[0.20, 0.15], [0.03, -0.17]], dtype=np.float32),
+        clip=(-1.0, 1.0),
+        scale=1.0,
+        offset=0.0,
+        observation_slices={},
+    )
+    buffer = np.full((5, 4), np.nan, dtype=np.float32)
+    buffer[3, 1] = -0.10
+    buffer[0, 0] = -0.20
+
+    scan, diag = grid_map_to_height_scan(
+        buffer,
+        0.1,
+        (0.5, 0.4),
+        (0.4, -0.9),
+        (3, 1),
+        (0.4, -0.9, 0.0, 0.0),
+        contract,
+        min_valid_ratio=1.0,
+        min_critical_valid_ratio=1.0,
+    )
+
+    assert diag["ok"] is True
+    assert np.allclose(scan, [0.10, 0.20], atol=1.0e-7)
+
+
+def test_grid_map_rejects_geometry_that_only_rounds_to_matrix_size():
+    contract = HeightScanContract(
+        obs_dim=1,
+        height_scan_dim=1,
+        grid_xy=np.zeros((1, 2), dtype=np.float32),
+        clip=(-1.0, 1.0),
+        scale=1.0,
+        offset=0.0,
+        observation_slices={},
+    )
+
+    with pytest.raises(ValueError, match="lengths must equal matrix size times resolution"):
+        grid_map_to_height_scan(
+            np.zeros((40, 40), dtype=np.float32),
+            0.1,
+            (4.04, 4.0),
+            (0.0, 0.0),
+            (0, 0),
+            (0.0, 0.0, 0.0, 0.0),
+            contract,
+        )
+
+
+def test_grid_map_sampling_matches_yaw_order_sign_and_circular_buffer_contract():
+    contract = _contract()
+    robot_pose = (1.25, -0.75, 0.63, 0.72)
+    resolution = 0.01
+    buffer = np.full((240, 240), np.nan, dtype=np.float32)
+    center = (robot_pose[0] + 0.003, robot_pose[1] - 0.004)
+    start = (73, 119)
+    expected = (
+        0.20 * contract.grid_xy[:, 0] - 0.10 * contract.grid_xy[:, 1]
+    ).astype(np.float32)
+    indices = []
+    for xy, scan_value in zip(_grid_map_query_xy(contract, robot_pose), expected):
+        map_height = robot_pose[3] - contract.offset - float(scan_value)
+        indices.append(
+            _set_grid_map_cell(buffer, resolution, center, start, xy, map_height)
+        )
+    assert len(set(indices)) == contract.height_scan_dim
+
+    scan, diag = grid_map_to_height_scan(
+        buffer,
+        resolution,
+        np.asarray(buffer.shape) * resolution,
+        center,
+        start,
+        robot_pose,
+        contract,
+    )
+
+    assert diag["ok"] is True
+    assert diag["grid_map_outer_start_index"] == start[0]
+    assert diag["grid_map_inner_start_index"] == start[1]
+    assert np.max(np.abs(scan - expected)) < 1.0e-6
+
+
+def test_grid_map_production_does_not_fill_unknown_robot_footprint():
+    contract = _contract()
+    resolution = 0.01
+    buffer = np.zeros((240, 240), dtype=np.float32)
+    center = (0.003, -0.004)
+    start = (31, 47)
+    robot_pose = (0.0, 0.0, 0.0, contract.offset)
+    footprint_index = int(np.argmin(np.linalg.norm(contract.grid_xy, axis=1)))
+    footprint_xy = _grid_map_query_xy(contract, robot_pose)[footprint_index]
+    _set_grid_map_cell(buffer, resolution, center, start, footprint_xy, np.nan)
+
+    _, diag = grid_map_to_height_scan(
+        buffer,
+        resolution,
+        np.asarray(buffer.shape) * resolution,
+        center,
+        start,
+        robot_pose,
+        contract,
+        max_critical_sentinel_cells=0,
+    )
+
+    assert diag["ok"] is False
+    assert diag["failure_reason"] == "sentinel_critical"
+    assert diag["footprint_sentinel_cells"] == 1
+    assert diag["footprint_filled_cells"] == 0
+    assert diag["critical_sentinel_cells"] == 1
+
+
+def test_grid_map_path_reproduces_saved_isaac_lab_reference_exactly():
+    contract = load_height_scan_contract(
+        str(ROOT / "policies" / "rough" / "current" / "height_scan_contract.yaml")
+    )
+    with np.load(
+        ROOT / "policies" / "rough" / "current" / "height_scan_reference.npz",
+        allow_pickle=False,
+    ) as reference:
+        expected = np.asarray(reference["sample_height_scan"][0], dtype=np.float32)
+        ray_hits = np.asarray(reference["sample_ray_hits_w"][0], dtype=np.float64)
+        base_pose = np.asarray(reference["sample_robot_base_pose"][0], dtype=np.float64)
+
+    robot_x, robot_y, robot_z = base_pose[:3]
+    quaternion_wxyz = base_pose[3:7]
+    w, x, y, z = quaternion_wxyz
+    yaw = np.arctan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+    robot_pose = (robot_x, robot_y, yaw, robot_z)
+    query_xy = _grid_map_query_xy(contract, robot_pose)
+    assert np.max(np.abs(query_xy - ray_hits[:, :2])) < 1.0e-5
+
+    resolution = 0.005
+    buffer = np.full((480, 480), np.nan, dtype=np.float32)
+    center = (robot_x + 0.0013, robot_y - 0.0017)
+    start = (137, 91)
+    indices = []
+    for xy, hit in zip(query_xy, ray_hits):
+        indices.append(
+            _set_grid_map_cell(buffer, resolution, center, start, xy, hit[2])
+        )
+    assert len(set(indices)) == contract.height_scan_dim
+
+    scan, diag = grid_map_to_height_scan(
+        buffer,
+        resolution,
+        np.asarray(buffer.shape) * resolution,
+        center,
+        start,
+        robot_pose,
+        contract,
+    )
+
+    assert diag["ok"] is True
+    assert np.max(np.abs(scan - expected)) < 1.0e-6

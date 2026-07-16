@@ -9,6 +9,8 @@
 >
 > 当前 Flat/Rough manifest 均为 `UNRELEASED`，Rough perception contract
 > 仍为 `UNVERIFIED`。这表示仓库有意拒绝真实 LowCmd/CAN 输出，不是需要绕过的错误。
+> Rough LiDAR 生产后端已固定为 `GridMap/elevation`；Unitree HeightMap 仅诊断。
+> 依据见 [LiDAR / height-map 后端决策](docs/lidar_height_backend_decision_2026-07-16.md)。
 
 这份文档面向第一次接触本仓库的人，目标是把 `real` 目录下分散的上机、网络、硬件和策略替换说明整理成一条完整开发路径。默认部署环境是机器狗机身上的 Jetson Orin NX 开发板，路径按 `~/gx-real` 书写。当前主线不是原始 UMI-on-Legs 的完整末端轨迹控制链，而是 `Go2 + X5/ARX5` 真机上的分离控制链：WBC 主节点只写 Go2 腿部，独立 SpaceMouse Arm 节点独占 X5/ARX5。
 

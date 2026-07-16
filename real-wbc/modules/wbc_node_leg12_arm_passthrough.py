@@ -360,16 +360,17 @@ class WBCNodeLeg12ArmPassthrough(Node):
         leg_kp: float = 200.0,
         leg_kd: float = 10.0,
         height_scan_contract: str = "policies/rough/current/height_scan_contract.yaml",
-        height_scan_source: str = "height_map_array",
+        height_scan_source: str = "grid_map",
         height_scan_topic: str = "/terrain/elevation_map",
         height_scan_pose_topic: str = "/localization/pose",
+        height_scan_map_layer: str = "elevation",
         height_scan_base_frame: str = "base_link",
         height_scan_lidar_frame: str = "lidar",
         height_scan_extrinsic: Optional[str] = None,
         height_scan_timeout: float = 0.25,
         height_scan_min_valid_ratio: float = 0.60,
         height_scan_min_critical_valid_ratio: float = 0.95,
-        height_scan_max_critical_sentinel_cells: int = 10,
+        height_scan_max_critical_sentinel_cells: int = 0,
         height_scan_sentinel_abs_threshold: float = 5.0,
         height_scan_max_last_valid_age: float = 0.1,
         final_command_contract: str = "config/go2_leg_safety_contract.yaml",
@@ -658,6 +659,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.height_scan_source = height_scan_source
         self.height_scan_topic = height_scan_topic
         self.height_scan_pose_topic = height_scan_pose_topic
+        self.height_scan_map_layer = height_scan_map_layer
         self.height_scan_base_frame = height_scan_base_frame
         self.height_scan_lidar_frame = height_scan_lidar_frame
         self.height_scan_extrinsic = height_scan_extrinsic
@@ -1136,7 +1138,10 @@ class WBCNodeLeg12ArmPassthrough(Node):
                 "Flat deployment selected; height_scan observation is an exact zero constant"
             )
             return
-        self.deployment_profile.validate_height_source(self.height_scan_source)
+        self.deployment_profile.validate_height_source(
+            self.height_scan_source,
+            self.height_scan_map_layer,
+        )
         contract_path = self.height_scan_contract_path
         if not os.path.isabs(contract_path):
             contract_path = os.path.join(GX_REAL_ROOT, contract_path)
@@ -1146,6 +1151,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
             source=self.height_scan_source,
             topic=self.height_scan_topic,
             pose_topic=self.height_scan_pose_topic,
+            map_layer=self.height_scan_map_layer,
             base_frame=self.height_scan_base_frame,
             lidar_frame=self.height_scan_lidar_frame,
             extrinsic_path=self.height_scan_extrinsic,
@@ -1175,7 +1181,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
                 f"height-scan contract slice must be [66, 253], got {contract.observation_slices.get('height_scan')}"
             )
         logging.info(
-            "Height scan provider enabled | source=%s topic=%s pose_topic=%s contract=%s timeout=%.3f "
+            "Height scan provider enabled | source=%s topic=%s pose_topic=%s layer=%s contract=%s timeout=%.3f "
             "min_valid_ratio=%.2f min_critical_valid_ratio=%.2f max_critical_sentinel_cells=%d "
             "required_valid_frames=%d require_source_stamp=%s max_pose_map_skew=%.3f "
             "max_last_valid_age=%.3f"
@@ -1183,6 +1189,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
                 self.height_scan_source,
                 self.height_scan_topic,
                 self.height_scan_pose_topic,
+                self.height_scan_map_layer,
                 contract_path,
                 self.height_scan_timeout,
                 self.height_scan_min_valid_ratio,

@@ -13,6 +13,8 @@ import yaml
 
 from modules.height_scan_core import (
     HeightScanContract,
+    grid_map_multi_array_to_matrix,
+    grid_map_to_height_scan,
     height_map_to_height_scan,
     load_height_scan_contract,
     points_to_height_scan,
@@ -61,6 +63,23 @@ def _yaw_from_ros_quat(quat: Any) -> float:
     z = float(quat.z)
     w = float(quat.w)
     return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+
+
+def _require_identity_grid_map_orientation(quat: Any, tolerance: float = 1.0e-6) -> None:
+    values = np.array(
+        [float(quat.x), float(quat.y), float(quat.z), float(quat.w)],
+        dtype=np.float64,
+    )
+    if not np.isfinite(values).all():
+        raise ValueError("GridMap pose orientation must be finite")
+    norm = float(np.linalg.norm(values))
+    if norm <= 0.0:
+        raise ValueError("GridMap pose orientation quaternion is invalid")
+    normalized = values / norm
+    if np.linalg.norm(normalized[:3]) > tolerance or abs(abs(normalized[3]) - 1.0) > tolerance:
+        raise ValueError(
+            "rotated GridMap poses are unsupported; GridMapRosConverter expects identity orientation"
+        )
 
 
 def _stamp_to_seconds(stamp: Any) -> float | None:
@@ -158,13 +177,14 @@ class HeightScanProvider:
         source: str = "pointcloud2",
         topic: str = "/unilidar/cloud",
         pose_topic: str = "/utlidar/robot_pose",
+        map_layer: str = "elevation",
         base_frame: str = "base",
         lidar_frame: str = "unilidar_lidar",
         extrinsic_path: str | None = None,
         timeout_s: float = 0.25,
         min_valid_ratio: float = 0.60,
         min_critical_valid_ratio: float = 0.95,
-        max_critical_sentinel_cells: int = 10,
+        max_critical_sentinel_cells: int = 0,
         sentinel_abs_threshold: float = 5.0,
         fallback: str = "last_valid_then_zero",
         max_last_valid_age_s: float = 0.5,
@@ -173,10 +193,27 @@ class HeightScanProvider:
         max_pose_map_skew_s: float = 0.03,
         qos_profile: int = 10,
     ):
-        if source not in {"pointcloud2", "height_map_array"}:
+        if source not in {"pointcloud2", "height_map_array", "grid_map"}:
             raise ValueError(f"unsupported height-scan source: {source}")
+        if not str(map_layer).strip():
+            raise ValueError("GridMap layer name must not be empty")
         if fallback not in {"last_valid_then_zero", "zero"}:
             raise ValueError(f"unsupported height-scan fallback mode: {fallback}")
+        timeout_s = float(timeout_s)
+        if timeout_s <= 0.0 or not math.isfinite(timeout_s):
+            raise ValueError(f"height-scan timeout must be positive and finite, got {timeout_s}")
+        for name, ratio in (
+            ("min_valid_ratio", min_valid_ratio),
+            ("min_critical_valid_ratio", min_critical_valid_ratio),
+        ):
+            if not math.isfinite(float(ratio)) or not 0.0 <= float(ratio) <= 1.0:
+                raise ValueError(f"{name} must be finite and in [0, 1], got {ratio}")
+        sentinel_abs_threshold = float(sentinel_abs_threshold)
+        if sentinel_abs_threshold <= 0.0 or not math.isfinite(sentinel_abs_threshold):
+            raise ValueError(
+                "sentinel_abs_threshold must be positive and finite, "
+                f"got {sentinel_abs_threshold}"
+            )
         max_last_valid_age_s = float(max_last_valid_age_s)
         if max_last_valid_age_s < 0.0 or not math.isfinite(max_last_valid_age_s):
             raise ValueError(f"max_last_valid_age_s must be finite and non-negative, got {max_last_valid_age_s}")
@@ -196,13 +233,14 @@ class HeightScanProvider:
         self.source = source
         self.topic = topic
         self.pose_topic = pose_topic
+        self.map_layer = str(map_layer)
         self.base_frame = base_frame
         self.lidar_frame = lidar_frame
-        self.timeout_s = float(timeout_s)
+        self.timeout_s = timeout_s
         self.min_valid_ratio = float(min_valid_ratio)
         self.min_critical_valid_ratio = float(min_critical_valid_ratio)
         self.max_critical_sentinel_cells = max_critical_sentinel_cells
-        self.sentinel_abs_threshold = float(sentinel_abs_threshold)
+        self.sentinel_abs_threshold = sentinel_abs_threshold
         self.fallback = fallback
         self.max_last_valid_age_s = max_last_valid_age_s
         self.required_consecutive_valid_frames = required_consecutive_valid_frames
@@ -234,11 +272,17 @@ class HeightScanProvider:
             from sensor_msgs.msg import PointCloud2
 
             self.subscription = node.create_subscription(PointCloud2, topic, self._cloud_callback, qos_profile)
-        else:
+        elif self.source == "height_map_array":
             from geometry_msgs.msg import PoseStamped
             from unitree_go.msg import HeightMap
 
             self.subscription = node.create_subscription(HeightMap, topic, self._height_map_callback, qos_profile)
+            self.pose_subscription = node.create_subscription(PoseStamped, pose_topic, self._pose_callback, qos_profile)
+        else:
+            from geometry_msgs.msg import PoseStamped
+            from grid_map_msgs.msg import GridMap
+
+            self.subscription = node.create_subscription(GridMap, topic, self._height_map_callback, qos_profile)
             self.pose_subscription = node.create_subscription(PoseStamped, pose_topic, self._pose_callback, qos_profile)
 
     def _base_diag(self, fallback_reason: str) -> dict[str, Any]:
@@ -261,6 +305,7 @@ class HeightScanProvider:
             "source": self.source if hasattr(self, "source") else "",
             "height_scan_source": self.source if hasattr(self, "source") else "",
             "pose_topic": self.pose_topic if hasattr(self, "pose_topic") else "",
+            "map_layer": self.map_layer if hasattr(self, "map_layer") else "",
             "critical_valid_ratio": 0.0,
             "critical_accepted_ratio": 0.0,
             "sentinel_cells": 0,
@@ -490,8 +535,13 @@ class HeightScanProvider:
 
     def _height_map_callback(self, msg: Any) -> None:
         now = time.monotonic()
-        map_frame = getattr(msg, "frame_id", "")
-        map_stamp_s = _stamp_to_seconds(getattr(msg, "stamp", None))
+        if self.source == "grid_map":
+            header = getattr(msg, "header", None)
+            map_frame = getattr(header, "frame_id", "")
+            map_stamp_s = _stamp_to_seconds(getattr(header, "stamp", None))
+        else:
+            map_frame = getattr(msg, "frame_id", "")
+            map_stamp_s = _stamp_to_seconds(getattr(msg, "stamp", None))
         source_stamp_diag = self._source_stamp_diagnostic(map_stamp_s)
         pose_map_skew_s = (
             float("inf")
@@ -581,19 +631,49 @@ class HeightScanProvider:
             self.last_diag = diag
             return
         try:
-            scan, diag = height_map_to_height_scan(
-                np.asarray(msg.data, dtype=np.float32),
-                int(msg.width),
-                int(msg.height),
-                float(msg.resolution),
-                msg.origin,
-                robot_pose,
-                self.contract,
-                sentinel_abs_threshold=self.sentinel_abs_threshold,
-                min_valid_ratio=self.min_valid_ratio,
-                min_critical_valid_ratio=self.min_critical_valid_ratio,
-                max_critical_sentinel_cells=self.max_critical_sentinel_cells,
-            )
+            if self.source == "grid_map":
+                layers = [str(layer) for layer in msg.layers]
+                if len(layers) != len(msg.data):
+                    raise ValueError(
+                        f"GridMap layers/data length mismatch: {len(layers)} != {len(msg.data)}"
+                    )
+                if layers.count(self.map_layer) != 1:
+                    raise ValueError(
+                        f"GridMap must contain exactly one {self.map_layer!r} layer, got {layers}"
+                    )
+                _require_identity_grid_map_orientation(msg.info.pose.orientation)
+                layer_index = layers.index(self.map_layer)
+                matrix = grid_map_multi_array_to_matrix(msg.data[layer_index])
+                scan, diag = grid_map_to_height_scan(
+                    matrix,
+                    float(msg.info.resolution),
+                    (float(msg.info.length_x), float(msg.info.length_y)),
+                    (float(msg.info.pose.position.x), float(msg.info.pose.position.y)),
+                    (int(msg.outer_start_index), int(msg.inner_start_index)),
+                    robot_pose,
+                    self.contract,
+                    sentinel_abs_threshold=self.sentinel_abs_threshold,
+                    min_valid_ratio=self.min_valid_ratio,
+                    min_critical_valid_ratio=self.min_critical_valid_ratio,
+                    max_critical_sentinel_cells=self.max_critical_sentinel_cells,
+                )
+                transform_status = "grid_map_pose"
+            else:
+                scan, diag = height_map_to_height_scan(
+                    np.asarray(msg.data, dtype=np.float32),
+                    int(msg.width),
+                    int(msg.height),
+                    float(msg.resolution),
+                    msg.origin,
+                    robot_pose,
+                    self.contract,
+                    sentinel_abs_threshold=self.sentinel_abs_threshold,
+                    min_valid_ratio=self.min_valid_ratio,
+                    min_critical_valid_ratio=self.min_critical_valid_ratio,
+                    max_critical_sentinel_cells=self.max_critical_sentinel_cells,
+                )
+                layers = []
+                transform_status = "height_map_pose"
             diag.update(
                 {
                     "age_s": 0.0,
@@ -605,7 +685,9 @@ class HeightScanProvider:
                     "pose_topic": self.pose_topic,
                     "pose_age_s": pose_age_s,
                     "height_scan_ok": bool(diag["ok"]),
-                    "transform_status": "height_map_pose",
+                    "transform_status": transform_status,
+                    "map_layer": self.map_layer,
+                    "map_layers": layers,
                 }
             )
             diag.update(source_stamp_diag)
@@ -623,7 +705,8 @@ class HeightScanProvider:
                 self.last_valid_scan = scan.copy()
                 self.last_valid_monotonic_time = now
         except Exception as exc:
-            diag = self._base_diag("invalid_height_map")
+            failure_reason = "invalid_grid_map" if self.source == "grid_map" else "invalid_height_map"
+            diag = self._base_diag(failure_reason)
             diag.update(
                 {
                     "error": str(exc),
@@ -634,7 +717,7 @@ class HeightScanProvider:
                     "map_frame": map_frame,
                     "pose_frame": pose_frame,
                     "pose_age_s": pose_age_s,
-                    "failure_reason": "invalid_height_map",
+                    "failure_reason": failure_reason,
                 }
             )
             diag.update(source_stamp_diag)

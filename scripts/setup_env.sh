@@ -131,6 +131,15 @@ _gx_real_configure_ros_middleware
 
 source_maybe "${GX_REAL_ROOT}/real-wbc/ros2/install/setup.bash"
 
+if [[ -n "${GX_REAL_PERCEPTION_SETUP:-}" ]]; then
+  if [[ ! -f "${GX_REAL_PERCEPTION_SETUP}" ]]; then
+    echo "[gx-real] missing GX_REAL_PERCEPTION_SETUP: ${GX_REAL_PERCEPTION_SETUP}" >&2
+    _gx_real_restore_shellopts
+    return 1 2>/dev/null || exit 1
+  fi
+  source_maybe "${GX_REAL_PERCEPTION_SETUP}"
+fi
+
 _gx_real_prepend_pythonpath_if_exists "${GX_REAL_LOCAL_UNITREE_INSTALL}/unitree_hg/lib/python3.8/site-packages"
 _gx_real_prepend_pythonpath_if_exists "${GX_REAL_LOCAL_UNITREE_INSTALL}/unitree_go/lib/python3.8/site-packages"
 _gx_real_prepend_pythonpath_if_exists "${GX_REAL_LOCAL_UNITREE_INSTALL}/unitree_api/lib/python3.8/site-packages"

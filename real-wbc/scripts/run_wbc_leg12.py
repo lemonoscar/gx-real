@@ -194,6 +194,11 @@ def main(deployment_kind: str) -> None:
             type=str,
             default=height_config["pose_topic_default"],
         )
+        parser.add_argument(
+            "--height-scan-map-layer",
+            type=str,
+            default=height_config["layer_default"],
+        )
         parser.add_argument("--height-scan-base-frame", type=str, default="base_link")
         parser.add_argument("--height-scan-lidar-frame", type=str, default="lidar")
         parser.add_argument("--height-scan-extrinsic", type=str, default=None)

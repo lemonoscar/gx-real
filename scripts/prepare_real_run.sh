@@ -276,6 +276,9 @@ run_environment_check() {
   if [[ "${CHECK_SPACEMOUSE}" -eq 1 ]]; then
     args+=(--spacemouse)
   fi
+  if [[ "${DEPLOYMENT_KIND}" == "rough" ]]; then
+    args+=(--rough)
+  fi
 
   info "running deployment import/type-support checks"
   "${GX_REAL_ROOT}/scripts/check_env.sh" "${args[@]}"
@@ -461,6 +464,22 @@ require_ros_topic() {
   sample_ros_topic "${topic}" || die "ROS2 topic ${topic} did not produce a sample; check Go2 network and DDS"
 }
 
+require_ros_topic_type() {
+  local label="$1"
+  local topic="$2"
+  local expected_type="$3"
+  local timeout_value
+  local actual_types
+  timeout_value="$(timeout_arg)"
+
+  if ! actual_types="$(timeout "${timeout_value}" ros2 topic type "${topic}")"; then
+    die "failed to inspect ROS2 type for ${label} topic ${topic}"
+  fi
+  if ! printf '%s\n' "${actual_types}" | grep -Fx -- "${expected_type}" >/dev/null; then
+    die "wrong ROS2 type for ${label} topic ${topic}: expected ${expected_type}, got ${actual_types}"
+  fi
+}
+
 check_go2_topics() {
   if [[ "${CHECK_GO2_TOPICS}" -eq 0 ]]; then
     info "skipping Go2 ROS2 topic checks (--skip-go2-topics)"
@@ -486,6 +505,10 @@ check_rough_perception_topics() {
   require_ros_topic "LiDAR IMU" "${ROUGH_LIDAR_IMU_TOPIC}"
   require_ros_topic "rough elevation map" "${ROUGH_HEIGHT_TOPIC}"
   require_ros_topic "rough localization pose" "${ROUGH_POSE_TOPIC}"
+  require_ros_topic_type "deskewed LiDAR points" "${ROUGH_LIDAR_POINTS_TOPIC}" "sensor_msgs/msg/PointCloud2"
+  require_ros_topic_type "LiDAR IMU" "${ROUGH_LIDAR_IMU_TOPIC}" "sensor_msgs/msg/Imu"
+  require_ros_topic_type "rough elevation map" "${ROUGH_HEIGHT_TOPIC}" "grid_map_msgs/msg/GridMap"
+  require_ros_topic_type "rough localization pose" "${ROUGH_POSE_TOPIC}" "geometry_msgs/msg/PoseStamped"
 }
 
 check_wireless_joystick_motion() {

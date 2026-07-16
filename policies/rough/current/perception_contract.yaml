@@ -1,12 +1,21 @@
 schema_version: 1
 verification_status: UNVERIFIED
 policy_kind: rough
-production_source: height_map_array
+production_source: grid_map
 topics:
   lidar_points_deskewed: /lidar/points_deskewed
   lidar_imu: /lidar/imu_raw
   elevation_map: /terrain/elevation_map
   robot_pose: /localization/pose
+grid_map:
+  message_type: grid_map_msgs/msg/GridMap
+  layer: elevation
+  matrix_storage: column_major
+  circular_buffer_indices: required
+unitree_height_map:
+  role: diagnostic_ab_only
+  message_type: unitree_go/msg/HeightMap
+  may_grant_motion_permission: false
 frames:
   world: odom
   robot: base_link
@@ -38,3 +47,6 @@ evidence: >-
   UNVERIFIED until the selected LiDAR, rigid mount, 6DoF extrinsic,
   Point-LIO/elevation-map configuration, latency distribution, coverage and
   hardware perception-parity tests are recorded and independently reviewed.
+  The Unitree HeightMap topic remains diagnostic-only because its public IDL
+  does not define the data-axis, origin-cell or scaling semantics required to
+  prove Go2-X5-lab input parity.

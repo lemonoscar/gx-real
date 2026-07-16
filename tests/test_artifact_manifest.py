@@ -31,6 +31,12 @@ def _write(root: Path, name: str, content: bytes) -> dict:
 def _verified_perception_contract() -> bytes:
     return b"""\
 verification_status: VERIFIED
+production_source: grid_map
+grid_map:
+  message_type: grid_map_msgs/msg/GridMap
+  layer: elevation
+  matrix_storage: column_major
+  circular_buffer_indices: required
 calibration:
   lidar_model: unit-test-lidar
   lidar_firmware: unit-test-firmware
@@ -196,6 +202,19 @@ def test_rough_manifest_requires_hashed_height_and_perception_contracts(tmp_path
         unresolved,
     )
     with pytest.raises(ArtifactManifestFault, match="unresolved release fields"):
+        _verify(tmp_path, manifest, expected_policy_kind="rough")
+
+    wrong_source = _verified_perception_contract().replace(
+        b"production_source: grid_map",
+        b"production_source: height_map_array",
+        1,
+    )
+    manifest["perception_contract"] = _write(
+        tmp_path,
+        "perception_contract.yaml",
+        wrong_source,
+    )
+    with pytest.raises(ArtifactManifestFault, match="production_source must be grid_map"):
         _verify(tmp_path, manifest, expected_policy_kind="rough")
 
 

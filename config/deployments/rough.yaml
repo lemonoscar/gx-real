@@ -7,10 +7,11 @@ height_observation:
   dimension: 187
   slice: [66, 253]
   create_provider: true
-  production_source: height_map_array
+  production_source: grid_map
   contract_default: policies/rough/current/height_scan_contract.yaml
   topic_default: /terrain/elevation_map
   pose_topic_default: /localization/pose
+  layer_default: elevation
   required_consecutive_valid_frames: 5
   require_source_stamp: true
   max_pose_map_skew_sec: 0.03

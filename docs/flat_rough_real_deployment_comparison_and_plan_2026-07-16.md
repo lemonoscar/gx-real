@@ -128,7 +128,7 @@ class RoughDeployment(DeploymentProfile): ...
 - 每帧必须验证 source stamp、TF stamp、pose/map skew、finite、形状、网格顺序、全局覆盖率和关键落足区覆盖率；
 - 感知短暂断流时只能在一个经实测确认的很短窗口内使用 last-valid，同时将速度命令平滑降到 0；超过窗口进入 STOPPING/FAULT；
 - 永远不允许用 187 个 0 作为 rough 的“正常 fallback”；
-- `pointcloud2` 直接分箱模式只能用于 monitor/offline comparison，生产模式固定为 `elevation_map`。
+- `pointcloud2` 直接分箱和 Unitree HeightMap 都只能用于 monitor/offline comparison；生产模式固定为 `grid_map_msgs/msg/GridMap` 的 `elevation` layer。
 
 ### 4.4 两个独立入口
 
@@ -261,7 +261,7 @@ LiDAR 到 base 的 6DoF 外参必须来自可复现标定文件并纳入 manifes
 
 - 网格固定 17×11，覆盖 1.6 m × 1.0 m，分辨率 0.1 m；
 - 不能只根据 shape 猜测轴顺序。发布包应保存 187 对 `(x_i, y_i)`，sampler 按该数组逐点采样；
-- 高程图分辨率建议优于策略网格，使用双线性或受方差约束的局部平面插值；当前 `round` 到最近格容易在台阶边缘产生跳变；
+- 高程图分辨率应优于策略网格；当前生产 sampler 有意采用 phase `getIndex`/grid_map_core 的 cell-index 语义，以避免引入未经训练和验证的插值。若未来改用双线性或受方差约束的局部平面插值，必须作为新的感知合同重新做 reference/rosbag parity；
 - 局部高程图范围必须覆盖旋转后的完整网格并留滤波边界，phase 的 1.5 m 地图不足以直接承载 1.6 m 的 GX 网格；
 - 保留 `valid_mask`、方差、观测年龄和每格来源。只在有明确半径和方差上限时插值，不能把未知格直接写成 0。
 
@@ -358,7 +358,7 @@ ROS estop + safety heartbeat + owner locks -> WBC and X5 state machines
 | LiDAR IMU | `/lidar/imu_raw` | rate、stamp、饱和/跳变 |
 | 去畸变点云 | `/lidar/points_deskewed` | frame、latency |
 | LIO 位姿 | `/localization/odom` + TF | gravity alignment、covariance |
-| 局部高程图 | `/terrain/elevation_map` | layer、resolution、stamp、coverage |
+| 局部高程图 | `/terrain/elevation_map` (`grid_map_msgs/msg/GridMap`) | `elevation` layer、列主序、circular index、resolution、stamp、coverage |
 | Rough scan | `/terrain/height_scan` | 187 values + valid mask + source stamp |
 | Rough 状态 | `/terrain/height_scan_status` | age、skew、coverage、fault reason |
 | X5 状态/目标 | `/arm/state`, `/arm/target_state` | age、mode、tracking error |

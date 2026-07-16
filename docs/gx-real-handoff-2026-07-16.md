@@ -12,7 +12,7 @@
 
 1. Flat/Rough 使用不同 Python、Shell、配置、policy bundle 和 manifest 入口；旧 `run_leg12_real.sh` 固定拒绝策略类别不明确的启动。
 2. Flat 的 187D height slice 由代码直接生成精确零，且不创建 height provider。
-3. Rough 只接受 `height_map_array`，验证 source age、pose/map stamp skew、frame、finite、coverage、critical sentinel 和连续健康帧；fallback 永远不能获得 motion permit。
+3. Rough 生产只接受 `grid_map_msgs/msg/GridMap` 的 `elevation` layer；严格解析列主序、x/y buffer 轴和 circular start index，并验证 source age、pose/map stamp skew、frame、finite、coverage、critical sentinel 和连续健康帧。Unitree HeightMap/直接点云均为 diagnostic-only，fallback 永远不能获得 motion permit。
 4. 感知 stale/fallback 会清零连续健康帧，恢复后必须重新累计 5 帧。
 5. Rough checkpoint 29500 已重新导出；ONNX 输入/输出为 260/12，10 cm 台阶造成非零动作响应。
 6. 新增 `policy_reference.npz`：期望动作来自 checkpoint/Torch，ONNX 重放最大误差约 `5.36e-7`。
@@ -24,17 +24,19 @@
 12. preflight 默认不再要求 SpaceMouse，并打印与实际生产门一致的 Flat/Rough + fixed-hold 启停命令。
 13. manifest 发布采用可实现的两提交协议：source commit 后只能创建一个 manifest-only release commit。
 14. 最新唯一操作步骤已写入 `docs/上机使用指南.md`；旧 README/onboarding 顶部已明确标记历史入口不可用于生产。
+15. 已完成 LiDAR 后端审计：Go2-X5-lab 没有真机点云建图实现；phase 的 GridMap 拓扑可完整审计，因此生产选择 GridMap，依据见 `docs/lidar_height_backend_decision_2026-07-16.md`。
 
 ## 当前离线验证
 
 使用临时 `/tmp` ONNX Runtime 环境，不修改 Jetson/系统依赖：
 
 ```text
-pytest: 168 passed, 0 failed, 0 skipped
+pytest: 178 passed, 0 failed, 0 skipped
 Flat contract: PASS, input 260, output 12
 Rough contract: PASS, input 260, output 12
 Rough 10 cm sensitivity: max_action_delta=0.249644
 Torch/ONNX reference parity: max_abs_error≈0.00000054
+GridMap/Isaac reference parity: 187D max_abs_error<0.000001
 hardware writer inventory: 32 candidate files, all classified
 Python compile / bash -n / git diff --check: PASS
 ```
@@ -57,7 +59,7 @@ Python compile / bash -n / git diff --check: PASS
 
 - ARX SDK 当前 `JointState.timestamp` 来自 controller loop，不是逐电机 CAN RX 时间；仅比较该 timestamp 不能证明总线仍收到新反馈。必须由 driver RX counter/per-motor freshness 或可追溯外部监测关闭此项。
 - ONNX 推理与 Go2 watchdog 仍在同一进程/executor；永久卡死不能由同进程 timer 自救，需要独立进程 watchdog/硬件接收端证据。
-- elevation map 当前 nearest sampling、footprint unknown fill、self-filter 和 mapper 方差规则尚无目标硬件 rosbag parity。
+- GridMap 当前按 phase/grid_map_core 的 cell-index 采样；生产路径已禁止 footprint unknown fill，但 self-filter、mapper 方差规则和目标硬件 rosbag parity 尚未关闭。
 - 感知失效后的安全停车距离和 X5 damping 的物理行为必须实测，不能由单元测试推断。
 
 ## 建议继续顺序
