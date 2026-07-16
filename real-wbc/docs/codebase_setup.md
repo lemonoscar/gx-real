@@ -34,7 +34,7 @@ gx-real/
     setup_env.sh                 # 设置 PYTHONPATH、ROS2、SDK 动态库路径
     check_env.sh                 # 环境预检
     setup_arx_can.sh             # 配置 ARX5 SocketCAN
-    disable_sports_mode_go2.sh   # 关闭 Go2 sport mode
+    disable_sports_mode_go2.sh   # 验证并释放 Go2 MCF
     run_leg12_real.sh            # 当前推荐启动入口
 
   policies/

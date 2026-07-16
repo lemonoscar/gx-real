@@ -49,6 +49,7 @@ from modules.final_command_safety import (
 from modules.runtime_safety import (
     RuntimeSafetyFault,
     limit_vector_abs_delta,
+    mcf_control_conflict_reason,
     require_finite_scalar,
     require_finite_vector,
 )
@@ -355,7 +356,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         disable_arm: bool = False,
         require_arm: bool = False,
         standup_mode: str = "internal",
-        allow_unknown_sport_mode: bool = False,
+        mcf_release_confirmed: bool = False,
         lowstate_watchdog_sec: float = 0.25,
         sport_state_watchdog_sec: float = 0.5,
         startup_action_limit_sec: float = 3.0,
@@ -448,7 +449,19 @@ class WBCNodeLeg12ArmPassthrough(Node):
                     parsed_tcp_pose,
                 )
         self.standup_mode = standup_mode
-        self.allow_unknown_sport_mode = allow_unknown_sport_mode
+        if self.standup_mode in {
+            "unitree_auto",
+            "unitree_recoverystand",
+            "unitree_standup",
+        }:
+            raise ValueError(
+                "Unitree stand-up modes are unavailable after mandatory MCF release"
+            )
+        self.mcf_release_confirmed = bool(mcf_release_confirmed)
+        if not self.mcf_release_confirmed:
+            raise RuntimeError(
+                "MCF release was not confirmed; start with scripts/run_leg12_real.sh"
+            )
         self.lowstate_watchdog_sec = require_finite_scalar(
             lowstate_watchdog_sec,
             "lowstate_watchdog_sec",
@@ -1475,7 +1488,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         if not self.check_lowstate_watchdog(now):
             return False
         if not self.is_low_level_control_safe(now=now):
-            self.trigger_safety_stop("sport_mode gate failed during low-level control")
+            self.trigger_safety_stop("MCF gate failed during low-level control")
             return False
         return True
 
@@ -1923,33 +1936,15 @@ class WBCNodeLeg12ArmPassthrough(Node):
 
     def is_low_level_control_safe(self, now: Optional[float] = None) -> bool:
         stamp = time.monotonic() if now is None else float(now)
-        if not self.sport_state_seen:
-            if self.allow_unknown_sport_mode:
-                logging.warning(
-                    "sport_mode state has not been received; proceeding because "
-                    "--allow-unknown-sport-mode was set"
-                )
-                return True
-            logging.error(
-                "Refusing low-level rollout because sport_mode state has not been received. "
-                "Confirm the ROS2 sport state pipeline or pass --allow-unknown-sport-mode "
-                "only for controlled diagnostics."
-            )
-            return False
-        if not self.is_sport_mode_fresh(stamp):
-            age = float("inf") if self.last_sport_state_time < 0.0 else stamp - self.last_sport_state_time
-            logging.error(
-                "Refusing low-level control because sport_mode state is stale: "
-                "age=%.3fs limit=%.3fs."
-                % (age, self.sport_state_watchdog_sec)
-            )
-            return False
-        if self.sport_mode != SPORT_MODE_IDLE or self.sport_progress > 0.0:
-            logging.error(
-                "Refusing low-level rollout while sport_mode is still active: mode=%d progress=%.3f. "
-                "Disable sport_mode first, then retry L2."
-                % (self.sport_mode, self.sport_progress)
-            )
+        reason = mcf_control_conflict_reason(
+            release_confirmed=self.mcf_release_confirmed,
+            sport_state_seen=self.sport_state_seen,
+            sport_state_fresh=self.is_sport_mode_fresh(stamp),
+            sport_mode=self.sport_mode,
+            sport_progress=self.sport_progress,
+        )
+        if reason is not None:
+            logging.error("Refusing low-level control: %s", reason)
             return False
         return True
 
@@ -3567,7 +3562,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
                     ):
                         logging.error(
                             "Waiting before rollout: startup tracking error %.3f rad exceeds %.3f rad. "
-                            "Check sport_mode/low-level ownership and whether current_leg_q follows lowcmd."
+                            "Check MCF/low-level ownership and whether current_leg_q follows lowcmd."
                             % (max_leg_error, self.policy_start_max_leg_error)
                         )
                         self.last_policy_block_log_time = now
@@ -4085,7 +4080,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
             + f" arm_state_topic: {self.arm_state_topic},"
             + f" arm_target_topic: {self.arm_target_topic},"
             + f" require_arm_state_for_rl: {self.require_arm_state_for_rl},"
-            + f" allow_unknown_sport_mode: {self.allow_unknown_sport_mode},"
+            + f" mcf_release_confirmed: {self.mcf_release_confirmed},"
             + f" lowstate_watchdog_sec: {self.lowstate_watchdog_sec},"
             + f" sport_state_watchdog_sec: {self.sport_state_watchdog_sec},"
             + f" live_ready_pose_calibration: {self.live_ready_pose_calibration},"

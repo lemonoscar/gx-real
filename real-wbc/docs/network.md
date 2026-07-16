@@ -3,7 +3,7 @@
 这份文档覆盖 Go2 局域网、机器人外网、ROS2 通信和 ARX5 `can0`。当前上机流程里，网络问题通常会表现为：
 
 - 收不到 `lowstate`。
-- `sport_mode` 状态不可用。
+- MCF 查询或释放失败。
 - `disable_sports_mode_go2` 找不到机器人。
 - ARX5 初始化失败，或者 `can0` 不存在。
 
@@ -62,7 +62,7 @@ ros2 topic echo /wirelesscontroller
 - 确认 `scripts/setup_env.sh` 输出 `rmw=rmw_cyclonedds_cpp`，并且 `GX_REAL_NETWORK_IFACE` 是连接 Go2 的网卡。
 - 确认没有错误地从 `unitree_sdk2/python` 导入旧消息包。
 
-## 3. 关闭 sport mode
+## 3. 释放 MCF
 
 Go2 原厂高层控制和低层 `lowcmd` 不能同时控制电机。真机上机前先执行：
 
@@ -73,9 +73,10 @@ scripts/disable_sports_mode_go2.sh eth0
 `eth0` 要换成连接 Go2 的实际网卡。脚本会：
 
 - 检查 `unitree_sdk2`。
-- 如果缺少 `build/disable_sports_mode_go2`，自动编译。
+- 如果二进制缺失或源码更新，自动编译。
 - 设置 SDK 动态库路径。
-- 调用 Unitree SDK 工具关闭 sport mode。
+- 调用 `MotionSwitcherClient::CheckMode()` 查询当前 motion mode。
+- 调用 `ReleaseMode()`，并再次确认 mode 为空；SDK 报错或五次重试后仍活动都会失败。
 
 如果失败，优先检查：
 
@@ -179,13 +180,9 @@ None of the motors are initialized. Please check the connection or power of the 
 3. 检查 CycloneDDS 配置。
 4. 重启 ROS2 shell 后重试。
 
-### `sport_mode` 状态没收到
+### MCF 释放后收不到 `sport_mode` 状态
 
-当前控制器默认会拒绝低层 rollout。先修复状态链路；只有受控诊断时才使用：
-
-```bash
---allow-unknown-sport-mode
-```
+这是 Unitree 真机关闭内置运动控制后的正常行为。`run_leg12_real.sh` 会在启动节点前独立验证 MCF 已释放；WBC 不再要求该 topic 持续发布。如果 topic 重新出现并报告活动 mode，WBC 会触发锁存故障。
 
 ### ARX5 的 `can0` 正常但机械臂不动
 

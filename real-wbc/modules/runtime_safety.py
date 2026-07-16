@@ -45,6 +45,31 @@ def is_finite_vector(
     return True
 
 
+def mcf_control_conflict_reason(
+    *,
+    release_confirmed: bool,
+    sport_state_seen: bool,
+    sport_state_fresh: bool,
+    sport_mode: int,
+    sport_progress: float,
+) -> Optional[str]:
+    if not release_confirmed:
+        return "MCF release was not confirmed by MotionSwitcherClient"
+    if not sport_state_seen or not sport_state_fresh:
+        # SportModeState stops publishing on hardware after MCF is released.
+        return None
+
+    try:
+        progress = require_finite_scalar(sport_progress, "sport_progress")
+    except RuntimeSafetyFault as exc:
+        return f"invalid MCF state: {exc}"
+    if progress < 0.0 or progress > 1.0:
+        return f"invalid MCF state: sport_progress out of range: {progress!r}"
+    if int(sport_mode) != 0 or progress > 0.0:
+        return f"MCF motion mode is active: mode={int(sport_mode)} progress={progress:.3f}"
+    return None
+
+
 def limit_vector_abs_delta(
     values: Sequence[float],
     previous: Sequence[float],

@@ -194,11 +194,6 @@ if __name__ == "__main__":
         help="Abort startup if the ARX5 arm cannot be initialized.",
     )
     parser.add_argument(
-        "--allow-unknown-sport-mode",
-        action="store_true",
-        help="Allow low-level rollout if sport_mode state has not been received.",
-    )
-    parser.add_argument(
         "--lowstate-watchdog-sec",
         type=float,
         default=0.25,
@@ -208,7 +203,10 @@ if __name__ == "__main__":
         "--sport-state-watchdog-sec",
         type=float,
         default=0.5,
-        help="Stop low-level control if sport_mode state is stale for this long.",
+        help=(
+            "Freshness window for detecting a reactivated built-in motion mode. "
+            "SportModeState normally disappears after MCF release."
+        ),
     )
     parser.add_argument(
         "--startup-action-limit-sec",
@@ -265,6 +263,21 @@ if __name__ == "__main__":
         ],
     )
     args = parser.parse_args()
+    if os.environ.get("GX_REAL_MCF_RELEASE_CONFIRMED") != "1":
+        parser.error(
+            "MCF release is not confirmed; start production control with "
+            "scripts/run_leg12_real.sh"
+        )
+    if args.standup_mode in {
+        "unitree_auto",
+        "unitree_recoverystand",
+        "unitree_standup",
+    }:
+        parser.error(
+            "Unitree stand-up modes require the built-in controller, which is unavailable "
+            "after mandatory MCF release; use --standup-mode internal, manual, or pose_test"
+        )
+    args.mcf_release_confirmed = True
     if args.arm_control_owner == "wbc":
         parser.error("production WBC-owned X5 writer is blocked; use external_spacemouse")
     if args.arm_observation_mode != "live":

@@ -11,7 +11,7 @@
 - X5/ARX5 机械臂：由 `scripts/run_spacemouse_arm.sh` 启动的独立 SpaceMouse Arm 节点控制；WBC 只订阅 `/arm/state` 和 `/arm/target_state` 填 observation。
 - Go2 通信：ROS2 `lowstate/lowcmd`，并使用 Unitree DDS/ROS2 消息包。
 - X5 通信：SocketCAN `can0` + `arx5_interface`，只允许 SpaceMouse Arm 节点打开写控制。
-- 控制流程：先关闭 Go2 `sport_mode`，再由 `R1` 起身，最后由 `L2` 进入低层 policy rollout。
+- 控制流程：先通过 `MotionSwitcherClient::ReleaseMode()` 释放 Go2 MCF，再由 `R1` 起身，最后由 `L2` 进入低层 policy rollout。
 - SpaceMouse：单独运行 Arm 节点，默认使用 raw SpaceMouse 输入，经显式 axis/sign/scale 参数映射后直接控制 X5，并发布 arm state/target topic。
 
 主入口链路：
@@ -19,6 +19,7 @@
 ```text
 scripts/run_leg12_real.sh
   -> scripts/setup_env.sh
+  -> scripts/disable_sports_mode_go2.sh  # CheckMode + ReleaseMode + 再次 CheckMode
   -> real-wbc/scripts/run_wbc_leg12.py
   -> real-wbc/modules/wbc_node_leg12_arm_passthrough.py
   -> policies/policy.onnx + policies/env.yaml
@@ -59,9 +60,9 @@ real/
     setup_env.sh                    # 设置 GX_REAL_ROOT、PYTHONPATH、ROS2、SDK 动态库路径
     check_env.sh                    # 调用 check_env.py 做环境预检
     check_env.py                    # 检查 policy、env.yaml、CRC、ROS2 type support 和 Python import
-    prepare_real_run.sh             # 封装真机前置构建、接口检查、CAN 和 sport mode 处理
+    prepare_real_run.sh             # 封装真机前置构建、接口检查、CAN 和 MCF 处理
     setup_arx_can.sh                # 配置 ARX5 SocketCAN can0
-    disable_sports_mode_go2.sh      # 编译/调用 Unitree SDK 工具关闭 sport mode
+    disable_sports_mode_go2.sh      # 编译/调用 Unitree SDK 工具验证并释放 MCF
     run_leg12_real.sh               # 当前推荐 Go2/WBC 启动入口
     run_spacemouse_arm.sh           # 推荐 SpaceMouse + X5 独立控制入口
     run_spacemouse_teleop.sh        # legacy teleop topic 发布节点
@@ -91,7 +92,7 @@ real/
     docs/                           # 硬件、网络、开发环境细分说明
 
   arx5-sdk/                         # X5/ARX5 机械臂 SDK 和 Python 绑定
-  unitree_sdk2/                     # Unitree SDK2、CRC 模块、关闭 sport mode 工具
+  unitree_sdk2/                     # Unitree SDK2、CRC 模块、MCF 释放工具
   unitree_ros2/                     # Unitree ROS2/CycloneDDS 消息工作区
   logs/                             # 每次运行的日志目录
 ```
@@ -235,7 +236,7 @@ scripts/prepare_real_run.sh --network-iface eth0 --can-dev auto --can-if can0 --
 - 编译/刷新 `unitree_ros2/cyclonedds_ws`、`real-wbc/ros2` 的 `robot_state` 消息和 `unitree_sdk2/build/disable_sports_mode_go2`。
 - 加载 `scripts/setup_env.sh` 并执行 `scripts/check_env.sh --spacemouse`。
 - 检查 `spacenavd`、互斥的 WBC/X5 写控制进程、`can0`、Go2 ROS2 topic。
-- 调用 `scripts/disable_sports_mode_go2.sh eth0` 关闭 sport mode。
+- 调用 `scripts/disable_sports_mode_go2.sh eth0` 查询并释放 MCF；返回成功前会再次确认当前 motion mode 为空。
 
 如果连接 Go2 的网卡不是 `eth0`，只改 `--network-iface`；如果 USB-CAN 不能自动识别，只改 `--can-dev`。下面的单项命令主要用于失败后的定位。
 
@@ -299,17 +300,17 @@ scripts/setup_arx_can.sh
 ip -details link show can0
 ```
 
-关闭 Go2 `sport_mode`。这里的 `eth0` 要换成 Jetson 上实际连接 Go2 的网卡，可先用 `ip a` 找到 `192.168.123.xxx` 所在接口：
+释放 Go2 MCF。这里的 `eth0` 要换成 Jetson 上实际连接 Go2 的网卡，可先用 `ip a` 找到 `192.168.123.xxx` 所在接口：
 
 ```bash
 scripts/disable_sports_mode_go2.sh eth0
 ```
 
-`sport_mode` 没关掉时不要进入低层 rollout，因为 Go2 原厂高层控制和低层 `lowcmd` 会抢控制权。
+工具会用 `CheckMode()` 检查 `sport_mode`、`ai_sport`、`advanced_sport` 等当前 motion mode，调用 `ReleaseMode()` 后再次验证；任何 SDK 错误或仍有活动模式都会返回失败。不要绕过这一步，因为 Go2 原厂高层控制和低层 `lowcmd` 会抢控制权。
 
 ## 6. 标准启动流程
 
-典型 WBC 启动命令。默认 `--arm-control-owner external_spacemouse`，WBC 不会打开 `can0` 或下发 X5 command：
+典型 WBC 启动命令。`run_leg12_real.sh` 会在启动 Python 前再次验证 MCF 已释放；验证失败时不会创建低层控制节点。默认 `--arm-control-owner external_spacemouse`，WBC 不会打开 `can0` 或下发 X5 command：
 
 ```bash
 cd ~/gx-real
@@ -618,11 +619,11 @@ ros2 topic echo lf/sportmodestate
 - `Inverse kinematics failed: E_EXCEED_JOINT_LIMIT` 或 `Over current detected`：目标末端位姿太快或太远，已经触到 IK/关节/电流保护。立即松开 SpaceMouse 或 `Ctrl+C` 停止；必要时临时降低速度 `--pos-speed 0.03 --ori-speed 0.10`，或加 home 附近工作空间限制。
 - SpaceMouse 没反应：确认接收器插在 Jetson 上，`spacenavd` 正在运行，且没有直接运行 ARX5 SDK 的 SpaceMouse 示例抢设备或抢 `can0`。
 - 单独机械臂测试前不要运行 `run_leg12_real.sh`。`scripts/run_arm_spacemouse_test.sh` 会直接控制 X5，和 WBC 主节点互斥。
-- 程序启动后机器人不动：看到 `Deploy node ready` 后还需要确认 sport mode 已关闭，按 `R1` 起身，等起身完成后按 `L2`。
-- `sport_mode state has not been received`：ROS2 sport state 链路不可用，优先查网络和消息包。只有受控诊断时才加 `--allow-unknown-sport-mode`。
-- `sport_mode is still active`：先运行 `scripts/disable_sports_mode_go2.sh eth0`。
+- 程序启动后机器人不动：确认日志已经输出 `MCF release verified`，再按 `R1` 起身，等起身完成后按 `L2`。
+- MCF 释放后真机不再发布 `SportModeState` 属于正常现象；如果它重新出现并报告活动模式，WBC 会锁存故障并停止低层控制。
+- `MCF motion mode is active`：停止并检查是否有 App、遥控器或其他进程重新启用了内置运动控制，然后重新运行 `scripts/run_leg12_real.sh`。
 - `None of the motors are initialized`：`can0` 可能存在，但 X5 电机没有反馈。检查电源、急停、CAN-H/CAN-L/GND、终端电阻、CANable 是否接到 X5 总线、波特率是否为 1Mbps，以及是否误用 `--disable-arm`。用 `ip -s -d link show can0` 看 SDK 运行后是否只有 TX 没有 RX。
-- `commands` 非零但狗不动：看 `Policy diag` 里的 `lowcmd_kp`、`lowcmd_leg_q_policy`、`current_leg_q` 和 `leg_q_error`，优先排查低层控制权、sport mode、力矩限制、电池和关节顺序。
+- `commands` 非零但狗不动：看 `Policy diag` 里的 `lowcmd_kp`、`lowcmd_leg_q_policy`、`current_leg_q` 和 `leg_q_error`，优先排查低层控制权、MCF、力矩限制、电池和关节顺序。
 
 ## 12. 安全规则
 
@@ -632,7 +633,7 @@ ros2 topic echo lf/sportmodestate
 - 第一次跑新 policy 时，先 `--cmd-vx 0.0` 或 `0.1`。
 - 机械臂运动空间内不要放手、线缆和工具。
 - 改 X5 电源线前先断电，降压模块输出先用万用表确认约 24V。
-- 不要在 sport mode 未关闭时强行跑 lowcmd。
+- 不要在 MCF 未经 `CheckMode()` 验证释放时强行跑 `lowcmd`。
 - `max_leg_error` 长期大于 `0.08 rad` 时不要跑动态 policy。
 - WBC 默认不写 X5；不要用 `--arm-control-owner wbc`，除非明确做 legacy 回退测试。
 - `Y` 会清零底盘，joystick 模式下会 inhibit 到摇杆回中；`R2` 停 policy；`L1` 急停退出。
@@ -676,6 +677,6 @@ ros2 topic echo lf/sportmodestate
 - [小替换代码清单](doc/小替换代码清单.md)：leg12 + arm passthrough 的改造思路。
 - [替换思路](doc/替换思路.md)：如果后续继续换网络，如何选切入层。
 - [real-wbc 开发文档索引](real-wbc/docs/README.md)：硬件、网络、装配和开发环境细分说明。
-- [网络与通信配置](real-wbc/docs/network.md)：Go2 网络、ROS2、sport mode 和 `can0`。
+- [网络与通信配置](real-wbc/docs/network.md)：Go2 网络、ROS2、MCF 和 `can0`。
 - [硬件装配说明](real-wbc/docs/assembly.md)：X5 供电、安装、USB-CAN 和外设。
 - [3D 打印说明](real-wbc/docs/3d_printing.md)：安装板和历史外设打印件。

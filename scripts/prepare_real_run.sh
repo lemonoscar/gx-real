@@ -10,15 +10,15 @@ Usage:
   scripts/prepare_real_run.sh [options]
 
 This wraps the repeated pre-run work before starting the real control nodes:
-  - build Unitree ROS2 messages, robot_state messages, and the sport-mode tool
+  - build Unitree ROS2 messages, robot_state messages, and the MCF release tool
   - source gx-real runtime environment and run scripts/check_env.sh
   - check SpaceMouse USB receiver, dependencies, and daemon when enabled
   - ensure can0 is ready for X5/ARX5
-  - check Go2 ROS2 topics and disable sport mode
+  - check Go2 ROS2 topics and release MCF
   - reject startup if another WBC/X5 writer is already running
 
 Options:
-  --network-iface IFACE     Go2 network interface for sport-mode disable. Default: eth0
+  --network-iface IFACE     Go2 network interface for MCF release. Default: eth0
   --can-dev DEV             USB-CAN serial device, or auto. Default: auto
   --can-if IFACE            SocketCAN interface. Default: can0
   --slcan-speed-code CODE   slcand speed code. Default: 8
@@ -26,7 +26,7 @@ Options:
   --no-build                Skip colcon/cmake builds.
   --no-can                  Skip CAN setup/check.
   --force-can-setup         Re-run setup_arx_can.sh even if the CAN interface is UP.
-  --no-disable-sport-mode   Skip disable_sports_mode_go2.sh.
+  --no-disable-sport-mode   Skip MCF release during preparation; runtime still verifies it.
   --spacemouse              Check SpaceMouse dependencies and daemon. Default.
   --no-spacemouse           Skip SpaceMouse-specific checks.
   --skip-go2-topics         Skip Go2 ROS2 topic checks.
@@ -245,7 +245,7 @@ build_sport_mode_tool() {
 
   local jobs
   jobs="$(nproc 2>/dev/null || printf '4')"
-  info "building Unitree sport-mode tool"
+  info "building Unitree MCF release tool"
   cmake -S "${sdk_dir}" -B "${build_dir}"
   cmake --build "${build_dir}" --target disable_sports_mode_go2 -j "${jobs}"
 }
@@ -515,11 +515,11 @@ check_wireless_joystick_motion() {
 
 disable_sport_mode() {
   if [[ "${DISABLE_SPORT_MODE}" -eq 0 ]]; then
-    info "skipping sport-mode disable (--no-disable-sport-mode)"
+    info "skipping preparation-time MCF release (--no-disable-sport-mode)"
     return
   fi
 
-  info "disabling Go2 sport mode on ${NETWORK_IFACE}"
+  info "releasing Go2 MCF on ${NETWORK_IFACE}"
   "${GX_REAL_ROOT}/scripts/disable_sports_mode_go2.sh" "${NETWORK_IFACE}"
 }
 

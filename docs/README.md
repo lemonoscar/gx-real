@@ -34,10 +34,10 @@ scripts/run_leg12_real.sh
 ## 相关目录
 
 - [real-wbc](../real-wbc)：真机控制主体。
-- [scripts](../scripts)：环境、CAN、sport mode 和启动脚本。
+- [scripts](../scripts)：环境、CAN、MCF 和启动脚本。
 - [policies](../policies)：policy 模型和训练导出的部署配置。
 - [arx5-sdk](../arx5-sdk)：X5/ARX5 机械臂 SDK。
-- [unitree_sdk2](../unitree_sdk2)：Go2 SDK、CRC 模块和 sport mode 工具。
+- [unitree_sdk2](../unitree_sdk2)：Go2 SDK、CRC 模块和 MCF 释放工具。
 - [unitree_ros2](../unitree_ros2)：Unitree ROS2/CycloneDDS 通信栈。
 
 ## 原始 UMI 链路

@@ -65,7 +65,7 @@ gx-real/
     check_env.py                     # Python 侧环境检查
     prepare_real_run.sh              # 真机前置准备
     setup_arx_can.sh                 # 配置 X5 SocketCAN can0
-    disable_sports_mode_go2.sh       # 关闭 Unitree sport mode
+    disable_sports_mode_go2.sh       # 验证并释放 Unitree MCF
     run_leg12_real.sh                # Go2/WBC 主入口
     run_spacemouse_arm.sh            # X5/SpaceMouse 主入口
 
@@ -306,7 +306,7 @@ scripts/prepare_real_run.sh \
 - 检查是否有已有 WBC/X5 写控制进程。
 - 配置 can0。
 - 检查 Go2 ROS2 topic。
-- 关闭 Go2 sport mode。
+- 通过 `MotionSwitcherClient::ReleaseMode()` 释放 Go2 MCF，并用 `CheckMode()` 复核。
   
 8. 单独测试 X5
 
@@ -518,7 +518,7 @@ scripts/run_leg12_real.sh \
 
 - prepare_real_run.sh 会拒绝 conda 环境、检查重复 WBC/X5 写进程、配置 CAN、检查 topic。
 - CanOwnerLock 防止多个 X5 writer 同时打开 can0。
-- WBC 低层控制有 lowstate watchdog 和 sport mode gate。
+- WBC 低层控制有 lowstate watchdog 和 MCF 重新激活检测。
 - WBC policy 启动前 3 秒有 action abs limit 和 action delta limit。
 - WBC 发现运行时安全错误会触发 safety stop。
 - L1 会发布 /safety/estop=True，SpaceMouse Arm 节点收到后保护 X5。
