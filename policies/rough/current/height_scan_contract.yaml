@@ -42,3 +42,4 @@ policy:
   input_dim: 260
   output_dim: 12
   output: 12D leg action only
+  reference: policy_reference.npz

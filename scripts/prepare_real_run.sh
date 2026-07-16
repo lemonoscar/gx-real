@@ -13,7 +13,7 @@ Usage:
 This wraps the repeated pre-run work before starting the real control nodes:
   - build Unitree ROS2 messages, robot_state messages, and the sport-mode tool
   - source gx-real runtime environment and run scripts/check_env.sh
-  - check SpaceMouse USB receiver, dependencies, and daemon when enabled
+  - optionally check SpaceMouse diagnostics when explicitly requested
   - ensure can0 is ready for X5/ARX5
   - check Go2 ROS2 topics and disable sport mode
   - reject startup if another WBC/X5 writer is already running
@@ -28,8 +28,8 @@ Options:
   --no-can                  Skip CAN setup/check.
   --force-can-setup         Re-run setup_arx_can.sh even if the CAN interface is UP.
   --no-disable-sport-mode   Skip disable_sports_mode_go2.sh.
-  --spacemouse              Check SpaceMouse dependencies and daemon. Default.
-  --no-spacemouse           Skip SpaceMouse-specific checks.
+  --spacemouse              Check legacy SpaceMouse diagnostics (not used by production fixed-hold).
+  --no-spacemouse           Skip SpaceMouse-specific checks. Default.
   --skip-go2-topics         Skip Go2 ROS2 topic checks.
   --check-joystick-motion   Ask the operator to move sticks and verify lx/ly/rx/ry change.
   --joystick-motion-timeout SEC
@@ -44,8 +44,8 @@ the policy kind would be ambiguous.
 
 After a mode-specific script succeeds, start the external X5 owner and exactly
 one matching leg deployment entrypoint.
-  scripts/run_spacemouse_arm.sh ...
-  scripts/run_leg12_real.sh ...
+  scripts/run_x5_fixed_hold_flat.sh + scripts/run_leg12_flat_real.sh
+  scripts/run_x5_fixed_hold_rough.sh + scripts/run_leg12_rough_real.sh
 EOF
 }
 
@@ -53,7 +53,7 @@ BUILD=1
 CHECK_CAN=1
 FORCE_CAN_SETUP=0
 DISABLE_SPORT_MODE=1
-CHECK_SPACEMOUSE=1
+CHECK_SPACEMOUSE=0
 CHECK_GO2_TOPICS=1
 CHECK_JOYSTICK_MOTION=0
 REQUIRE_JETSON=1
@@ -349,7 +349,7 @@ check_spacemouse_input_device() {
 check_no_conflicting_control_processes() {
   require_command pgrep
   local pattern
-  pattern='[s]pacemouse_teleop.py|[r]un_arm_spacemouse_test.sh|[r]un_spacemouse_arm.py|[r]un_spacemouse_arm.sh|[r]un_wbc_(flat|rough|leg12).py|[r]un_leg12_(flat|rough)_real.sh|[r]un_wbc.py'
+  pattern='[s]pacemouse_teleop.py|[r]un_arm_spacemouse_test.sh|[r]un_spacemouse_arm.py|[r]un_spacemouse_arm.sh|[r]un_x5_fixed_hold(_flat|_rough)?.py|[r]un_x5_fixed_hold_(flat|rough).sh|[r]un_wbc_(flat|rough|leg12).py|[r]un_leg12_(flat|rough)_real.sh|[r]un_wbc.py'
 
   local matches
   matches="$(pgrep -af "${pattern}" || true)"
@@ -549,10 +549,13 @@ disable_sport_mode() {
 
 print_next_steps() {
   local leg_command
+  local arm_command
   if [[ "${DEPLOYMENT_KIND}" == "rough" ]]; then
     leg_command="scripts/run_leg12_rough_real.sh"
+    arm_command="scripts/run_x5_fixed_hold_rough.sh"
   else
     leg_command="scripts/run_leg12_flat_real.sh"
+    arm_command="scripts/run_x5_fixed_hold_flat.sh"
   fi
   cat <<EOF
 [gx-real] ${DEPLOYMENT_KIND} pre-run checks completed.
@@ -562,13 +565,17 @@ Terminal A:
   cd ${GX_REAL_ROOT}
   export GX_REAL_NETWORK_IFACE=${NETWORK_IFACE}
   source scripts/setup_env.sh
-  scripts/run_spacemouse_arm.sh --model X5 --can-interface ${CAN_IF} --safety-topic /safety/estop --sm-use-raw-frame true --sm-pos-speed 0.03 --sm-rot-speed 0.10 --sm-deadzone 0.12 --sm-watchdog-sec 0.25
+  ${arm_command} --model X5 --can-interface ${CAN_IF} --safety-topic /safety/estop
 
 Terminal B:
   cd ${GX_REAL_ROOT}
   export GX_REAL_NETWORK_IFACE=${NETWORK_IFACE}
   source scripts/setup_env.sh
-  ${leg_command} --device cpu --pose_estimator none --standup-mode internal --base-command-source wireless_joystick --joy-vx-axis ly --joy-vx-sign 1 --joy-vy-axis lx --joy-vy-sign -1 --joy-yaw-axis rx --joy-yaw-sign -1 --joy-deadzone 0.12 --joy-max-vx 0.50 --joy-max-vy 0.0 --joy-max-yaw 0.0 --arm-control-owner external_spacemouse --arm-state-topic /arm/state --arm-target-topic /arm/target_state --safety-topic /safety/estop --require-arm-state-for-rl --gripper-cmd 0.0 --leg-kp 200 --leg-kd 10 --arm_pose 0.0 0.5 0.3 0.0 0.0 0.0
+  ${leg_command} --device cpu --pose_estimator none --standup-mode internal --base-command-source wireless_joystick --joy-vx-axis ly --joy-vx-sign 1 --joy-vy-axis lx --joy-vy-sign -1 --joy-yaw-axis rx --joy-yaw-sign -1 --joy-deadzone 0.12 --joy-max-vx 0.50 --joy-max-vy 0.0 --joy-max-yaw 0.0 --arm-control-owner external_fixed_hold --arm-state-topic /arm/state --arm-target-topic /arm/target_state --safety-topic /safety/estop --require-arm-state-for-rl --gripper-cmd 0.0 --leg-kp 200 --leg-kd 10
+
+After Terminal B publishes a healthy safety heartbeat and both nodes remain in
+STANDBY, explicitly enable the policy fixed-hold target from a third terminal:
+  ros2 topic pub --once /arm/fixed_hold/enable std_msgs/msg/Bool "{data: true}"
 EOF
 }
 

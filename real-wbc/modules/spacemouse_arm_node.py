@@ -469,6 +469,8 @@ class SpaceMouseArmNode:
         joint_pos, joint_vel, joint_tau, gripper_pos, gripper_vel, state_valid = (
             self._read_arm_state()
         )
+        if not state_valid:
+            self._trigger_fault("fixed-hold feedback is invalid")
         target_valid = bool(
             self.output_enabled
             and self._get_safety_state().allows_motion_output()

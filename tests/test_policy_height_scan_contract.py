@@ -10,7 +10,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "real-wbc"))
 sys.path.insert(0, str(ROOT / "scripts" / "height_scan"))
 
-from check_policy_height_scan_contract import validate_env_for_policy_kind  # noqa: E402
+from check_policy_height_scan_contract import (  # noqa: E402
+    validate_env_for_policy_kind,
+    validate_policy_reference,
+)
 from modules.height_scan_policy_validation import ZERO_HEIGHT_SCAN_FUNC  # noqa: E402
 
 
@@ -59,3 +62,26 @@ def test_current_policy_bundle_is_flat_and_rejected_as_rough():
     )[0]
     assert action.shape[-1] == 12
     assert np.isfinite(action).all()
+
+
+def test_rough_policy_matches_torch_derived_reference(tmp_path: Path):
+    ort = pytest.importorskip("onnxruntime")
+    session = ort.InferenceSession(
+        str(ROOT / "policies/rough/current/policy.onnx"),
+        providers=["CPUExecutionProvider"],
+    )
+    reference_path = ROOT / "policies/rough/current/policy_reference.npz"
+    assert validate_policy_reference(session, reference_path) <= 1.0e-4
+
+    with np.load(reference_path, allow_pickle=False) as reference:
+        observations = np.asarray(reference["sample_obs"], dtype=np.float32)
+        actions = np.asarray(reference["sample_action"], dtype=np.float32)
+    actions[0, 0] += 0.01
+    tampered_path = tmp_path / "tampered_reference.npz"
+    np.savez_compressed(
+        tampered_path,
+        sample_obs=observations,
+        sample_action=actions,
+    )
+    with pytest.raises(RuntimeError, match="reference parity failed"):
+        validate_policy_reference(session, tampered_path)

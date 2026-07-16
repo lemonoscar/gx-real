@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -50,3 +51,31 @@ def test_preflight_entrypoints_select_mode_and_rough_requires_perception_topics(
     assert "GX_REAL_ROUGH_POSE_TOPIC" in shared
     assert "prepare_flat_run.sh" in shared
     assert "prepare_rough_run.sh" in shared
+    assert "CHECK_SPACEMOUSE=0" in shared
+
+    next_steps = shared[shared.index("print_next_steps()") : shared.index("main()")]
+    assert "run_x5_fixed_hold_flat.sh" in next_steps
+    assert "run_x5_fixed_hold_rough.sh" in next_steps
+    assert "external_fixed_hold" in next_steps
+    assert "run_spacemouse_arm.sh" not in next_steps
+    assert "external_spacemouse" not in next_steps
+
+
+def test_fixed_hold_entrypoints_are_separate_executable_and_conflict_checked() -> None:
+    shared = (ROOT / "scripts/prepare_real_run.sh").read_text(encoding="utf-8")
+    for kind in ("flat", "rough"):
+        shell_path = ROOT / f"scripts/run_x5_fixed_hold_{kind}.sh"
+        python_source = (
+            ROOT / f"real-wbc/scripts/run_x5_fixed_hold_{kind}.py"
+        ).read_text(encoding="utf-8")
+        assert os.access(shell_path, os.X_OK)
+        assert f'main("{kind}")' in python_source
+    assert "run_x5_fixed_hold" in shared
+
+
+def test_fixed_hold_production_cannot_allow_missing_can() -> None:
+    source = (ROOT / "real-wbc/scripts/run_x5_fixed_hold.py").read_text(
+        encoding="utf-8"
+    )
+    assert "args.allow_missing_can and not args.dry_run" in source
+    assert "--allow-missing-can is permitted only with --dry-run" in source

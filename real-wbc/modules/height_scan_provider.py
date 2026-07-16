@@ -654,6 +654,10 @@ class HeightScanProvider:
         return float(now - self.last_valid_monotonic_time)
 
     def _fallback_scan(self, reason: str, now: float) -> tuple[np.ndarray, dict]:
+        # A receive-time gap is an invalid frame boundary.  Do not let a
+        # previously warmed-up stream resume motion on its first recovered
+        # frame.
+        self.consecutive_valid_frames = 0
         last_valid_age_s = self._last_valid_age(now)
         if (
             self.fallback == "last_valid_then_zero"
@@ -672,6 +676,8 @@ class HeightScanProvider:
                     "age_s": float(last_valid_age_s),
                     "last_valid_age_s": float(last_valid_age_s),
                     "stale_last_valid_age_s": float("inf"),
+                    "consecutive_valid_frames": 0,
+                    "required_consecutive_valid_frames": self.required_consecutive_valid_frames,
                 }
             )
             return scan, diag
@@ -690,6 +696,8 @@ class HeightScanProvider:
                 "height_scan_ok": False,
                 "used_fallback": True,
                 "fallback_reason": fallback_reason,
+                "consecutive_valid_frames": 0,
+                "required_consecutive_valid_frames": self.required_consecutive_valid_frames,
             }
         )
         if self.last_msg_time is not None:

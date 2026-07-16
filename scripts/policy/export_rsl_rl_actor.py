@@ -29,6 +29,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--expected-input-dim", type=int, default=260)
     parser.add_argument("--expected-output-dim", type=int, default=12)
+    parser.add_argument(
+        "--reference-npz",
+        help="Isaac Lab reference NPZ containing sample_obs for Torch/ONNX replay.",
+    )
     return parser.parse_args()
 
 
@@ -109,6 +113,7 @@ def main() -> None:
     torchscript_path = output_dir / "policy.pt"
     onnx_path = output_dir / "policy.onnx"
     metadata_path = output_dir / "export_metadata.json"
+    policy_reference_path = output_dir / "policy_reference.npz"
     scripted = torch.jit.script(actor)
     scripted.save(str(torchscript_path))
 
@@ -143,9 +148,64 @@ def main() -> None:
     if max_abs_error > 1.0e-4:
         raise RuntimeError(f"ONNX parity failed: max_abs_error={max_abs_error}")
 
+    reference_metadata = {}
+    if args.reference_npz:
+        source_reference_path = Path(args.reference_npz).expanduser().resolve()
+        with np.load(source_reference_path, allow_pickle=False) as reference_data:
+            if "sample_obs" not in reference_data:
+                raise RuntimeError("reference NPZ is missing sample_obs")
+            reference_obs = np.asarray(reference_data["sample_obs"], dtype=np.float32)
+        if (
+            reference_obs.ndim != 2
+            or reference_obs.shape[1] != args.expected_input_dim
+            or reference_obs.shape[0] <= 0
+            or not np.isfinite(reference_obs).all()
+        ):
+            raise RuntimeError(
+                "reference sample_obs must be a finite non-empty "
+                f"[N,{args.expected_input_dim}] array, got {reference_obs.shape}"
+            )
+        with torch.inference_mode():
+            reference_actions = actor(torch.from_numpy(reference_obs)).numpy()
+        onnx_reference_actions = np.concatenate(
+            [
+                session.run(
+                    ["actions"],
+                    {"obs": reference_obs[index : index + 1]},
+                )[0]
+                for index in range(reference_obs.shape[0])
+            ],
+            axis=0,
+        )
+        if not np.isfinite(reference_actions).all() or not np.isfinite(
+            onnx_reference_actions
+        ).all():
+            raise RuntimeError("reference replay produced NaN/Inf actions")
+        reference_max_abs_error = float(
+            np.max(np.abs(reference_actions - onnx_reference_actions))
+        )
+        if reference_max_abs_error > 1.0e-4:
+            raise RuntimeError(
+                "reference ONNX parity failed: "
+                f"max_abs_error={reference_max_abs_error}"
+            )
+        np.savez_compressed(
+            policy_reference_path,
+            sample_obs=reference_obs,
+            sample_action=reference_actions.astype(np.float32),
+        )
+        reference_metadata = {
+            "source_reference": source_reference_path.name,
+            "source_reference_sha256": sha256_file(source_reference_path),
+            "policy_reference_sha256": sha256_file(policy_reference_path),
+            "reference_sample_count": int(reference_obs.shape[0]),
+            "reference_parity_max_abs_error": reference_max_abs_error,
+        }
+
     metadata = {
         "schema_version": 1,
-        "checkpoint": str(checkpoint_path),
+        "checkpoint": checkpoint_path.name,
+        "agent_config": agent_path.name,
         "checkpoint_iteration": 29500,
         "checkpoint_sha256": sha256_file(checkpoint_path),
         "agent_config_sha256": sha256_file(agent_path),
@@ -158,6 +218,7 @@ def main() -> None:
         "onnx_parity_max_abs_error": max_abs_error,
         "policy_onnx_sha256": sha256_file(onnx_path),
         "policy_torchscript_sha256": sha256_file(torchscript_path),
+        **reference_metadata,
     }
     metadata_path.write_text(
         json.dumps(metadata, indent=2, sort_keys=True) + "\n",

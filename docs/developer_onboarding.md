@@ -1,3 +1,9 @@
+> **入口更新（2026-07-16）：** 本文中出现的 `run_leg12_real.sh`、
+> `run_spacemouse_arm.sh` 和 `external_spacemouse` 命令属于旧主线，不能用于当前
+> Flat/Rough 生产部署。开发者应先阅读 [最新上机使用指南](上机使用指南.md) 和
+> [双部署方案](flat_rough_real_deployment_comparison_and_plan_2026-07-16.md)。
+> 当前 manifest 保持 `UNRELEASED`，没有硬件放行结论。
+
 1. 项目总述
 gx-real 是 Go2 + X5/ARX5 + SpaceMouse 的真机部署仓库。
 项目仓库：https://github.com/lemonoscar/gx-real

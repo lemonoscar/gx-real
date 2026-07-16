@@ -49,6 +49,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--policy", required=True)
     parser.add_argument("--env-yaml", required=True)
     parser.add_argument("--contract")
+    parser.add_argument(
+        "--reference",
+        help="Torch-derived policy reference NPZ; defaults to policy.reference in the contract.",
+    )
     parser.add_argument("--timing-iters", type=int, default=100)
     return parser.parse_args()
 
@@ -66,6 +70,50 @@ def _make_obs(obs_dim: int, height_slice: tuple[int, int], scan: np.ndarray) -> 
     start, end = height_slice
     obs[0, start:end] = scan.astype(np.float32)
     return obs
+
+
+def validate_policy_reference(session: Any, path: str | Path) -> float:
+    with np.load(path, allow_pickle=False) as reference:
+        if "sample_obs" not in reference or "sample_action" not in reference:
+            raise RuntimeError("policy reference requires sample_obs and sample_action")
+        observations = np.asarray(reference["sample_obs"], dtype=np.float32)
+        expected_actions = np.asarray(reference["sample_action"], dtype=np.float32)
+    if observations.ndim != 2 or observations.shape[1] != 260 or observations.shape[0] <= 0:
+        raise RuntimeError(
+            f"policy reference sample_obs must have shape [N,260], got {observations.shape}"
+        )
+    if expected_actions.shape != (observations.shape[0], 12):
+        raise RuntimeError(
+            "policy reference sample_action must have shape "
+            f"{(observations.shape[0], 12)}, got {expected_actions.shape}"
+        )
+    if not np.isfinite(observations).all() or not np.isfinite(expected_actions).all():
+        raise RuntimeError("policy reference contains NaN/Inf")
+    input_name = session.get_inputs()[0].name
+    output_name = session.get_outputs()[0].name
+    actual_actions = np.concatenate(
+        [
+            session.run(
+                [output_name],
+                {input_name: observations[index : index + 1]},
+            )[0]
+            for index in range(observations.shape[0])
+        ],
+        axis=0,
+    )
+    if actual_actions.shape != expected_actions.shape or not np.isfinite(
+        actual_actions
+    ).all():
+        raise RuntimeError(
+            "policy reference replay returned invalid actions: "
+            f"shape={actual_actions.shape}"
+        )
+    max_abs_error = float(np.max(np.abs(actual_actions - expected_actions)))
+    if max_abs_error > 1.0e-4:
+        raise RuntimeError(
+            f"policy reference parity failed: max_abs_error={max_abs_error:.8f}"
+        )
+    return max_abs_error
 
 
 def validate_env_for_policy_kind(env_cfg: dict, policy_kind: str, *, path: str) -> None:
@@ -102,7 +150,12 @@ def main() -> None:
         raise RuntimeError("rough policy requires --contract")
 
     contract = None
+    contract_data = None
     if args.policy_kind == "rough":
+        with open(args.contract, "r", encoding="utf-8") as handle:
+            contract_data = yaml.safe_load(handle)
+        if not isinstance(contract_data, dict):
+            raise RuntimeError("rough height-scan contract must be a mapping")
         contract = load_height_scan_contract(args.contract)
         if contract.obs_dim != 260 or contract.height_scan_dim != 187:
             raise RuntimeError(
@@ -123,6 +176,19 @@ def main() -> None:
     if output_dim != 12:
         raise RuntimeError(f"ONNX output_dim expected 12, got {output_dim}")
 
+    reference_error = None
+    if contract is not None:
+        policy_contract = contract_data.get("policy")
+        if not isinstance(policy_contract, dict):
+            raise RuntimeError("rough contract requires a policy mapping")
+        reference_value = args.reference or policy_contract.get("reference")
+        if not reference_value:
+            raise RuntimeError("rough contract requires a Torch-derived policy reference")
+        reference_path = Path(reference_value)
+        if not reference_path.is_absolute():
+            reference_path = Path(args.contract).resolve().parent / reference_path
+        reference_error = validate_policy_reference(session, reference_path)
+
     height_slice = (66, 253)
     zero_scan = np.zeros((187,), dtype=np.float32)
     scans = [("zero", zero_scan)]
@@ -138,6 +204,7 @@ def main() -> None:
             base_height=contract.offset,
         )
         scans.extend([("plane", plane_scan), ("step", step_scan)])
+    actions: dict[str, np.ndarray] = {}
     for name, scan in scans:
         obs = _make_obs(input_dim, height_slice, scan)
         action = session.run([output_meta.name], {input_meta.name: obs})[0]
@@ -145,6 +212,15 @@ def main() -> None:
             raise RuntimeError(f"{name} action last dim expected 12, got {action.shape}")
         if not np.isfinite(action).all():
             raise RuntimeError(f"{name} action contains NaN/Inf")
+        actions[name] = np.asarray(action, dtype=np.float32)
+
+    height_sensitivity = 0.0
+    if contract is not None:
+        height_sensitivity = float(np.max(np.abs(actions["step"] - actions["plane"])))
+        if height_sensitivity <= 1.0e-6:
+            raise RuntimeError(
+                "rough ONNX policy is insensitive to a 10 cm height-scan step"
+            )
 
     timing_obs = _make_obs(input_dim, height_slice, scans[-1][1])
     timings_ms = []
@@ -159,6 +235,9 @@ def main() -> None:
         f"PASS {args.policy_kind} policy contract: input_dim={input_dim} "
         f"output_dim={output_dim} height_scan_slice={[66, 253]}"
     )
+    if contract is not None:
+        print(f"PASS rough height sensitivity: max_action_delta={height_sensitivity:.6f}")
+        print(f"PASS Torch/ONNX reference parity: max_abs_error={reference_error:.8f}")
     print(f"{timing_status} CPU inference timing: avg_ms={avg_ms:.3f} p95_ms={p95_ms:.3f}")
 
 

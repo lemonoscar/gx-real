@@ -12,20 +12,27 @@
 当前推荐维护和上机的链路是：
 
 ```text
-scripts/run_leg12_real.sh
-  -> real-wbc/scripts/run_wbc_leg12.py
+scripts/run_leg12_flat_real.sh  -> real-wbc/scripts/run_wbc_flat.py
+scripts/run_leg12_rough_real.sh -> real-wbc/scripts/run_wbc_rough.py
+  -> real-wbc/scripts/run_wbc_leg12.py（共享实现）
   -> real-wbc/modules/wbc_node_leg12_arm_passthrough.py
-  -> policies/policy.onnx + policies/env.yaml
+
+scripts/run_x5_fixed_hold_{flat,rough}.sh
+  -> real-wbc/scripts/run_x5_fixed_hold_{flat,rough}.py
+  -> x5_fixed_hold + /arm/state + /arm/target_state
 ```
 
 控制逻辑：
 
 - 前 `12` 维腿动作来自 RL policy。
-- X5/ARX5 机械臂由独立 SpaceMouse Arm 节点写 `can0`；WBC 只消费 `/arm/state` 和 `/arm/target_state`。
+- X5/ARX5 由匹配部署类的 fixed-hold 节点独占 `can0`；WBC 只消费 `/arm/state` 和 `/arm/target_state`。
+- 行走策略不允许 `external_spacemouse`；SpaceMouse 仅保留为不与生产 writer 并发的诊断工具。
+- 当前 manifest 为 `UNRELEASED`，不得通过关闭检查来上机。
 - Go2/X5 的底层通信、状态读取、手柄流程、起身流程和急停框架尽量沿用原真机链路。
 
 ## 专题文档
 
+- [2026-07-16 真机收口交接](gx-real-handoff-2026-07-16.md)：当前分支、已完成门禁、验证结果、真机阻塞证据和继续顺序。
 - [Flat / Rough 双真机部署方案](flat_rough_real_deployment_comparison_and_plan_2026-07-16.md)：对比 phase 工程，定义两类互斥策略部署、Rough height map、X5/传感器接入、完整通信拓扑和分阶段验收。
 - [上机使用指南](上机使用指南.md)：真机操作步骤、启动命令、按键流程和常见故障。
 - [260维输入设计](260维输入设计.md)：当前 `260D obs -> 12D action` 的观测拼接契约。

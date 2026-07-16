@@ -74,12 +74,18 @@ def main(deployment_kind: str) -> int:
     parser.add_argument("--max-start-error-rad", type=float, default=0.35)
     parser.add_argument("--joint-speed-rad-s", type=float, default=0.30)
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--allow-missing-can", action="store_true")
+    parser.add_argument(
+        "--allow-missing-can",
+        action="store_true",
+        help="Permit a missing CAN interface only together with --dry-run.",
+    )
     parser.add_argument(
         "--logging-dir",
         default=os.environ.get("GX_REAL_LOG_DIR", DEFAULT_LOG_DIR),
     )
     args = parser.parse_args()
+    if args.allow_missing_can and not args.dry_run:
+        parser.error("--allow-missing-can is permitted only with --dry-run")
     _configure_logging(args.logging_dir, deployment_kind)
 
     from pathlib import Path

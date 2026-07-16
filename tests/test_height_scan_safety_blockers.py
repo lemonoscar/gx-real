@@ -502,6 +502,33 @@ def test_stale_last_valid_scan_is_not_reused(monkeypatch):
     assert diag["stale_last_valid_age_s"] == diag["last_valid_age_s"]
 
 
+def test_stale_stream_resets_consecutive_valid_frame_warmup(monkeypatch):
+    now = [250.0]
+    monkeypatch.setattr(height_scan_provider_module.time, "monotonic", lambda: now[0])
+    provider = _height_map_provider(
+        timeout_s=0.25,
+        required_consecutive_valid_frames=2,
+    )
+    data = _flat_height_map()
+
+    for _ in range(2):
+        provider._pose_callback(_pose_msg())
+        provider._height_map_callback(_height_map_msg(data))
+    _, ready_diag = provider.get_scan()
+    assert ready_diag["consecutive_valid_frames"] == 2
+
+    now[0] += 0.30
+    _, stale_diag = provider.get_scan()
+    assert stale_diag["height_scan_ok"] is False
+    assert stale_diag["consecutive_valid_frames"] == 0
+    assert provider.consecutive_valid_frames == 0
+
+    provider._pose_callback(_pose_msg())
+    provider._height_map_callback(_height_map_msg(data))
+    _, recovered_diag = provider.get_scan()
+    assert recovered_diag["consecutive_valid_frames"] == 1
+
+
 def test_height_map_critical_unknown_short_gap_may_reuse_last_valid(monkeypatch):
     now = [300.0]
     monkeypatch.setattr(height_scan_provider_module.time, "monotonic", lambda: now[0])

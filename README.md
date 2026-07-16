@@ -1,5 +1,15 @@
 # gx-real 真机开发文档
 
+> **2026-07-16 入口变更：** 当前生产主线已经拆分为互斥的
+> `FlatDeployment` 和 `RoughDeployment`，X5 必须使用策略固定姿态的
+> `x5_fixed_hold` owner。旧的 `scripts/run_leg12_real.sh`、
+> `external_spacemouse` 和行走中 SpaceMouse 控臂流程均已硬阻断。
+> 请以 [最新上机使用指南](docs/上机使用指南.md) 为唯一操作依据；本文后续旧链路说明
+> 仅保留作历史背景。
+>
+> 当前 Flat/Rough manifest 均为 `UNRELEASED`，Rough perception contract
+> 仍为 `UNVERIFIED`。这表示仓库有意拒绝真实 LowCmd/CAN 输出，不是需要绕过的错误。
+
 这份文档面向第一次接触本仓库的人，目标是把 `real` 目录下分散的上机、网络、硬件和策略替换说明整理成一条完整开发路径。默认部署环境是机器狗机身上的 Jetson Orin NX 开发板，路径按 `~/gx-real` 书写。当前主线不是原始 UMI-on-Legs 的完整末端轨迹控制链，而是 `Go2 + X5/ARX5` 真机上的分离控制链：WBC 主节点只写 Go2 腿部，独立 SpaceMouse Arm 节点独占 X5/ARX5。
 
 ## 1. 当前系统做什么

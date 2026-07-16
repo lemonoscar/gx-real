@@ -15,10 +15,19 @@ height_observation:
   slice: [66, 253]
 height_scan_contract:
   path: policies/rough/current/height_scan_contract.yaml
-  sha256: 7c0d6379b2ef156e1a776b100425c02fc9d0224a7c73b09521cfaabdbeab7131
+  sha256: 27362da18130687caf2b0e360fb286dfa9f8ae0c41bfcf7dba326e502d2826e7
+height_scan_grid:
+  path: policies/rough/current/height_scan_contract.npz
+  sha256: ae080f65fd278f6ae1e36485aa22eadc3702515aac2372352343f64a680db260
 height_scan_reference:
   path: policies/rough/current/height_scan_reference.npz
   sha256: ae080f65fd278f6ae1e36485aa22eadc3702515aac2372352343f64a680db260
+policy_reference:
+  path: policies/rough/current/policy_reference.npz
+  sha256: 427423e41d73b89a51564f18250f38325c6c99aba3e2fbcda4e6474644a6088a
+policy_torchscript:
+  path: policies/rough/current/policy.pt
+  sha256: a441d2b626f50d218fb65352023125b5208a90dc5eca9a18b8a797c6736406b7
 perception_contract:
   path: policies/rough/current/perception_contract.yaml
   sha256: 7dfbbcbbda1ad6c08bd216b1d07bac04c6ce498e7b6c486628b03516268f2746
@@ -30,7 +39,7 @@ training_agent_config:
   sha256: a8c47b8c8595f6c355ae59eeb4a22f8099b7d71d23c06f2c70ab3868ae664cb9
 export_metadata:
   path: policies/rough/current/export_metadata.json
-  sha256: 890c49f670d9c04a650d37e8ba606785170d5c59ae83b524b0275672fb244d1c
+  sha256: c3364775e6b901520df3f0dd7b2ad8617f2ffffc771ad0f61556ca14d34fcb40
 expected_observation_shape: [260]
 expected_action_shape: [12]
 expected_joint_order:

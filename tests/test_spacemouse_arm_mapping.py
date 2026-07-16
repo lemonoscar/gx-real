@@ -330,6 +330,39 @@ def test_spacemouse_watchdog_latches_fault_and_damps():
     assert node.safety_state.fault_latched
 
 
+def test_fixed_hold_invalid_feedback_faults_immediately_and_invalidates_target():
+    node = SpaceMouseArmNode.__new__(SpaceMouseArmNode)
+    node.node = _FakeRosNode()
+    node.controller = _FakeController()
+    node.dry_run = True
+    node.output_enabled = True
+    node.arm_position_control_enabled = True
+    node.fixed_hold_joint_pose = np.zeros(6, dtype=np.float64)
+    node.fixed_hold_tracking_error_rad = 0.10
+    node.fixed_hold_command_deadline = float("inf")
+    node._read_arm_state = lambda: (
+        np.zeros(6, dtype=np.float64),
+        np.zeros(6, dtype=np.float64),
+        np.zeros(6, dtype=np.float64),
+        0.0,
+        0.0,
+        False,
+    )
+    published_target_valid = []
+    node._publish_arm_state = lambda *args, **kwargs: None
+    node._publish_arm_target = lambda *, valid_override=None: published_target_valid.append(
+        valid_override
+    )
+    _mark_test_node_armed(node)
+
+    node._fixed_hold_timer(10.0)
+
+    assert node.output_enabled is False
+    assert node.safety_state.fault_latched
+    assert node.controller.damping_count == 1
+    assert published_target_valid == [False]
+
+
 def test_enable_current_pose_hold_sets_default_gain():
     node = SpaceMouseArmNode.__new__(SpaceMouseArmNode)
     node.node = _FakeRosNode()

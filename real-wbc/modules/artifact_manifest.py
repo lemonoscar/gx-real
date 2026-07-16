@@ -48,7 +48,10 @@ EXPECTED_GO2_JOINT_ORDER = [
 
 ROUGH_HASHED_ARTIFACTS = (
     "height_scan_contract",
+    "height_scan_grid",
     "height_scan_reference",
+    "policy_reference",
+    "policy_torchscript",
     "perception_contract",
     "training_checkpoint",
     "training_agent_config",
@@ -149,6 +152,10 @@ def verify_manifest(
                     f"rough artifact manifest missing {label}"
                 )
             _verify_hashed_artifact(root, label, manifest[label], verified)
+        _verify_rough_perception_release_contract(
+            root,
+            manifest["perception_contract"],
+        )
     libraries = manifest["shared_libraries"]
     if not isinstance(libraries, list) or not libraries:
         raise ArtifactManifestFault("shared_libraries must be non-empty")
@@ -170,6 +177,8 @@ def validate_repository_manifest(
     runtime_policy_path: str | Path | None = None,
 ) -> dict[str, str]:
     manifest = load_manifest(path)
+    if manifest["release_status"] != "RELEASED":
+        raise ArtifactManifestFault("artifact manifest is not RELEASED")
     if runtime_policy_path is not None:
         manifest_policy = (root / str(manifest["policy"]["path"])).resolve()
         if Path(runtime_policy_path).resolve() != manifest_policy:
@@ -178,6 +187,28 @@ def validate_repository_manifest(
                 f"is not manifest policy {manifest_policy}"
             )
     actual_commit = _git(root, "rev-parse", "HEAD")
+    manifest_commit = str(manifest["git_commit"])
+    verified_commit = actual_commit
+    if actual_commit != manifest_commit:
+        parent_commit = _git(root, "rev-parse", "HEAD^")
+        changed_paths = _git(
+            root,
+            "diff",
+            "--name-only",
+            f"{manifest_commit}..{actual_commit}",
+        ).splitlines()
+        try:
+            manifest_relative_path = str(Path(path).resolve().relative_to(root.resolve()))
+        except ValueError as exc:
+            raise ArtifactManifestFault("artifact manifest escapes repository root") from exc
+        _validate_release_revision(
+            expected_commit=manifest_commit,
+            actual_commit=actual_commit,
+            parent_commit=parent_commit,
+            changed_paths=changed_paths,
+            manifest_relative_path=manifest_relative_path,
+        )
+        verified_commit = manifest_commit
     dirty = bool(_git(root, "status", "--porcelain"))
     try:
         ort_version = importlib.metadata.version("onnxruntime")
@@ -186,7 +217,7 @@ def validate_repository_manifest(
     return verify_manifest(
         manifest,
         root=root,
-        actual_git_commit=actual_commit,
+        actual_git_commit=verified_commit,
         worktree_dirty=dirty,
         actual_python_version=platform.python_version(),
         actual_onnxruntime_version=ort_version,
@@ -194,6 +225,29 @@ def validate_repository_manifest(
         expected_x5_model=expected_x5_model,
         expected_policy_kind=expected_policy_kind,
     )
+
+
+def _validate_release_revision(
+    *,
+    expected_commit: str,
+    actual_commit: str,
+    parent_commit: str,
+    changed_paths: list[str],
+    manifest_relative_path: str,
+) -> None:
+    if actual_commit == expected_commit:
+        return
+    if parent_commit != expected_commit:
+        raise ArtifactManifestFault(
+            "release manifest git_commit must be the parent of the manifest-only release commit"
+        )
+    normalized_paths = {Path(value).as_posix() for value in changed_paths if value}
+    expected_paths = {Path(manifest_relative_path).as_posix()}
+    if normalized_paths != expected_paths:
+        raise ArtifactManifestFault(
+            "release commit may change only its artifact manifest; "
+            f"changed={sorted(normalized_paths)} expected={sorted(expected_paths)}"
+        )
 
 
 def _verify_hashed_artifact(
@@ -217,6 +271,40 @@ def _verify_hashed_artifact(
             f"{label} SHA-256 mismatch: expected {artifact['sha256']}, got {actual}"
         )
     verified[label] = actual
+
+
+def _verify_rough_perception_release_contract(root: Path, artifact: Any) -> None:
+    path = (root / str(artifact["path"])).resolve()
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ArtifactManifestFault("rough perception contract must be a YAML mapping")
+    if str(data.get("verification_status", "")).upper() != "VERIFIED":
+        raise ArtifactManifestFault("rough perception contract is not VERIFIED")
+
+    calibration = data.get("calibration")
+    mapping = data.get("mapping")
+    if not isinstance(calibration, dict) or not isinstance(mapping, dict):
+        raise ArtifactManifestFault(
+            "rough perception contract requires calibration and mapping sections"
+        )
+    required_values = {
+        "calibration.lidar_model": calibration.get("lidar_model"),
+        "calibration.lidar_firmware": calibration.get("lidar_firmware"),
+        "calibration.lidar_to_base_extrinsic": calibration.get("lidar_to_base_extrinsic"),
+        "calibration.self_filter": calibration.get("self_filter"),
+        "mapping.implementation": mapping.get("implementation"),
+        "mapping.configuration_hash": mapping.get("configuration_hash"),
+    }
+    unresolved = [
+        name
+        for name, value in required_values.items()
+        if not str(value or "").strip()
+        or str(value).strip().upper() in {"UNSET", "UNVERIFIED", "UNKNOWN"}
+    ]
+    if unresolved:
+        raise ArtifactManifestFault(
+            f"rough perception contract has unresolved release fields: {unresolved}"
+        )
 
 
 def _git(root: Path, *args: str) -> str:
