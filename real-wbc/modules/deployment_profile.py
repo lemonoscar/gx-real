@@ -7,6 +7,7 @@ from typing import Any, Mapping, Optional
 import numpy as np
 import yaml
 
+from modules.height_scan_core import DEFAULT_OFFSET, HeightScanContract
 from modules.height_scan_policy_validation import classify_height_scan_func
 
 
@@ -304,6 +305,206 @@ class RoughDeployment(DeploymentProfile):
         if error is not None:
             diag["error"] = error
         return HeightObservation(values=None, motion_ready=False, diagnostic=diag)
+
+
+def validate_fixed_arm_policy_contract(
+    env_config: Mapping[str, Any],
+    *,
+    expected_pose: Any,
+    expected_gripper: float,
+) -> None:
+    """Prove that the exported training config uses the deployment fixed arm pose."""
+
+    pose = np.asarray(expected_pose, dtype=np.float64).reshape(-1)
+    if pose.shape != (6,) or not np.isfinite(pose).all():
+        raise DeploymentProfileFault("expected fixed arm pose must be a finite 6-vector")
+    gripper = float(expected_gripper)
+    if not np.isfinite(gripper):
+        raise DeploymentProfileFault("expected fixed gripper command must be finite")
+
+    try:
+        joint_names = list(env_config["joint_names"])
+        init_joint_pos = env_config["scene"]["robot"]["init_state"]["joint_pos"]
+        command = env_config["commands"]["arm_joint_pos"]
+        command_joint_names = list(command["joint_names"])
+        position_range = np.asarray(command["position_range"], dtype=np.float64)
+        policy_obs = env_config["observations"]["policy"]
+        arm_command_obs = policy_obs["arm_joint_command"]
+        gripper_obs = policy_obs["gripper_command"]
+        padded_action_obs = policy_obs["actions"]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise DeploymentProfileFault(
+            f"exported env.yaml is missing the fixed-arm policy contract: {exc}"
+        ) from exc
+
+    mappings = {
+        "commands.arm_joint_pos": command,
+        "observations.policy": policy_obs,
+        "observations.policy.arm_joint_command": arm_command_obs,
+        "observations.policy.gripper_command": gripper_obs,
+        "observations.policy.actions": padded_action_obs,
+    }
+    malformed = [name for name, value in mappings.items() if not isinstance(value, Mapping)]
+    if malformed:
+        raise DeploymentProfileFault(
+            f"fixed-arm policy contract entries must be mappings: {malformed}"
+        )
+
+    if len(joint_names) != 18 or len(command_joint_names) != 6:
+        raise DeploymentProfileFault(
+            "fixed-arm policy requires 18 robot joints and 6 ordered arm command joints"
+        )
+    if joint_names[-6:] != command_joint_names:
+        raise DeploymentProfileFault(
+            "fixed-arm command joint order must match the final six policy joint entries"
+        )
+    try:
+        training_pose = np.asarray(
+            [float(init_joint_pos[name]) for name in command_joint_names],
+            dtype=np.float64,
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise DeploymentProfileFault(
+            f"cannot resolve the six training arm default positions: {exc}"
+        ) from exc
+    if not np.allclose(training_pose, pose, rtol=0.0, atol=1.0e-9):
+        raise DeploymentProfileFault(
+            "deployment fixed arm pose differs from the exported training default: "
+            f"deployment={pose.tolist()} training={training_pose.tolist()}"
+        )
+
+    if position_range.shape != (6, 2) or not np.isfinite(position_range).all():
+        raise DeploymentProfileFault(
+            f"arm command position_range must have finite shape (6, 2), got {position_range.shape}"
+        )
+    if not np.array_equal(position_range, np.zeros((6, 2), dtype=np.float64)):
+        raise DeploymentProfileFault(
+            "arm command range must be six exact [0, 0] offsets for fixed-hold training"
+        )
+    if command.get("use_default_offset") is not True:
+        raise DeploymentProfileFault(
+            "arm command must use the training default joint pose as its offset"
+        )
+    arm_command_params = arm_command_obs.get("params")
+    if not isinstance(arm_command_params, Mapping):
+        raise DeploymentProfileFault(
+            "arm_joint_command observation requires a params mapping"
+        )
+    if arm_command_params.get("command_name") != "arm_joint_pos":
+        raise DeploymentProfileFault(
+            "policy arm_joint_command must observe commands.arm_joint_pos"
+        )
+    gripper_params = gripper_obs.get("params")
+    action_params = padded_action_obs.get("params")
+    if not isinstance(gripper_params, Mapping) or not isinstance(action_params, Mapping):
+        raise DeploymentProfileFault(
+            "gripper_command and actions observations require params mappings"
+        )
+    try:
+        gripper_dim = int(gripper_params.get("dim", -1))
+        gripper_value = float(gripper_params.get("value", float("nan")))
+        total_action_dim = int(action_params.get("total_action_dim", -1))
+        action_pad_value = float(action_params.get("pad_value", float("nan")))
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise DeploymentProfileFault(
+            f"fixed-arm observation parameters must be numeric: {exc}"
+        ) from exc
+    if gripper_dim != 1 or not np.isclose(
+        gripper_value, gripper, rtol=0.0, atol=1.0e-9
+    ):
+        raise DeploymentProfileFault(
+            "policy gripper command does not match the deployment fixed gripper value"
+        )
+    if total_action_dim != 18 or action_pad_value != 0.0:
+        raise DeploymentProfileFault(
+            "last_action_with_padding must pad the 12 leg actions to 18D with exact zeros"
+        )
+
+
+def validate_rough_height_training_contract(
+    env_config: Mapping[str, Any],
+    contract: HeightScanContract,
+) -> None:
+    """Cross-check the exported Isaac scanner against the runtime 187D grid."""
+
+    try:
+        scanner = env_config["scene"]["height_scanner"]
+        pattern = scanner["pattern_cfg"]
+        height_obs = env_config["observations"]["policy"]["height_scan"]
+        sensor_cfg = height_obs["params"]["sensor_cfg"]
+    except (KeyError, TypeError) as exc:
+        raise DeploymentProfileFault(
+            f"exported rough env.yaml is missing the height-scanner contract: {exc}"
+        ) from exc
+    named_mappings = {
+        "scene.height_scanner": scanner,
+        "scene.height_scanner.pattern_cfg": pattern,
+        "observations.policy.height_scan": height_obs,
+        "observations.policy.height_scan.params.sensor_cfg": sensor_cfg,
+    }
+    malformed = [
+        name for name, value in named_mappings.items() if not isinstance(value, Mapping)
+    ]
+    if malformed:
+        raise DeploymentProfileFault(
+            f"rough height-scanner contract entries must be mappings: {malformed}"
+        )
+    try:
+        training_resolution = float(pattern["resolution"])
+        training_size = np.asarray(pattern["size"], dtype=np.float64).reshape(-1)
+        training_direction = np.asarray(
+            pattern["direction"], dtype=np.float64
+        ).reshape(-1)
+        training_clip = np.asarray(height_obs["clip"], dtype=np.float64).reshape(-1)
+        training_scale = float(height_obs["scale"])
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise DeploymentProfileFault(
+            f"rough height-scanner geometry must be numeric and complete: {exc}"
+        ) from exc
+    if not np.isfinite(training_resolution) or not np.isclose(
+        training_resolution, contract.resolution, rtol=0.0, atol=1.0e-9
+    ):
+        raise DeploymentProfileFault(
+            "training height-scanner resolution differs from the runtime contract"
+        )
+    if training_size.shape != (2,) or not np.allclose(
+        training_size, contract.size, rtol=0.0, atol=1.0e-9
+    ):
+        raise DeploymentProfileFault(
+            "training height-scanner size differs from the runtime contract"
+        )
+    if scanner.get("ray_alignment") != contract.ray_alignment:
+        raise DeploymentProfileFault(
+            "training height-scanner ray_alignment differs from the runtime contract"
+        )
+    if training_direction.shape != (3,) or not np.array_equal(
+        training_direction, np.asarray(contract.ray_direction, dtype=np.float64)
+    ):
+        raise DeploymentProfileFault(
+            "training height-scanner direction differs from the runtime contract"
+        )
+    if pattern.get("ordering") != contract.grid_ordering:
+        raise DeploymentProfileFault(
+            "training height-scanner ordering differs from the runtime contract"
+        )
+    if sensor_cfg.get("name") != "height_scanner":
+        raise DeploymentProfileFault(
+            "policy height_scan must read scene.height_scanner"
+        )
+    if training_clip.shape != (2,) or not np.array_equal(
+        training_clip, np.asarray(contract.clip, dtype=np.float64)
+    ):
+        raise DeploymentProfileFault(
+            "training height_scan clip differs from the runtime contract"
+        )
+    if not np.isfinite(training_scale) or training_scale != contract.scale:
+        raise DeploymentProfileFault(
+            "training height_scan scale differs from the runtime contract"
+        )
+    if contract.offset != DEFAULT_OFFSET:
+        raise DeploymentProfileFault(
+            f"Isaac height_scan deployment offset must remain {DEFAULT_OFFSET}"
+        )
 
 
 def load_deployment_profile(

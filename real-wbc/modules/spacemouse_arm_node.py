@@ -152,6 +152,7 @@ class SpaceMouseArmNode:
         from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 
         self.rclpy = rclpy
+        self.Bool = Bool
         self.control_mode = str(control_mode).lower()
         if self.control_mode not in {"spacemouse", "fixed_hold"}:
             raise ValueError(
@@ -262,6 +263,11 @@ class SpaceMouseArmNode:
             Bool,
             self.safety_topic,
             self._safety_estop_cb,
+            safety_qos,
+        )
+        self.safety_pub = self.node.create_publisher(
+            Bool,
+            self.safety_topic,
             safety_qos,
         )
         self.safety_heartbeat_sub = self.node.create_subscription(
@@ -562,6 +568,11 @@ class SpaceMouseArmNode:
         if not first_trigger:
             return
         self._log_error(f"X5 runtime fault: {source}; damping arm")
+        if getattr(self, "control_mode", "spacemouse") == "fixed_hold":
+            try:
+                self.safety_pub.publish(self.Bool(data=True))
+            except Exception as exc:
+                self._log_error(f"Failed to propagate X5 fixed-hold fault to Go2: {exc}")
         self._set_to_damping()
 
     def _hold_current_pose(self) -> None:

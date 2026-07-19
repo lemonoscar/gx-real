@@ -52,13 +52,15 @@ def test_shutdown_is_centralized_in_entrypoint() -> None:
     assert 'wbc_node.safe_shutdown("run_wbc_leg12 finally")' in entrypoint
 
 
-def test_policy_tick_continuously_checks_both_arm_streams_before_work() -> None:
+def test_policy_tick_checks_physical_arm_safety_independently_of_actor_input() -> None:
     source = _source()
     check_start = source.index("def check_continuous_arm_freshness")
     check_end = source.index("def _log_external_arm_stale_if_needed", check_start)
     check = source[check_start:check_end]
     assert "obs.state_fresh and obs.target_fresh" in check
     assert "self.trigger_safety_stop" in check
+    assert 'self.arm_observation_mode != "live"' not in check
+    assert "not self.require_arm_state_for_rl" in check
     policy_start = source.index("def policy_timer_callback")
     assert "if not self.check_continuous_arm_freshness():" in source[policy_start:policy_start + 700]
 
@@ -97,6 +99,18 @@ def test_x5_locks_are_acquired_before_controller_construction() -> None:
     acquire = source.index("self.hardware_owner_locks.acquire()")
     controller = source.index("self.controller = arx5.Arx5CartesianController")
     assert acquire < controller
+
+
+def test_fixed_hold_fault_propagates_estop_to_go2() -> None:
+    source = (ROOT / "real-wbc/modules/spacemouse_arm_node.py").read_text(
+        encoding="utf-8"
+    )
+    start = source.index("def _trigger_fault")
+    end = source.index("def _hold_current_pose", start)
+    block = source[start:end]
+    assert '== "fixed_hold"' in block
+    assert "self.safety_pub.publish(self.Bool(data=True))" in block
+    assert block.index("self.safety_pub.publish") < block.index("self._set_to_damping()")
 
 
 def test_estop_qos_is_reliable_depth_one_transient_local_and_false_does_not_release() -> None:

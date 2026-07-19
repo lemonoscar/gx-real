@@ -58,10 +58,16 @@ def _transform_from_ros_msg(msg: Any) -> StaticTransform:
 
 
 def _yaw_from_ros_quat(quat: Any) -> float:
-    x = float(quat.x)
-    y = float(quat.y)
-    z = float(quat.z)
-    w = float(quat.w)
+    values = np.array(
+        [float(quat.x), float(quat.y), float(quat.z), float(quat.w)],
+        dtype=np.float64,
+    )
+    if not np.isfinite(values).all():
+        raise ValueError("pose orientation quaternion must be finite")
+    norm = float(np.linalg.norm(values))
+    if norm <= 0.0:
+        raise ValueError("pose orientation quaternion is invalid")
+    x, y, z, w = values / norm
     return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
 
 
@@ -521,13 +527,19 @@ class HeightScanProvider:
             return None, getattr(self.last_pose_msg.header, "frame_id", ""), "stale_pose", pose_age_s
         pose = self.last_pose_msg.pose
         frame_id = getattr(self.last_pose_msg.header, "frame_id", "")
-        return (
-            (
+        try:
+            robot_pose = (
                 float(pose.position.x),
                 float(pose.position.y),
                 _yaw_from_ros_quat(pose.orientation),
                 float(pose.position.z),
-            ),
+            )
+            if not np.isfinite(robot_pose).all():
+                raise ValueError("pose position must be finite")
+        except (TypeError, ValueError):
+            return None, frame_id, "invalid_pose", pose_age_s
+        return (
+            robot_pose,
             frame_id,
             "ok",
             pose_age_s,

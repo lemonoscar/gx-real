@@ -22,7 +22,12 @@ from modules.height_scan_core import (  # noqa: E402
     make_step_points,
     points_to_height_scan,
 )
-from modules.deployment_profile import FlatDeployment, RoughDeployment  # noqa: E402
+from modules.deployment_profile import (  # noqa: E402
+    FlatDeployment,
+    RoughDeployment,
+    validate_fixed_arm_policy_contract,
+    validate_rough_height_training_contract,
+)
 
 
 class PolicyConfigLoader(yaml.SafeLoader):
@@ -120,6 +125,11 @@ def validate_env_for_policy_kind(env_cfg: dict, policy_kind: str, *, path: str) 
     profile = FlatDeployment() if policy_kind == "flat" else RoughDeployment()
     height_func = env_cfg["observations"]["policy"]["height_scan"].get("func")
     profile.validate_policy_height_func(height_func, config_path=path)
+    validate_fixed_arm_policy_contract(
+        env_cfg,
+        expected_pose=profile.arm_joint_pose,
+        expected_gripper=profile.arm_gripper,
+    )
 
     scene = env_cfg.get("scene")
     if not isinstance(scene, dict):
@@ -157,6 +167,7 @@ def main() -> None:
         if not isinstance(contract_data, dict):
             raise RuntimeError("rough height-scan contract must be a mapping")
         contract = load_height_scan_contract(args.contract)
+        validate_rough_height_training_contract(env_cfg, contract)
         if contract.obs_dim != 260 or contract.height_scan_dim != 187:
             raise RuntimeError(
                 f"unexpected contract dims: obs={contract.obs_dim}, height={contract.height_scan_dim}"

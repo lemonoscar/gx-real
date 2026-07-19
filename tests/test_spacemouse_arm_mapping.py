@@ -334,6 +334,9 @@ def test_fixed_hold_invalid_feedback_faults_immediately_and_invalidates_target()
     node = SpaceMouseArmNode.__new__(SpaceMouseArmNode)
     node.node = _FakeRosNode()
     node.controller = _FakeController()
+    node.control_mode = "fixed_hold"
+    node.Bool = _FakeBool
+    node.safety_pub = _RecordingPublisher()
     node.dry_run = True
     node.output_enabled = True
     node.arm_position_control_enabled = True
@@ -360,6 +363,7 @@ def test_fixed_hold_invalid_feedback_faults_immediately_and_invalidates_target()
     assert node.output_enabled is False
     assert node.safety_state.fault_latched
     assert node.controller.damping_count == 1
+    assert [message.data for message in node.safety_pub.messages] == [True]
     assert published_target_valid == [False]
 
 
@@ -526,6 +530,19 @@ class _FakeLogger:
 class _FakeRosNode:
     def get_logger(self):
         return _FakeLogger()
+
+
+class _FakeBool:
+    def __init__(self, *, data=False):
+        self.data = bool(data)
+
+
+class _RecordingPublisher:
+    def __init__(self):
+        self.messages = []
+
+    def publish(self, message):
+        self.messages.append(message)
 
 
 class _DestroyableFakeRosNode(_FakeRosNode):

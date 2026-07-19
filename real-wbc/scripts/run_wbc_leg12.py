@@ -3,6 +3,7 @@ import datetime
 import logging
 import numpy as np
 import os
+import sys
 
 try:
     from rich.logging import RichHandler
@@ -13,6 +14,8 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REAL_WBC_DIR = os.path.dirname(SCRIPT_DIR)
 GX_REAL_ROOT = os.path.dirname(REAL_WBC_DIR)
 DEFAULT_LOG_DIR = os.path.join(GX_REAL_ROOT, "logs")
+if REAL_WBC_DIR not in sys.path:
+    sys.path.insert(0, REAL_WBC_DIR)
 
 
 def configure_logging(log_root: str) -> str:
@@ -158,21 +161,28 @@ def main(deployment_kind: str) -> None:
     parser.add_argument(
         "--arm-observation-mode",
         choices=["live", "fixed_initial"],
-        default="live",
+        default="fixed_initial",
         help=(
-            "How policy arm observations are populated. live consumes arm topics; "
-            "fixed_initial feeds --arm_pose as constant arm pos/target with zero vel/tau."
+            "How policy arm observations are populated. Production uses fixed_initial: "
+            "--arm_pose remains constant for the entire run with zero arm velocity/torque. "
+            "Live arm topics remain available only to the independent physical safety gate."
         ),
     )
     parser.add_argument("--arm-state-timeout-sec", type=float, default=0.25)
     parser.add_argument("--arm-target-timeout-sec", type=float, default=0.25)
     parser.add_argument(
+        "--require-arm-fixed-hold-safety",
         "--require-arm-state-for-rl",
         dest="require_arm_state_for_rl",
         action="store_true",
         default=False,
+        help=(
+            "Require fresh x5_fixed_hold state/target for physical safety without copying "
+            "measured arm values into the policy observation."
+        ),
     )
     parser.add_argument(
+        "--no-require-arm-fixed-hold-safety",
         "--no-require-arm-state-for-rl",
         dest="require_arm_state_for_rl",
         action="store_false",
@@ -228,11 +238,6 @@ def main(deployment_kind: str) -> None:
         help="Abort startup if the ARX5 arm cannot be initialized.",
     )
     parser.add_argument(
-        "--allow-unknown-sport-mode",
-        action="store_true",
-        help="Allow low-level rollout if sport_mode state has not been received.",
-    )
-    parser.add_argument(
         "--lowstate-watchdog-sec",
         type=float,
         default=0.25,
@@ -242,7 +247,10 @@ def main(deployment_kind: str) -> None:
         "--sport-state-watchdog-sec",
         type=float,
         default=0.5,
-        help="Stop low-level control if sport_mode state is stale for this long.",
+        help=(
+            "Freshness window for detecting a reactivated built-in motion mode. "
+            "SportModeState normally disappears after MCF release."
+        ),
     )
     parser.add_argument(
         "--startup-action-limit-sec",
@@ -270,16 +278,6 @@ def main(deployment_kind: str) -> None:
         help="Version-controlled VERIFIED Go2 joint/rate safety contract.",
     )
     parser.add_argument(
-        "--no-live-ready-calibration",
-        dest="live_ready_pose_calibration",
-        action="store_false",
-        default=deployment_profile.allow_live_ready_pose_calibration,
-        help=(
-            "Do not use the current standing leg pose as the runtime policy ready/action "
-            "offset when R1 is pressed in internal mode."
-        ),
-    )
-    parser.add_argument(
         "--logging-dir",
         type=str,
         default=os.environ.get("GX_REAL_LOG_DIR", DEFAULT_LOG_DIR),
@@ -290,25 +288,33 @@ def main(deployment_kind: str) -> None:
         type=str,
         default="internal",
         choices=[
-            "manual",
             "pose_test",
-            "unitree_auto",
-            "unitree_recoverystand",
-            "unitree_standup",
             "internal",
         ],
     )
     args = parser.parse_args()
     args.deployment_profile = deployment_profile
+    if os.environ.get("GX_REAL_MCF_RELEASE_CONFIRMED") != "1":
+        parser.error(
+            "MCF release is not confirmed; start production control with "
+            f"scripts/run_leg12_{deployment_kind}_real.sh"
+        )
+    args.mcf_release_confirmed = True
     if args.arm_control_owner != "external_fixed_hold":
         parser.error(
             "production requires the x5_fixed_hold owner; SpaceMouse motion is outside "
             "this policy's training distribution"
         )
-    if args.arm_observation_mode != "live":
-        parser.error("production requires live arm state; fixed_initial is offline-only")
+    if args.arm_observation_mode != "fixed_initial":
+        parser.error(
+            "production requires fixed_initial policy arm observations; measured X5 joint "
+            "values are safety-only and must never enter the actor input"
+        )
     if not args.require_arm_state_for_rl:
-        parser.error("production requires continuous /arm/state and /arm/target_state freshness")
+        parser.error(
+            "production requires --require-arm-fixed-hold-safety so X5 feedback faults stop "
+            "Go2 without changing the fixed policy observation"
+        )
     run_log_dir = configure_logging(args.logging_dir)
     args.logging_dir = run_log_dir
     logging.info(f"Run logs: {run_log_dir}")
@@ -335,7 +341,7 @@ def main(deployment_kind: str) -> None:
     wbc_node = None
     try:
         wbc_node = WBCNodeLeg12ArmPassthrough(**vars(args))
-        logging.info("Deploy node ready in STANDBY; operator action is required")
+        logging.info("Deploy node ready; Passive starts after the first valid LowState")
         if wbc_node.arm_enabled:
             lowstate = wbc_node.get_arm_joint_state()
             if (lowstate.pos() == 0.0).all() and (lowstate.vel() == 0.0).all():

@@ -437,6 +437,23 @@ def test_grid_map_rotated_info_pose_fails_closed():
     assert "rotated GridMap poses are unsupported" in diag["error"]
 
 
+def test_grid_map_invalid_robot_pose_quaternion_fails_closed() -> None:
+    provider = _grid_map_provider()
+    pose = _pose_msg()
+    pose.pose.orientation.x = 0.0
+    pose.pose.orientation.y = 0.0
+    pose.pose.orientation.z = 0.0
+    pose.pose.orientation.w = 0.0
+
+    provider._pose_callback(pose)
+    provider._height_map_callback(_grid_map_msg(np.zeros((40, 40), dtype=np.float32)))
+    _, diag = provider.get_scan()
+
+    assert provider.last_scan is None
+    assert diag["height_scan_ok"] is False
+    assert diag["failure_reason"] == "invalid_pose"
+
+
 def test_height_map_source_and_pose_stamps_are_required_and_synchronized():
     provider = _height_map_provider(
         node=StampedFakeNode(ros_time_s=100.0),

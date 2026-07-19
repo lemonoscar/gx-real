@@ -1,4 +1,5 @@
 from pathlib import Path
+import copy
 import sys
 
 import numpy as np
@@ -15,6 +16,11 @@ from check_policy_height_scan_contract import (  # noqa: E402
     validate_policy_reference,
 )
 from modules.height_scan_policy_validation import ZERO_HEIGHT_SCAN_FUNC  # noqa: E402
+from modules.deployment_profile import (  # noqa: E402
+    DeploymentProfileFault,
+    validate_rough_height_training_contract,
+)
+from modules.height_scan_core import load_height_scan_contract  # noqa: E402
 
 
 class PolicyConfigLoader(yaml.SafeLoader):
@@ -85,3 +91,42 @@ def test_rough_policy_matches_torch_derived_reference(tmp_path: Path):
     )
     with pytest.raises(RuntimeError, match="reference parity failed"):
         validate_policy_reference(session, tampered_path)
+
+
+def _load_rough_env() -> dict:
+    with open(
+        ROOT / "policies/rough/current/env.yaml", "r", encoding="utf-8"
+    ) as handle:
+        return yaml.load(handle, Loader=PolicyConfigLoader)
+
+
+def test_rough_training_scanner_matches_runtime_grid_contract() -> None:
+    contract = load_height_scan_contract(
+        str(ROOT / "policies/rough/current/height_scan_contract.yaml")
+    )
+    validate_rough_height_training_contract(_load_rough_env(), contract)
+
+
+@pytest.mark.parametrize(
+    ("path", "value", "message"),
+    [
+        (("scene", "height_scanner", "ray_alignment"), "full_attitude", "ray_alignment"),
+        (("scene", "height_scanner", "pattern_cfg", "ordering"), "yx", "ordering"),
+        (("scene", "height_scanner", "pattern_cfg", "size"), [1.8, 1.0], "size"),
+        (("observations", "policy", "height_scan", "clip"), [-2.0, 2.0], "clip"),
+    ],
+)
+def test_rough_training_scanner_mismatch_fails_closed(
+    path: tuple[str, ...], value, message: str
+) -> None:
+    env = copy.deepcopy(_load_rough_env())
+    target = env
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = value
+    contract = load_height_scan_contract(
+        str(ROOT / "policies/rough/current/height_scan_contract.yaml")
+    )
+
+    with pytest.raises(DeploymentProfileFault, match=message):
+        validate_rough_height_training_contract(env, contract)

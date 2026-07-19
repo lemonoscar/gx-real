@@ -34,9 +34,15 @@ from modules.base_command_provider import (
     WirelessJoystickCommandProvider,
 )
 from modules.can_owner_lock import CanOwnerLock
-from modules.deployment_profile import DeploymentProfile, DeploymentProfileFault
+from modules.deployment_profile import (
+    DeploymentProfile,
+    DeploymentProfileFault,
+    validate_fixed_arm_policy_contract,
+    validate_rough_height_training_contract,
+)
 from modules.hardware_ownership import HardwareOwnershipLock
 from modules.height_scan_provider import HeightScanProvider
+from modules.height_scan_core import load_height_scan_contract
 from modules.final_command_safety import (
     FinalCommandContext,
     build_final_leg_safety,
@@ -45,6 +51,7 @@ from modules.final_command_safety import (
 from modules.runtime_safety import (
     RuntimeSafetyFault,
     limit_vector_abs_delta,
+    mcf_control_conflict_reason,
     require_finite_scalar,
     require_finite_vector,
 )
@@ -233,6 +240,7 @@ def _validate_policy_config(
     *,
     deployment_profile: DeploymentProfile,
     config_path: Optional[str] = None,
+    height_scan_contract_path: Optional[str] = None,
 ):
     if len(leg_joint_names) != LEG_DOF:
         raise RuntimeError(
@@ -265,6 +273,20 @@ def _validate_policy_config(
             raise RuntimeError(
                 f"unsupported observation func for {term_name}: expected {expected_func}, got {actual_func}"
             )
+    validate_fixed_arm_policy_contract(
+        config,
+        expected_pose=deployment_profile.arm_joint_pose,
+        expected_gripper=deployment_profile.arm_gripper,
+    )
+    if deployment_profile.kind == "rough":
+        if not height_scan_contract_path:
+            raise DeploymentProfileFault(
+                "rough policy validation requires a height-scan contract"
+            )
+        validate_rough_height_training_contract(
+            config,
+            load_height_scan_contract(height_scan_contract_path),
+        )
 
 
 def _smoothstep(ratio: float) -> float:
@@ -330,7 +352,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         arm_target_topic: str = "/arm/target_state",
         safety_topic: str = "/safety/estop",
         safety_heartbeat_topic: str = "/safety/heartbeat",
-        arm_observation_mode: str = "live",
+        arm_observation_mode: str = "fixed_initial",
         arm_state_timeout_sec: float = 0.25,
         arm_target_timeout_sec: float = 0.25,
         require_arm_state_for_rl: bool = False,
@@ -348,7 +370,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         disable_arm: bool = False,
         require_arm: bool = False,
         standup_mode: str = "internal",
-        allow_unknown_sport_mode: bool = False,
+        mcf_release_confirmed: bool = False,
         lowstate_watchdog_sec: float = 0.25,
         sport_state_watchdog_sec: float = 0.5,
         startup_action_limit_sec: float = 3.0,
@@ -356,7 +378,6 @@ class WBCNodeLeg12ArmPassthrough(Node):
         startup_action_delta_limit: float = 0.35,
         estop_repeat_count: int = 5,
         estop_repeat_period_sec: float = 0.02,
-        live_ready_pose_calibration: bool = True,
         leg_kp: float = 200.0,
         leg_kd: float = 10.0,
         height_scan_contract: str = "policies/rough/current/height_scan_contract.yaml",
@@ -451,7 +472,27 @@ class WBCNodeLeg12ArmPassthrough(Node):
                     parsed_tcp_pose,
                 )
         self.standup_mode = standup_mode
-        self.allow_unknown_sport_mode = allow_unknown_sport_mode
+        if self.standup_mode == "manual":
+            raise ValueError(
+                "manual external stand-up is disabled; use standup_mode='internal'"
+            )
+        if self.standup_mode in {
+            "unitree_auto",
+            "unitree_recoverystand",
+            "unitree_standup",
+        }:
+            raise ValueError(
+                "Unitree stand-up modes are unavailable after mandatory MCF release"
+            )
+        if self.standup_mode not in {"internal", "pose_test"}:
+            raise ValueError(
+                f"Invalid standup_mode={standup_mode!r}; expected internal or pose_test"
+            )
+        self.mcf_release_confirmed = bool(mcf_release_confirmed)
+        if not self.mcf_release_confirmed:
+            raise RuntimeError(
+                "MCF release was not confirmed; use the flat/rough real-run wrapper"
+            )
         self.lowstate_watchdog_sec = require_finite_scalar(
             lowstate_watchdog_sec,
             "lowstate_watchdog_sec",
@@ -489,14 +530,6 @@ class WBCNodeLeg12ArmPassthrough(Node):
         )
         if self.estop_repeat_period_sec < 0.0:
             raise ValueError("estop_repeat_period_sec must be >= 0")
-        self.live_ready_pose_calibration = bool(live_ready_pose_calibration)
-        if (
-            self.live_ready_pose_calibration
-            and not self.deployment_profile.allow_live_ready_pose_calibration
-        ):
-            raise DeploymentProfileFault(
-                f"{self.deployment_profile.kind} deployment forbids live ready-pose calibration"
-            )
         self.default_arm_hold_pose = self.deployment_profile.arm_joint_pose.copy()
         self.commanded_leg_kp = np.ones(LEG_DOF, dtype=np.float64) * require_finite_scalar(
             leg_kp,
@@ -506,6 +539,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
             leg_kd,
             "leg_kd",
         )
+        self.passive_leg_kd = np.ones(LEG_DOF, dtype=np.float64) * 3.0
+        self.passive_command_started = False
         self.policy_takeover_commands = np.array([0.0, 0.0, 0.0], dtype=np.float64)
         self.policy_move_commands = np.array([cmd_vx, cmd_vy, cmd_yaw], dtype=np.float64)
         self.base_command_source = base_command_source.lower()
@@ -589,7 +624,10 @@ class WBCNodeLeg12ArmPassthrough(Node):
             fallback_gripper=gripper_cmd,
             state_timeout_sec=self.arm_state_timeout_sec,
             target_timeout_sec=self.arm_target_timeout_sec,
-            strict_metadata=self.arm_observation_mode == "live",
+            strict_metadata=(
+                self.arm_observation_mode == "live"
+                or self.require_arm_state_for_rl
+            ),
         )
         self.last_arm_state_timeout_log_time = -1.0
         self.arm_passthrough_pose = self.requested_arm_hold_pose.copy()
@@ -681,8 +719,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.last_arm_button_noop_log_time = -1.0
         self.align_to_policy_active = False
         self.align_to_policy_start_time = -1.0
-        self.align_to_policy_duration = 1.5
-        self.align_to_policy_hold_time = 0.4
+        self.align_to_policy_duration = 0.0
+        self.align_to_policy_hold_time = 0.0
         self.align_to_policy_kp = self.commanded_leg_kp.copy()
         self.align_to_policy_kd = self.commanded_leg_kd.copy()
         self.align_to_policy_leg_start = np.zeros(12, dtype=np.float64)
@@ -744,15 +782,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         )
         self.policy_handover_leg_start = np.zeros(12, dtype=np.float64)
         self.policy_handover_duration = 1.2
-        self.stand_target_leg_pos = np.array(
-            [
-                0.00571868, 0.608813, -1.21763,
-                -0.00571868, 0.608813, -1.21763,
-                0.00571868, 0.608813, -1.21763,
-                -0.00571868, 0.608813, -1.21763,
-            ],
-            dtype=np.float64,
-        )
+        self.stand_target_leg_pos = self.real_deploy_leg_offset.copy()
         self.policy_handover_leg_start[:] = self.stand_target_leg_pos
         self.getup_settle_time = 0.0
         self.getup_crouch_time = 0.6
@@ -827,9 +857,12 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.arm_state_sub = None
         self.arm_target_sub = None
         if (
-            self.arm_observation_mode == "live"
-            and self.arm_control_owner
+            self.arm_control_owner
             in {"external_spacemouse", "external_fixed_hold", "none"}
+            and (
+                self.arm_observation_mode == "live"
+                or self.require_arm_state_for_rl
+            )
         ):
             self.arm_state_sub = self.create_subscription(
                 ArmState,
@@ -993,17 +1026,22 @@ class WBCNodeLeg12ArmPassthrough(Node):
         )
         if self.arm_observation_mode == "fixed_initial":
             logging.info(
-                "Arm observation mode: fixed_initial; policy arm pos/target are fixed to %s "
-                "with zero vel/tau and gripper %.3f. WBC will not subscribe to %s or %s.",
+                "Arm observation mode: fixed_initial; policy arm pos/target stay fixed to %s "
+                "for the full process lifetime, with zero vel/tau and gripper %.3f.",
                 np.array2string(
                     self.requested_arm_hold_pose,
                     precision=3,
                     floatmode="fixed",
                 ),
                 self.fixed_gripper_cmd,
-                self.arm_state_topic,
-                self.arm_target_topic,
             )
+            if self.require_arm_state_for_rl:
+                logging.info(
+                    "Physical X5 safety is monitored independently on %s and %s; "
+                    "those measured values are never copied into policy observations.",
+                    self.arm_state_topic,
+                    self.arm_target_topic,
+                )
         elif self.arm_control_owner == "external_fixed_hold":
             logging.info(
                 "Arm control owner: external_fixed_hold; required source=%s",
@@ -1131,6 +1169,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
 
         self.target_input_mode = "passthrough"
         self.safety_state.preflight_passed()
+        if self.uses_internal_standup and not self.safety_state.arm():
+            raise RuntimeError("failed to arm low-level Passive control after preflight")
 
     def init_height_scan_provider(self):
         if not self.deployment_profile.requires_height_provider:
@@ -1203,15 +1243,10 @@ class WBCNodeLeg12ArmPassthrough(Node):
         )
 
     def _build_internal_stand_leg_pos(self, policy_leg_pos: np.ndarray) -> np.ndarray:
-        del policy_leg_pos
-        return np.array(
-            [
-                0.00571868, 0.608813, -1.21763,
-                -0.00571868, 0.608813, -1.21763,
-                0.00571868, 0.608813, -1.21763,
-                -0.00571868, 0.608813, -1.21763,
-            ],
-            dtype=np.float64,
+        return require_finite_vector(
+            policy_leg_pos,
+            size=LEG_DOF,
+            name="policy_ready_leg_pos",
         )
 
     def _build_pre_getup_leg_pos(self, stand_target_leg_pos: np.ndarray) -> np.ndarray:
@@ -1381,15 +1416,52 @@ class WBCNodeLeg12ArmPassthrough(Node):
             self.can_owner_lock = None
 
     def low_level_control_active(self) -> bool:
-        return (
-            self.safety_state.allows_motion_output()
-            and (
-                self.start_policy
-                or self.align_to_policy_active
-                or self.pose_test_active
-                or self.start_time != -1.0
-            )
+        requested_control = (
+            self.start_policy
+            or self.align_to_policy_active
+            or self.pose_test_active
+            or self.start_time != -1.0
         )
+        return self.safety_state.allows_motion_output() and (
+            requested_control or self.passive_control_active()
+        )
+
+    def passive_control_active(self) -> bool:
+        return (
+            self.uses_internal_standup
+            and self.latest_tick != -1
+            and not self.start_policy
+            and not self.align_to_policy_active
+            and not self.pose_test_active
+            and self.start_time == -1.0
+            and not self.safety_stop_reason
+        )
+
+    def set_passive_lowcmd_from_state(self) -> None:
+        current_leg_q = require_finite_vector(
+            self.quadruped_q,
+            size=LEG_DOF,
+            name="passive_current_leg_q",
+        )
+        for i in range(LEG_DOF):
+            self.motor_cmd[i].q = float(current_leg_q[i])
+            self.motor_cmd[i].dq = 0.0
+            self.motor_cmd[i].tau = 0.0
+            self.motor_cmd[i].kp = 0.0
+            self.motor_cmd[i].kd = float(self.passive_leg_kd[i])
+        self.quadruped_kp[:] = 0.0
+        self.quadruped_kd[:] = self.passive_leg_kd
+        self.latest_lowcmd_leg_q_hw = current_leg_q.copy()
+        self.latest_lowcmd_leg_q_policy = self.interface_to_policy_leg_order(
+            current_leg_q
+        )
+        self.last_leg_command_generated_at = time.monotonic()
+        self.cmd_msg.motor_cmd = self.motor_cmd.copy()
+        if not self.passive_command_started:
+            logging.info(
+                "Passive control active: tracking current leg pose with Kp=0 Kd=3"
+            )
+            self.passive_command_started = True
 
     def publish_safety_estop(self, *, repeat: bool = False) -> None:
         count = self.estop_repeat_count if repeat else 1
@@ -1454,6 +1526,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
     def request_operator_stop(self, reason: str = "R2 operator stop") -> None:
         if not self.safety_state.request_stop(reason):
             return
+        fixstand_start_time = self.start_time
         now = time.monotonic()
         self.clear_all_motion_flags()
         self.fixed_commands[:] = self.policy_takeover_commands
@@ -1465,6 +1538,11 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.last_policy_diag_log_time = -1.0
         self.publish_bounded_passive_sequence()
         self.safety_state.complete_stop()
+        if self.uses_internal_standup:
+            if not self.safety_state.arm():
+                logging.error("Failed to return to internal Passive/FixStand after R2")
+                return
+            self.start_time = fixstand_start_time
 
     def trigger_safety_stop(self, reason: str, *, publish_estop: bool = True) -> None:
         first_fault = self.safety_state.trigger_fault(reason)
@@ -1523,7 +1601,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         if not self.check_lowstate_watchdog(now):
             return False
         if not self.is_low_level_control_safe(now=now):
-            self.trigger_safety_stop("sport_mode gate failed during low-level control")
+            self.trigger_safety_stop("MCF gate failed during low-level control")
             return False
         return True
 
@@ -1686,7 +1764,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
             )
             self.last_height_scan_diag_log_time = now
         if not observation.motion_ready or observation.values is None:
-            if self.low_level_control_active():
+            if self.start_policy or self.align_to_policy_active:
                 reason = str(
                     diag.get("failure_reason")
                     or diag.get("fallback_reason")
@@ -1699,27 +1777,13 @@ class WBCNodeLeg12ArmPassthrough(Node):
         if self.height_scan_provider is not None:
             clip = self.height_scan_provider.contract.clip
             if np.any(scan < clip[0]) or np.any(scan > clip[1]):
-                if self.low_level_control_active():
+                if self.start_policy or self.align_to_policy_active:
                     self.trigger_safety_stop("deployment height scan is outside contract clip")
                 return None
         return scan.copy()
 
     def deployment_motion_ready(self) -> bool:
         return self.get_height_scan_observation() is not None
-
-    def set_runtime_leg_offset(self, leg_offset: np.ndarray, source: str):
-        leg_offset = np.asarray(leg_offset, dtype=np.float64)
-        if leg_offset.shape[0] != LEG_DOF:
-            raise RuntimeError(f"Expected {LEG_DOF} leg offsets, got {leg_offset.shape[0]}")
-        self.leg_action_offset = leg_offset.copy()
-        self.obs_dof_pos_offset[:LEG_DOF] = leg_offset.copy()
-        logging.info(
-            "Runtime leg offset update | source=%s leg_action_offset=%s"
-            % (
-                source,
-                np.array2string(self.leg_action_offset, precision=3, floatmode="fixed"),
-            )
-        )
 
     @property
     def uses_unitree_standup(self) -> bool:
@@ -1756,11 +1820,9 @@ class WBCNodeLeg12ArmPassthrough(Node):
             return "RecoveryStand"
         if self.standup_mode == "unitree_standup":
             return "StandUp"
-        if self.standup_mode == "manual":
-            return "manual stand-up"
         if self.standup_mode == "pose_test":
             return "pose test"
-        return "unitree_mujoco get-up"
+        return "internal FixStand"
 
     def sport_state_cb(self, msg: SportModeState):
         self.sport_mode = int(msg.mode)
@@ -1845,14 +1907,19 @@ class WBCNodeLeg12ArmPassthrough(Node):
             return
         if not self.is_low_level_control_safe():
             return
-        if not self.safety_state.arm():
+        if self.start_policy:
+            logging.warning("Policy is running; stop it with R2 before restarting stand-up")
+            return
+        if not self.is_arm_state_ready_for_rl():
+            return
+        if (
+            self.safety_state.state != SafetyState.ARMED
+            and not self.safety_state.arm()
+        ):
             logging.error(
                 "Refusing R1: safety state %s requires explicit fault/ESTOP handling",
                 self.safety_state.state.value,
             )
-            return
-        if self.start_policy:
-            logging.warning("Policy is running; stop it with R2 before restarting stand-up")
             return
         if self.start_time != -1.0:
             remaining = self.active_getup_total_time - (time.monotonic() - self.start_time)
@@ -1869,9 +1936,6 @@ class WBCNodeLeg12ArmPassthrough(Node):
             ready_error <= self.internal_skip_crouch_max_error
             or ready_error < crouch_error
         )
-        if self.internal_direct_stand_active and self.live_ready_pose_calibration:
-            self.set_runtime_leg_offset(self.init_leg_pos, "r1_current_standing_pose")
-            ready_error = 0.0
         lowstate = self.get_arm_joint_state()
         self.init_arm_pos = lowstate.pos().copy()
         self.sync_arm_command_filter(self.init_arm_pos, "r1_start")
@@ -1879,13 +1943,13 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.start_time = time.monotonic()
         if self.internal_direct_stand_active:
             logging.info(
-                "Internal ready-pose alignment: current posture is standing-like "
+                "Internal FixStand: current posture is standing-like "
                 "(ready_error=%.3f, crouch_error=%.3f); skipping crouch phase"
                 % (ready_error, crouch_error)
             )
         else:
             logging.info(
-                "Internal stand-up: current posture is not near stand target "
+                "Internal FixStand: current posture is not near policy ready pose "
                 "(ready_error=%.3f, crouch_error=%.3f); running full get-up sequence"
                 % (ready_error, crouch_error)
             )
@@ -1940,11 +2004,6 @@ class WBCNodeLeg12ArmPassthrough(Node):
             )
             return
         current_leg_q = self.interface_to_policy_leg_order(self.quadruped_q).copy()
-        if (
-            self.standup_mode == "manual"
-            and self.live_ready_pose_calibration
-        ):
-            self.set_runtime_leg_offset(current_leg_q, "l2_current_standing_pose")
         self.align_to_policy_active = True
         self.align_to_policy_start_time = time.monotonic()
         self.align_to_policy_leg_start = current_leg_q.copy()
@@ -1966,7 +2025,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.last_policy_block_log_time = -1.0
         self.last_startup_action_limit_log_time = -1.0
         logging.info(
-            "Starting dog-only startup before rollout; command ramp %s -> %s over %.2fs"
+            "Validating FixStand before rollout; command ramp %s -> %s over %.2fs"
             % (
                 self.policy_takeover_commands.tolist(),
                 self.policy_move_commands.tolist(),
@@ -1976,51 +2035,19 @@ class WBCNodeLeg12ArmPassthrough(Node):
 
     def is_low_level_control_safe(self, now: Optional[float] = None) -> bool:
         stamp = time.monotonic() if now is None else float(now)
-        if not self.deployment_motion_ready():
-            reason = self.latest_height_scan_diag.get(
-                "failure_reason",
-                self.latest_height_scan_diag.get("fallback_reason", "not_ready"),
-            )
-            logging.error(
-                "Refusing %s deployment motion because the height observation contract "
-                "is not ready: %s",
-                self.deployment_profile.kind,
-                reason,
-            )
-            return False
-        if not self.sport_state_seen:
-            if self.allow_unknown_sport_mode:
-                logging.warning(
-                    "sport_mode state has not been received; proceeding because "
-                    "--allow-unknown-sport-mode was set"
-                )
-                return True
-            logging.error(
-                "Refusing low-level rollout because sport_mode state has not been received. "
-                "Confirm the ROS2 sport state pipeline or pass --allow-unknown-sport-mode "
-                "only for controlled diagnostics."
-            )
-            return False
-        if not self.is_sport_mode_fresh(stamp):
-            age = float("inf") if self.last_sport_state_time < 0.0 else stamp - self.last_sport_state_time
-            logging.error(
-                "Refusing low-level control because sport_mode state is stale: "
-                "age=%.3fs limit=%.3fs."
-                % (age, self.sport_state_watchdog_sec)
-            )
-            return False
-        if self.sport_mode != SPORT_MODE_IDLE or self.sport_progress > 0.0:
-            logging.error(
-                "Refusing low-level rollout while sport_mode is still active: mode=%d progress=%.3f. "
-                "Disable sport_mode first, then retry L2."
-                % (self.sport_mode, self.sport_progress)
-            )
+        reason = mcf_control_conflict_reason(
+            release_confirmed=self.mcf_release_confirmed,
+            sport_state_seen=self.sport_state_seen,
+            sport_state_fresh=self.is_sport_mode_fresh(stamp),
+            sport_mode=self.sport_mode,
+            sport_progress=self.sport_progress,
+        )
+        if reason is not None:
+            logging.error("Refusing low-level control: %s", reason)
             return False
         return True
 
     def is_arm_state_ready_for_rl(self) -> bool:
-        if self.arm_observation_mode == "fixed_initial":
-            return True
         if self.arm_control_owner == "wbc" or not self.require_arm_state_for_rl:
             return True
         obs = self.arm_observation_cache.get(time.monotonic())
@@ -2028,23 +2055,12 @@ class WBCNodeLeg12ArmPassthrough(Node):
             self.deployment_profile.validate_arm_observation(obs)
             return True
         except DeploymentProfileFault as exc:
-            logging.error("Refusing to enter policy: arm deployment contract failed: %s", exc)
-            return False
-        logging.error(
-            "Refusing to enter policy: /arm/state missing or stale "
-            "(owner=%s state_valid=%s state_fresh=%s source=%s timeout=%.3fs). "
-            "Start scripts/run_spacemouse_arm.sh first, pass --no-require-arm-state-for-rl "
-            "for offline diagnostics, or pass --arm-observation-mode fixed_initial to feed "
-            "the policy a constant arm observation."
-            % (
-                self.arm_control_owner,
-                obs.state_valid,
-                obs.state_fresh,
-                obs.state_source,
-                self.arm_state_timeout_sec,
+            logging.error(
+                "Refusing to enter policy: physical fixed-hold safety contract failed: %s. "
+                "The actor arm observation remains fixed and does not use these measured values.",
+                exc,
             )
-        )
-        return False
+            return False
 
     def update_policy_commands(self):
         if not self.start_policy:
@@ -2720,8 +2736,6 @@ class WBCNodeLeg12ArmPassthrough(Node):
     ##############################
 
     def arm_state_cb(self, msg: ArmState):
-        if self.arm_observation_mode == "fixed_initial":
-            return
         try:
             updated = self.arm_observation_cache.update_state(
                 joint_pos=msg.joint_pos,
@@ -2742,6 +2756,10 @@ class WBCNodeLeg12ArmPassthrough(Node):
         if not updated:
             logging.warning("Ignoring invalid /arm/state sample from %s", msg.source)
             return
+        if self.arm_observation_mode == "fixed_initial":
+            # The live stream is retained only in arm_observation_cache for the
+            # physical fixed-hold safety gate.  Do not mutate policy-side fields.
+            return
         obs = self.arm_observation_cache.get(time.monotonic())
         self.latest_arm_pos = obs.joint_pos.copy()
         self.latest_arm_state_valid = True
@@ -2750,8 +2768,6 @@ class WBCNodeLeg12ArmPassthrough(Node):
             self.gripper_pos_cmd = self.clamp_gripper_pos(obs.gripper_target)
 
     def arm_target_state_cb(self, msg: ArmTargetState):
-        if self.arm_observation_mode == "fixed_initial":
-            return
         try:
             updated = self.arm_observation_cache.update_target(
                 joint_target=msg.joint_target,
@@ -2769,6 +2785,10 @@ class WBCNodeLeg12ArmPassthrough(Node):
             return
         if not updated:
             logging.warning("Ignoring invalid /arm/target_state sample from %s", msg.source)
+            return
+        if self.arm_observation_mode == "fixed_initial":
+            # Keep the measured/commanded X5 target safety-only.  Actor inputs
+            # continue to come from get_fixed_initial().
             return
         obs = self.arm_observation_cache.get(time.monotonic())
         self.arm_passthrough_pose = obs.joint_target.copy()
@@ -2791,7 +2811,17 @@ class WBCNodeLeg12ArmPassthrough(Node):
         return obs
 
     def check_continuous_arm_freshness(self, now: Optional[float] = None) -> bool:
-        if self.arm_observation_mode != "live" or self.arm_control_owner == "wbc":
+        if self.arm_control_owner == "wbc" or not self.require_arm_state_for_rl:
+            return True
+        if not (
+            self.start_time != -1.0
+            or self.align_to_policy_active
+            or self.pose_test_active
+            or self.start_policy
+        ):
+            # MCF has already been released, so Go2 Passive starts before R1.
+            # The physical arm contract becomes relevant when FixStand or
+            # rollout motion is actually requested, not during this idle gap.
             return True
         if self.safety_state.state not in {
             SafetyState.ALIGNING,
@@ -2932,7 +2962,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
                 logging.info("standing up")
                 self.start()
             else:
-                logging.info("Manual stand-up mode: use the controller to stand the robot up, then press L2")
+                logging.info("R1 is unused in pose-test mode")
 
         if self.button_pressed_once(keys, BUTTON_R2, now):
             logging.info("Stop policy")
@@ -3223,6 +3253,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
             return
         if not self.check_runtime_control_gates():
             return
+        if self.passive_control_active():
+            self.set_passive_lowcmd_from_state()
         if not self.lowcmd_is_finite():
             return
         now = time.monotonic()
@@ -3318,7 +3350,9 @@ class WBCNodeLeg12ArmPassthrough(Node):
         if self.pose_test_active:
             return "pose_test"
         if self.start_time != -1.0:
-            return "standup"
+            return "fixstand"
+        if self.passive_control_active():
+            return "passive"
         return "idle"
 
     def log_arm_diag(self, target_arm_q: np.ndarray, smoothed_arm_q: np.ndarray):
@@ -3691,7 +3725,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
                 )
                 wbc_action[:12] = _blend_arrays(
                     self.init_leg_pos,
-                    self.leg_action_offset,
+                    self.stand_target_leg_pos,
                     direct_ratio,
                 )
                 getup_kp = self.getup_stand_kp.copy()
@@ -3987,6 +4021,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
             joint_names,
             deployment_profile=self.deployment_profile,
             config_path=config_path,
+            height_scan_contract_path=self.height_scan_contract_path,
         )
         self.policy_leg_joint_names = leg_joint_names.copy()
         self.policy_leg_indices_from_interface = np.array(
@@ -4172,10 +4207,9 @@ class WBCNodeLeg12ArmPassthrough(Node):
             + f" arm_state_topic: {self.arm_state_topic},"
             + f" arm_target_topic: {self.arm_target_topic},"
             + f" require_arm_state_for_rl: {self.require_arm_state_for_rl},"
-            + f" allow_unknown_sport_mode: {self.allow_unknown_sport_mode},"
+            + f" mcf_release_confirmed: {self.mcf_release_confirmed},"
             + f" lowstate_watchdog_sec: {self.lowstate_watchdog_sec},"
             + f" sport_state_watchdog_sec: {self.sport_state_watchdog_sec},"
-            + f" live_ready_pose_calibration: {self.live_ready_pose_calibration},"
             + f" fixed_gripper_cmd: {self.fixed_gripper_cmd}"
         )
         return None

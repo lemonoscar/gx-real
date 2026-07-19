@@ -91,14 +91,6 @@ _gx_real_filter_pythonpath() {
 _gx_real_filter_pythonpath "${GX_REAL_BAD_UNITREE_PY_PATH}"
 export PYTHONPATH="${GX_REAL_ROOT}/real-wbc:${GX_REAL_ROOT}/real-wbc/modules:${GX_REAL_ROOT}/arx5-sdk/python:${PYTHONPATH:-}"
 
-_gx_real_prepend_pythonpath_if_exists() {
-  local add_path="$1"
-  if [[ -d "${add_path}" ]]; then
-    _gx_real_filter_pythonpath "${add_path}"
-    export PYTHONPATH="${add_path}:${PYTHONPATH:-}"
-  fi
-}
-
 source_maybe() {
   local setup_file="$1"
   if [[ -f "${setup_file}" ]]; then
@@ -129,6 +121,7 @@ _gx_real_configure_ros_middleware() {
 
 _gx_real_configure_ros_middleware
 
+source_maybe "${GX_REAL_LOCAL_UNITREE_INSTALL}/setup.bash"
 source_maybe "${GX_REAL_ROOT}/real-wbc/ros2/install/setup.bash"
 
 if [[ -n "${GX_REAL_PERCEPTION_SETUP:-}" ]]; then
@@ -139,10 +132,6 @@ if [[ -n "${GX_REAL_PERCEPTION_SETUP:-}" ]]; then
   fi
   source_maybe "${GX_REAL_PERCEPTION_SETUP}"
 fi
-
-_gx_real_prepend_pythonpath_if_exists "${GX_REAL_LOCAL_UNITREE_INSTALL}/unitree_hg/lib/python3.8/site-packages"
-_gx_real_prepend_pythonpath_if_exists "${GX_REAL_LOCAL_UNITREE_INSTALL}/unitree_go/lib/python3.8/site-packages"
-_gx_real_prepend_pythonpath_if_exists "${GX_REAL_LOCAL_UNITREE_INSTALL}/unitree_api/lib/python3.8/site-packages"
 
 if [[ ! -f "${GX_REAL_POLICY_PATH}" ]]; then
   echo "[gx-real] missing policy: ${GX_REAL_POLICY_PATH}" >&2

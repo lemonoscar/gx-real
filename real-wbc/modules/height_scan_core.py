@@ -29,6 +29,12 @@ class HeightScanContract:
     offset: float
     observation_slices: dict
     frame: str = "base_yaw_aligned"
+    resolution: float = DEFAULT_GRID_RESOLUTION
+    size: tuple[float, float] = DEFAULT_GRID_SIZE
+    grid_shape: tuple[int, int] = (17, 11)
+    ray_alignment: str = "yaw"
+    ray_direction: tuple[float, float, float] = (0.0, 0.0, -1.0)
+    grid_ordering: str = "xy"
 
 
 def _default_grid_xy() -> np.ndarray:
@@ -60,30 +66,128 @@ def _resolve_npz_path(contract_path: Path, contract_data: dict[str, Any]) -> tup
 def load_height_scan_contract(path: str) -> HeightScanContract:
     contract_path = Path(path).expanduser().resolve()
     data = _load_yaml(contract_path)
+    height_scan_cfg = data.get("height_scan", {})
+    if not isinstance(height_scan_cfg, dict):
+        raise ValueError("height_scan contract section must be a mapping")
     npz_path, grid_key = _resolve_npz_path(contract_path, data)
     with np.load(npz_path, allow_pickle=False) as npz_data:
         grid_xy = np.asarray(npz_data[grid_key], dtype=np.float32)
 
-    height_scan_cfg = data.get("height_scan", {})
     obs_dim = int(data.get("obs_dim", DEFAULT_OBS_DIM))
     height_scan_dim = int(data.get("height_scan_dim", height_scan_cfg.get("dim", DEFAULT_HEIGHT_SCAN_DIM)))
     if grid_xy.shape != (height_scan_dim, 2):
         raise ValueError(f"grid_xy shape must be {(height_scan_dim, 2)}, got {grid_xy.shape}")
-    clip = tuple(float(v) for v in height_scan_cfg.get("clip", DEFAULT_CLIP))
-    if len(clip) != 2 or clip[0] >= clip[1]:
-        raise ValueError(f"invalid height_scan.clip: {clip}")
+    clip_values = np.asarray(
+        height_scan_cfg.get("clip", DEFAULT_CLIP), dtype=np.float64
+    ).reshape(-1)
+    if (
+        clip_values.shape != (2,)
+        or not np.isfinite(clip_values).all()
+        or clip_values[0] >= clip_values[1]
+    ):
+        raise ValueError(f"invalid height_scan.clip: {clip_values.tolist()}")
+    scale = float(height_scan_cfg.get("scale", 1.0))
+    offset = float(height_scan_cfg.get("offset", DEFAULT_OFFSET))
+    if not math.isfinite(scale) or not math.isfinite(offset):
+        raise ValueError("height_scan scale and offset must be finite")
+    resolution = float(height_scan_cfg.get("resolution", DEFAULT_GRID_RESOLUTION))
+    size_values = np.asarray(
+        height_scan_cfg.get("size", DEFAULT_GRID_SIZE), dtype=np.float64
+    ).reshape(-1)
+    if not math.isfinite(resolution) or resolution <= 0.0:
+        raise ValueError("height_scan resolution must be finite and positive")
+    if size_values.shape != (2,) or not np.isfinite(size_values).all() or np.any(
+        size_values <= 0.0
+    ):
+        raise ValueError("height_scan size must contain two positive finite values")
+    grid_shape_raw = np.asarray(
+        height_scan_cfg.get("grid_shape", (17, 11)), dtype=np.float64
+    ).reshape(-1)
+    if (
+        grid_shape_raw.shape != (2,)
+        or not np.isfinite(grid_shape_raw).all()
+        or np.any(grid_shape_raw <= 0.0)
+        or not np.array_equal(grid_shape_raw, np.rint(grid_shape_raw))
+    ):
+        raise ValueError("height_scan grid_shape must contain two positive integers")
+    grid_shape_values = tuple(int(value) for value in grid_shape_raw)
+    grid_ordering = str(height_scan_cfg.get("grid_ordering", "xy"))
+    if grid_ordering != "xy":
+        raise ValueError("height_scan grid_ordering must be xy")
+    if str(height_scan_cfg.get("flatten_order", "exported_from_isaac_lab")) != (
+        "exported_from_isaac_lab"
+    ):
+        raise ValueError(
+            "height_scan flatten_order must be exported_from_isaac_lab"
+        )
+    expected_x = np.arange(
+        -size_values[0] / 2.0,
+        size_values[0] / 2.0 + resolution * 0.5,
+        resolution,
+        dtype=np.float64,
+    )
+    expected_y = np.arange(
+        -size_values[1] / 2.0,
+        size_values[1] / 2.0 + resolution * 0.5,
+        resolution,
+        dtype=np.float64,
+    )
+    if grid_shape_values != (expected_x.size, expected_y.size):
+        raise ValueError(
+            "height_scan grid_shape is inconsistent with size/resolution: "
+            f"declared={grid_shape_values} expected={(expected_x.size, expected_y.size)}"
+        )
+    expected_grid_x, expected_grid_y = np.meshgrid(
+        expected_x, expected_y, indexing="xy"
+    )
+    expected_grid_xy = np.column_stack(
+        (expected_grid_x.reshape(-1), expected_grid_y.reshape(-1))
+    )
+    if expected_grid_xy.shape != grid_xy.shape or not np.allclose(
+        grid_xy, expected_grid_xy, rtol=0.0, atol=1.0e-6
+    ):
+        raise ValueError(
+            "exported grid_xy does not match resolution/size with x-fast, y-outer xy ordering"
+        )
+    frame = str(height_scan_cfg.get("frame", "base_yaw_aligned"))
+    if frame != "base_yaw_aligned":
+        raise ValueError(
+            f"height_scan frame must be base_yaw_aligned, got {frame!r}"
+        )
+    ray_alignment = str(height_scan_cfg.get("ray_alignment", "yaw"))
+    if ray_alignment != "yaw":
+        raise ValueError("height_scan ray_alignment must be yaw")
+    ray_direction = np.asarray(
+        height_scan_cfg.get("ray_direction", [0.0, 0.0, -1.0]),
+        dtype=np.float64,
+    )
+    if ray_direction.shape != (3,) or not np.array_equal(
+        ray_direction,
+        np.array([0.0, 0.0, -1.0], dtype=np.float64),
+    ):
+        raise ValueError(
+            "height_scan ray_direction must be exact world-down [0, 0, -1]"
+        )
     observation_slices = data.get("observation_slices", {})
+    if not isinstance(observation_slices, dict):
+        raise ValueError("observation_slices must be a mapping")
     if observation_slices.get("height_scan") != [66, 253]:
         raise ValueError(f"height_scan slice must be [66, 253], got {observation_slices.get('height_scan')}")
     return HeightScanContract(
         obs_dim=obs_dim,
         height_scan_dim=height_scan_dim,
         grid_xy=grid_xy,
-        clip=(clip[0], clip[1]),
-        scale=float(height_scan_cfg.get("scale", 1.0)),
-        offset=float(height_scan_cfg.get("offset", DEFAULT_OFFSET)),
+        clip=(float(clip_values[0]), float(clip_values[1])),
+        scale=scale,
+        offset=offset,
         observation_slices=observation_slices,
-        frame=str(height_scan_cfg.get("frame", "base_yaw_aligned")),
+        frame=frame,
+        resolution=resolution,
+        size=(float(size_values[0]), float(size_values[1])),
+        grid_shape=grid_shape_values,
+        ray_alignment=ray_alignment,
+        ray_direction=tuple(float(value) for value in ray_direction),
+        grid_ordering=grid_ordering,
     )
 
 

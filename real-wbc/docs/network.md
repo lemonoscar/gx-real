@@ -62,9 +62,10 @@ ros2 topic echo /wirelesscontroller
 - 确认 `scripts/setup_env.sh` 输出 `rmw=rmw_cyclonedds_cpp`，并且 `GX_REAL_NETWORK_IFACE` 是连接 Go2 的网卡。
 - 确认没有错误地从 `unitree_sdk2/python` 导入旧消息包。
 
-## 3. 关闭 sport mode
+## 3. 释放 MCF
 
-Go2 原厂高层控制和低层 `lowcmd` 不能同时控制电机。真机上机前先执行：
+Go2 原厂高层控制和低层 `lowcmd` 不能同时控制电机。生产入口
+`run_leg12_flat_real.sh` / `run_leg12_rough_real.sh` 会自动执行：
 
 ```bash
 scripts/disable_sports_mode_go2.sh eth0
@@ -73,9 +74,13 @@ scripts/disable_sports_mode_go2.sh eth0
 `eth0` 要换成连接 Go2 的实际网卡。脚本会：
 
 - 检查 `unitree_sdk2`。
-- 如果缺少 `build/disable_sports_mode_go2`，自动编译。
+- 如果二进制缺失或源码更新，自动编译。
 - 设置 SDK 动态库路径。
-- 调用 Unitree SDK 工具关闭 sport mode。
+- 使用 `MotionSwitcherClient::CheckMode` 检查当前 mode；必要时调用 `ReleaseMode`，
+  最多重试五次，并再次 `CheckMode` 验证 MCF 已释放。
+
+只有上述工具成功返回，真机入口才设置本进程的 MCF 释放凭证并启动 WBC。不要绕过
+真机入口直接运行 Python 节点。
 
 如果失败，优先检查：
 
@@ -181,11 +186,8 @@ None of the motors are initialized. Please check the connection or power of the 
 
 ### `sport_mode` 状态没收到
 
-当前控制器默认会拒绝低层 rollout。先修复状态链路；只有受控诊断时才使用：
-
-```bash
---allow-unknown-sport-mode
-```
+MCF 成功释放后，`SportModeState` 停止更新是正常现象，不再作为启动必要条件。若仍收到
+fresh 且非 idle 的状态，WBC 会认为高层 motion mode 被重新激活并停止低层输出。
 
 ### ARX5 的 `can0` 正常但机械臂不动
 

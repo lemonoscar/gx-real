@@ -13,6 +13,7 @@ from modules.deployment_profile import (  # noqa: E402
     FlatDeployment,
     RoughDeployment,
     load_deployment_profile,
+    validate_fixed_arm_policy_contract,
 )
 from modules.height_scan_policy_validation import (  # noqa: E402
     REAL_HEIGHT_SCAN_FUNCS,
@@ -27,6 +28,35 @@ class FakeProvider:
 
     def get_scan(self):
         return self.scan, dict(self.diag)
+
+
+def _fixed_arm_env() -> dict:
+    arm_names = [f"arm_joint{index}" for index in range(1, 7)]
+    pose = [0.0, 0.3, 0.5, 0.0, 0.0, 0.0]
+    return {
+        "joint_names": [f"leg_{index}" for index in range(12)] + arm_names,
+        "scene": {
+            "robot": {
+                "init_state": {
+                    "joint_pos": dict(zip(arm_names, pose)),
+                }
+            }
+        },
+        "commands": {
+            "arm_joint_pos": {
+                "joint_names": arm_names,
+                "position_range": [[0.0, 0.0] for _ in arm_names],
+                "use_default_offset": True,
+            }
+        },
+        "observations": {
+            "policy": {
+                "arm_joint_command": {"params": {"command_name": "arm_joint_pos"}},
+                "gripper_command": {"params": {"dim": 1, "value": 0.0}},
+                "actions": {"params": {"total_action_dim": 18, "pad_value": 0.0}},
+            }
+        },
+    }
 
 
 def test_flat_profile_is_exact_zero_and_never_accepts_a_provider() -> None:
@@ -155,4 +185,30 @@ def test_checked_in_deployment_configs_build_the_expected_classes() -> None:
         load_deployment_profile(
             ROOT / "config" / "deployments" / "flat.yaml",
             expected_kind="rough",
+        )
+
+
+def test_fixed_arm_training_contract_matches_deployment_pose() -> None:
+    validate_fixed_arm_policy_contract(
+        _fixed_arm_env(),
+        expected_pose=[0.0, 0.3, 0.5, 0.0, 0.0, 0.0],
+        expected_gripper=0.0,
+    )
+
+
+@pytest.mark.parametrize("mismatch", ["default_pose", "command_range", "action_padding"])
+def test_fixed_arm_training_contract_rejects_nonconstant_inputs(mismatch: str) -> None:
+    env = _fixed_arm_env()
+    if mismatch == "default_pose":
+        env["scene"]["robot"]["init_state"]["joint_pos"]["arm_joint2"] = 0.4
+    elif mismatch == "command_range":
+        env["commands"]["arm_joint_pos"]["position_range"][0] = [-0.1, 0.1]
+    else:
+        env["observations"]["policy"]["actions"]["params"]["pad_value"] = 1.0
+
+    with pytest.raises(DeploymentProfileFault):
+        validate_fixed_arm_policy_contract(
+            env,
+            expected_pose=[0.0, 0.3, 0.5, 0.0, 0.0, 0.0],
+            expected_gripper=0.0,
         )

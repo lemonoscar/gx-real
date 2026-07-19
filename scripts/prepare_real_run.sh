@@ -15,7 +15,7 @@ This wraps the repeated pre-run work before starting the real control nodes:
   - source gx-real runtime environment and run scripts/check_env.sh
   - optionally check SpaceMouse diagnostics when explicitly requested
   - ensure can0 is ready for X5/ARX5
-  - check Go2 ROS2 topics and disable sport mode
+  - check Go2 ROS2 topics and verify/release MCF
   - reject startup if another WBC/X5 writer is already running
 
 Options:
@@ -231,7 +231,10 @@ build_unitree_ros2() {
 
   info "building Unitree ROS2 message packages"
   pushd "${ws}" >/dev/null
-  colcon build --packages-select unitree_api unitree_go unitree_hg
+  colcon build \
+    --cmake-clean-cache \
+    --packages-select unitree_api unitree_go unitree_hg \
+    --cmake-args -DPython3_EXECUTABLE=/usr/bin/python3
   popd >/dev/null
 }
 
@@ -242,14 +245,23 @@ build_robot_state() {
 
   info "building robot_state ROS2 messages"
   pushd "${ws}" >/dev/null
-  colcon build --packages-select robot_state
+  colcon build \
+    --cmake-clean-cache \
+    --packages-select robot_state \
+    --cmake-args -DPython3_EXECUTABLE=/usr/bin/python3
   popd >/dev/null
 }
 
 build_sport_mode_tool() {
   require_command cmake
   local sdk_dir="${GX_REAL_ROOT}/unitree_sdk2"
-  local build_dir="${sdk_dir}/build"
+  local build_dir="${GX_REAL_SDK_BUILD_DIR:-${sdk_dir}/build}"
+  local cache_path="${build_dir}/CMakeCache.txt"
+  if [[ -z "${GX_REAL_SDK_BUILD_DIR:-}" && -f "${cache_path}" ]] \
+    && ! grep -Fqx "CMAKE_HOME_DIRECTORY:INTERNAL=${sdk_dir}" "${cache_path}"; then
+    warn "unitree_sdk2/build belongs to another source path; preserving it and using build-gx-real"
+    build_dir="${sdk_dir}/build-gx-real"
+  fi
   [[ -f "${sdk_dir}/CMakeLists.txt" ]] || die "missing unitree_sdk2 CMakeLists.txt"
 
   local jobs
@@ -489,7 +501,6 @@ check_go2_topics() {
   load_ros_topics
   require_ros_topic "lowstate" "/lowstate" "lowstate" "/rt/lowstate" "rt/lowstate"
   require_ros_topic "wireless controller" "/wirelesscontroller" "wirelesscontroller"
-  require_ros_topic "sport mode state" "/lf/sportmodestate" "lf/sportmodestate"
 }
 
 check_rough_perception_topics() {
@@ -594,10 +605,14 @@ Terminal B:
   cd ${GX_REAL_ROOT}
   export GX_REAL_NETWORK_IFACE=${NETWORK_IFACE}
   source scripts/setup_env.sh
-  ${leg_command} --device cpu --pose_estimator none --standup-mode internal --base-command-source wireless_joystick --joy-vx-axis ly --joy-vx-sign 1 --joy-vy-axis lx --joy-vy-sign -1 --joy-yaw-axis rx --joy-yaw-sign -1 --joy-deadzone 0.12 --joy-max-vx 0.50 --joy-max-vy 0.0 --joy-max-yaw 0.0 --arm-control-owner external_fixed_hold --arm-state-topic /arm/state --arm-target-topic /arm/target_state --safety-topic /safety/estop --require-arm-state-for-rl --gripper-cmd 0.0 --leg-kp 200 --leg-kd 10
+  ${leg_command} --device cpu --pose_estimator none --standup-mode internal --base-command-source wireless_joystick --joy-vx-axis ly --joy-vx-sign 1 --joy-vy-axis lx --joy-vy-sign -1 --joy-yaw-axis rx --joy-yaw-sign -1 --joy-deadzone 0.12 --joy-max-vx 0.50 --joy-max-vy 0.0 --joy-max-yaw 0.0 --arm-control-owner external_fixed_hold --arm-observation-mode fixed_initial --arm-state-topic /arm/state --arm-target-topic /arm/target_state --safety-topic /safety/estop --require-arm-fixed-hold-safety --gripper-cmd 0.0 --leg-kp 200 --leg-kd 10
 
-After Terminal B publishes a healthy safety heartbeat and both nodes remain in
-STANDBY, explicitly enable the policy fixed-hold target from a third terminal:
+The actor input is fixed at [0, 0.3, 0.5, 0, 0, 0] for the entire run; the
+arm topics above are consumed only by the physical fixed-hold safety gate.
+
+Terminal B verifies/releases MCF, then enters Passive after its first valid
+LowState. After it publishes a healthy safety heartbeat and the arm node remains
+in STANDBY, explicitly enable the physical fixed-hold target from a third terminal:
   ros2 topic pub --once /arm/fixed_hold/enable std_msgs/msg/Bool "{data: true}"
 EOF
 }

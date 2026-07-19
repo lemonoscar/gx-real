@@ -12,6 +12,7 @@ from modules.runtime_safety import (  # noqa: E402
     RuntimeSafetyFault,
     is_finite_vector,
     limit_vector_abs_delta,
+    mcf_control_conflict_reason,
     require_finite_scalar,
     require_finite_vector,
 )
@@ -80,3 +81,77 @@ def test_limit_vector_abs_delta_rejects_negative_limits():
             delta_limit=0.0,
             name="action",
         )
+
+
+def test_mcf_gate_requires_verified_release():
+    reason = mcf_control_conflict_reason(
+        release_confirmed=False,
+        sport_state_seen=False,
+        sport_state_fresh=False,
+        sport_mode=-1,
+        sport_progress=0.0,
+    )
+    assert reason is not None
+    assert "not confirmed" in reason
+
+
+@pytest.mark.parametrize(
+    ("state_seen", "state_fresh"),
+    [(False, False), (True, False)],
+)
+def test_mcf_gate_accepts_missing_or_stale_sport_state_after_release(
+    state_seen: bool,
+    state_fresh: bool,
+):
+    assert mcf_control_conflict_reason(
+        release_confirmed=True,
+        sport_state_seen=state_seen,
+        sport_state_fresh=state_fresh,
+        sport_mode=1,
+        sport_progress=1.0,
+    ) is None
+
+
+def test_mcf_gate_rejects_fresh_reactivated_motion_mode():
+    reason = mcf_control_conflict_reason(
+        release_confirmed=True,
+        sport_state_seen=True,
+        sport_state_fresh=True,
+        sport_mode=1,
+        sport_progress=0.0,
+    )
+    assert reason is not None
+    assert "mode=1" in reason
+
+    reason = mcf_control_conflict_reason(
+        release_confirmed=True,
+        sport_state_seen=True,
+        sport_state_fresh=True,
+        sport_mode=0,
+        sport_progress=0.5,
+    )
+    assert reason is not None
+    assert "progress=0.500" in reason
+
+
+def test_mcf_gate_accepts_fresh_idle_state():
+    assert mcf_control_conflict_reason(
+        release_confirmed=True,
+        sport_state_seen=True,
+        sport_state_fresh=True,
+        sport_mode=0,
+        sport_progress=0.0,
+    ) is None
+
+
+@pytest.mark.parametrize("progress", [float("nan"), -0.1, 1.1])
+def test_mcf_gate_rejects_invalid_fresh_progress(progress: float):
+    reason = mcf_control_conflict_reason(
+        release_confirmed=True,
+        sport_state_seen=True,
+        sport_state_fresh=True,
+        sport_mode=0,
+        sport_progress=progress,
+    )
+    assert reason is not None
+    assert "invalid MCF state" in reason

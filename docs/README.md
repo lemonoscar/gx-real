@@ -1,60 +1,73 @@
-# real 文档导航
+# gx-real 文档索引
 
-如果是第一次使用这个仓库，先看根目录的完整开发文档：
+当前生产文档以本页列出的“现行文档”为准。仓库还保留设计评审和交接材料用于追溯，
+但其中的旧命令、SpaceMouse 主链或历史 release 状态不能覆盖现行手册。
 
-- [gx-real 真机开发文档](../README.md)
-- [gx-real 新手开发使用手册](developer_onboarding.md)
+## 现行文档
 
-这份目录保留更细的专题文档，用于查具体实现细节、上机步骤和后续改造思路。
+1. [仓库 README](../README.md)：系统边界、260D 合同、Rough 地图、目录、入口和验证。
+2. [真机上机使用指南](上机使用指南.md)：唯一生产操作手册；包含 X5 -> WBC ->
+   fixed-hold enable 的启动顺序、停止和故障处理。
+3. [LiDAR 校准指南](lidar_calibration.md)：刚性安装、`T_base_lidar`、时间同步、
+   rosbag、GridMap 几何/时序验收和 perception release。
+4. [开发与仓库指南](developer_onboarding.md)：代码职责、构建、测试、修改与交付流程。
+5. [Rough 发布包说明](../policies/rough/README.md)：模型资产、height/reference 和
+   perception contract 要求。
+6. [LiDAR/height-map 后端决策](lidar_height_backend_decision_2026-07-16.md)：为什么
+   Rough 生产只接受 GridMap/elevation，Unitree HeightMap/直接点云只用于诊断。
 
-## 当前主链路
-
-当前推荐维护和上机的链路是：
+当前生产拓扑为：
 
 ```text
-scripts/run_leg12_flat_real.sh  -> real-wbc/scripts/run_wbc_flat.py
-scripts/run_leg12_rough_real.sh -> real-wbc/scripts/run_wbc_rough.py
-  -> real-wbc/scripts/run_wbc_leg12.py（共享实现）
-  -> real-wbc/modules/wbc_node_leg12_arm_passthrough.py
-
 scripts/run_x5_fixed_hold_{flat,rough}.sh
-  -> real-wbc/scripts/run_x5_fixed_hold_{flat,rough}.py
-  -> x5_fixed_hold + /arm/state + /arm/target_state
+  -> X5 fixed-hold owner -> physical safety topics
+
+scripts/run_leg12_{flat,rough}_real.sh
+  -> run_wbc_{flat,rough}.py
+  -> run_wbc_leg12.py
+  -> wbc_node_leg12_arm_passthrough.py
+  -> fixed actor arm observation + 12D Go2 action
 ```
 
-控制逻辑：
+Rough 额外使用：
 
-- 前 `12` 维腿动作来自 RL policy。
-- X5/ARX5 由匹配部署类的 fixed-hold 节点独占 `can0`；WBC 只消费 `/arm/state` 和 `/arm/target_state`。
-- 行走策略不允许 `external_spacemouse`；SpaceMouse 仅保留为不与生产 writer 并发的诊断工具。
-- 当前 manifest 为 `UNRELEASED`，不得通过关闭检查来上机。
-- Go2/X5 的底层通信、状态读取、手柄流程、起身流程和急停框架尽量沿用原真机链路。
+```text
+/terrain/elevation_map + /localization/pose
+  -> height_scan_provider.py
+  -> height_scan_core.py
+  -> observation[66:253]
+```
 
-## 专题文档
+## 现行安全结论
 
-- [2026-07-16 真机收口交接](gx-real-handoff-2026-07-16.md)：当前分支、已完成门禁、验证结果、真机阻塞证据和继续顺序。
-- [Flat / Rough 双真机部署方案](flat_rough_real_deployment_comparison_and_plan_2026-07-16.md)：对比 phase 工程，定义两类互斥策略部署、Rough height map、X5/传感器接入、完整通信拓扑和分阶段验收。
-- [上机使用指南](上机使用指南.md)：真机操作步骤、启动命令、按键流程和常见故障。
-- [260维输入设计](260维输入设计.md)：当前 `260D obs -> 12D action` 的观测拼接契约。
-- [小替换代码清单](小替换代码清单.md)：把原 UMI WBC 改成 `leg12 + arm passthrough` 的最小改造说明。
-- [替换思路](替换思路.md)：当前真机部署后的理论修正，以及后续继续替换上层任务网络、whole-body policy 或底层控制链时的路线选择。
+- manifest 仍为 `UNRELEASED`，Rough perception contract 仍为 `UNVERIFIED`；
+- actor arm 输入固定为 `[0, 0.3, 0.5, 0, 0, 0]`，真实 arm 值只参与 safety；
+- X5 生产 owner 是 fixed-hold，不是 SpaceMouse；
+- Rough 只接受 live GridMap；fallback、Unitree HeightMap 和直接点云不得放行；
+- 不得通过改状态字符串、降低 coverage 或关闭校验绕过发布门。
 
-## 相关目录
+## 历史设计与审计材料
 
-- [real-wbc](../real-wbc)：真机控制主体。
-- [scripts](../scripts)：环境、CAN、sport mode 和启动脚本。
-- [policies](../policies)：policy 模型和训练导出的部署配置。
-- [arx5-sdk](../arx5-sdk)：X5/ARX5 机械臂 SDK。
-- [unitree_sdk2](../unitree_sdk2)：Go2 SDK、CRC 模块和 sport mode 工具。
-- [unitree_ros2](../unitree_ros2)：Unitree ROS2/CycloneDDS 通信栈。
+以下文件解释某个时间点的设计、缺口或评审结论。阅读时以文件日期为边界，并用现行
+文档核对命令和状态：
 
-## 原始 UMI 链路
+- [2026-07-16 Flat/Rough 部署对比与计划](flat_rough_real_deployment_comparison_and_plan_2026-07-16.md)
+- [2026-07-16 真机收口交接](gx-real-handoff-2026-07-16.md)
+- [2026-07-12 Phase A 独立评审摘要](gx_real_phase_a_independent_review_summary_2026-07-12.md)
+- [2026-07-12 Phase A 实现记录](gx_real_safety_phase_a_implementation_2026-07-12.md)
+- [2026-07-12 安全评审](gx_real_safety_review_2026-07-12.md)
+- [Phase A 最小阻塞项](safety_phase_a_minimal_blockers.md)
+- [策略启动抖动/reward 记录](policy_startup_jitter_reward_notes.md)
+- [旧替换思路](替换思路.md)
 
-以下文件仍保留，但不是当前标准上机入口：
+历史材料中若出现 `run_leg12_real.sh`、`external_spacemouse`、动态机械臂观测或
+Unitree HeightMap 生产输入，均不再是当前 Rough 生产做法。
 
-- [run_wbc.py](../real-wbc/scripts/run_wbc.py)
-- [wbc_node.py](../real-wbc/modules/wbc_node.py)
-- [run_teleop.py](../real-wbc/scripts/run_teleop.py)
-- [robot_state ROS2 消息](../real-wbc/ros2/robot_state)
+## 代码入口
 
-除非明确要恢复原 UMI-on-Legs 的任务空间轨迹控制，不建议把这些文件作为当前 leg12 上机主流程。
+- [部署配置](../config/deployments)
+- [Rough 发布包](../policies/rough/current)
+- [WBC/感知/安全模块](../real-wbc/modules)
+- [Python 入口](../real-wbc/scripts)
+- [shell/preflight/契约工具](../scripts)
+- [离线回归测试](../tests)

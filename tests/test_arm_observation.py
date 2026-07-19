@@ -64,6 +64,38 @@ def test_missing_state_uses_fallback():
     assert obs.state_fresh is False
 
 
+def test_fixed_policy_observation_never_uses_live_arm_values() -> None:
+    fixed_pose = np.array([0.0, 0.3, 0.5, 0.0, 0.0, 0.0])
+    cache = ArmObservationCache(
+        fallback_joint_pos=fixed_pose,
+        fallback_gripper=0.0,
+    )
+    cache.update_state(
+        joint_pos=[1.0, 1.1, 1.2, 1.3, 1.4, 1.5],
+        joint_vel=[2.0] * 6,
+        joint_tau=[3.0] * 6,
+        gripper_pos=0.04,
+        stamp=1.0,
+    )
+    cache.update_target(
+        joint_target=[4.0, 4.1, 4.2, 4.3, 4.4, 4.5],
+        gripper_target=0.06,
+        stamp=1.0,
+    )
+
+    first = cache.get_fixed_initial(source="fixed_policy_contract")
+    later = cache.get_fixed_initial(source="fixed_policy_contract")
+
+    for obs in (first, later):
+        np.testing.assert_array_equal(obs.joint_pos, fixed_pose)
+        np.testing.assert_array_equal(obs.joint_vel, np.zeros(6))
+        np.testing.assert_array_equal(obs.joint_tau, np.zeros(6))
+        np.testing.assert_array_equal(obs.joint_target, fixed_pose)
+        assert obs.gripper_target == 0.0
+        assert obs.state_source == "fixed_policy_contract"
+        assert obs.target_source == "fixed_policy_contract"
+
+
 def test_external_spacemouse_owner_does_not_initialize_wbc_arm_controller():
     assert should_initialize_wbc_arm_controller("external_spacemouse", False) is False
     assert should_initialize_wbc_arm_controller("none", False) is False
