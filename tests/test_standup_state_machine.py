@@ -70,3 +70,34 @@ def test_production_entry_rejects_manual_external_standup() -> None:
 
     assert result.returncode == 2
     assert "invalid choice: 'manual'" in result.stderr
+
+
+def test_active_leg_pd_comes_only_from_policy_env() -> None:
+    node = NODE_PATH.read_text(encoding="utf-8")
+    entrypoint = ENTRYPOINT_PATH.read_text(encoding="utf-8")
+    fixed_launcher = (ROOT / "scripts/run_fixed_03_real.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert "--leg-kp" not in entrypoint
+    assert "--leg-kd" not in entrypoint
+    assert "--leg-kp" not in fixed_launcher
+    assert "--leg-kd" not in fixed_launcher
+    assert "leg_kp: float" not in node
+    assert "leg_kd: float" not in node
+    assert (
+        'training_actuator_cfg = self.policy_config["scene"]["robot"]["actuators"]'
+        in node
+    )
+    for profile in (
+        "align_to_policy",
+        "pose_test",
+        "getup_start",
+        "getup_crouch",
+        "getup_stand",
+        "unitree_takeover",
+        "manual_takeover",
+        "deploy_policy",
+    ):
+        assert f"self.{profile}_kp = self.commanded_leg_kp.copy()" in node
+        assert f"self.{profile}_kd = self.commanded_leg_kd.copy()" in node

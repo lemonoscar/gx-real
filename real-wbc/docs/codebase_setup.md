@@ -128,8 +128,6 @@ scripts/run_leg12_real.sh \
   --cmd-vy 0.0 \
   --cmd-yaw 0.0 \
   --gripper-cmd 0.0 \
-  --leg-kp 200 \
-  --leg-kd 10 \
   --arm_pose 0.0 0.5 0.3 0.0 0.0 0.0 \
   --arm-reset-pose 0.0 0.5 0.3 0.0 0.0 0.0 \
   --button-arm-pose 0.4 2.8 1.5 1.3 0.4 0.4
@@ -172,14 +170,9 @@ scripts/run_leg12_real.sh \
 
 ### 腿部增益
 
-当前默认：
+腿部 active PD 不提供命令行覆盖。程序会从与 `policy.onnx` 配套的 `policies/env.yaml` actuator 配置逐关节读取 stiffness/damping，同一组值用于 internal FixStand、handover 和 policy rollout。当前固定模型包为 `Kp=40, Kd=1`。
 
-```text
---leg-kp 200
---leg-kd 10
-```
-
-这组增益用于 internal FixStand 和 policy rollout；Passive 固定使用 `Kp=0, Kd=3`。实际下发值会在启动日志里打印为 `commanded_leg_kp`、`commanded_leg_kd`、`deploy_policy_kp`、`deploy_policy_kd`。
+Passive 固定使用 `Kp=0, Kd=3`，只在 active control 启动前提供阻尼。启动日志 `Training leg PD loaded` 会打印配置来源及实际值；`commanded_leg_kp/kd`、`deploy_policy_kp/kd` 也应与之完全一致。
 
 ### 机械臂初始化
 

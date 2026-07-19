@@ -303,13 +303,13 @@ scripts/run_leg12_real.sh \
   --base-command-source fixed \
   --arm-control-owner external_spacemouse \
   --gripper-cmd 0.0 \
-  --leg-kp 200 \
-  --leg-kd 10 \
   --arm_pose 0.0 0.5 0.3 0.0 0.0 0.0 \
   --arm-reset-pose 0.0 0.5 0.3 0.0 0.0 0.0
 ```
 
-第一次验证建议把 `--cmd-vx` 降到 `0.0` 或 `0.1`，先确认低层接管和关节顺序，再逐步提高速度。`--arm_pose` 现在只是 WBC observation fallback，不会由 WBC 下发给 X5。
+腿部 active PD 不接受命令行覆盖，会从与 `policy.onnx` 配套的 `env.yaml` actuator 配置逐关节读取，并用于 internal FixStand、handover 和 rollout。当前固定模型包读取到 `Kp=40, Kd=1`。Passive 阶段仍固定使用 `Kp=0, Kd=3`，它只负责未启动 active control 时的阻尼。
+
+第一次验证建议先确认低层接管和关节顺序。`--arm_pose` 现在只是 WBC observation fallback，不会由 WBC 下发给 X5。
 
 推荐的 X5 控制方式是另开一个 Jetson 终端启动 SpaceMouse Arm 节点：
 
@@ -581,6 +581,8 @@ ros2 topic echo lf/sportmodestate
 
 每次运行会在 `logs/YYYYMMDD_HHMMSS/run.log` 下保存日志。重点看这些日志：
 
+- `Policy bundle verified`：当前模型包名称以及 `policy.onnx`、`env.yaml` 的 SHA256。
+- `Training leg PD loaded`：从配套 `env.yaml` 读取到的逐关节训练 PD。
 - `Runtime targets`：启动参数是否被正确读取，尤其是 `base_command_source`、`arm_control_owner`、`arm_hold_pose`、`commanded_leg_kp/kd`。
 - `Runtime targets` 中的 `leg_action_offset`：它同时是 FixStand 终点和 policy ready pose。
 - `Policy diag`：policy 输出、clip、命令、低层目标、真实关节、误差和足端力。

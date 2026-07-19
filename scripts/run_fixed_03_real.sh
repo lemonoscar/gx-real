@@ -14,8 +14,6 @@ exec "${SCRIPT_DIR}/run_leg12_real.sh" \
   --arm-control-owner external_spacemouse \
   --require-arm-state-for-rl \
   --gripper-cmd 0.0 \
-  --leg-kp 40 \
-  --leg-kd 1 \
   --arm_pose 0.0 0.3 0.5 0.0 0.0 0.0 \
   --arm-reset-pose 0.0 0.3 0.5 0.0 0.0 0.0 \
   "$@"

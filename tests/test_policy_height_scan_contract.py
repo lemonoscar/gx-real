@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 import sys
 
 import numpy as np
@@ -42,6 +43,11 @@ def _construct_python_tag(loader, suffix, node):
 PolicyConfigLoader.add_multi_constructor("tag:yaml.org,2002:python/", _construct_python_tag)
 
 
+def _load_policy_env():
+    with open(ROOT / "policies" / "env.yaml", "r", encoding="utf-8") as handle:
+        return yaml.load(handle, Loader=PolicyConfigLoader)
+
+
 def _make_obs(contract, scan):
     obs = np.zeros((1, contract.obs_dim), dtype=np.float32)
     start, end = contract.observation_slices["height_scan"]
@@ -52,8 +58,7 @@ def _make_obs(contract, scan):
 def test_policy_env_and_contract_dimensions():
     ort = pytest.importorskip("onnxruntime")
     contract = load_height_scan_contract(str(ROOT / "policies" / "height_scan_contract.yaml"))
-    with open(ROOT / "policies" / "env.yaml", "r", encoding="utf-8") as handle:
-        env_cfg = yaml.load(handle, Loader=PolicyConfigLoader)
+    env_cfg = _load_policy_env()
     assert env_cfg["observations"]["policy"]["height_scan"]["func"] in ALLOWED_HEIGHT_SCAN_FUNCS
     assert contract.obs_dim == 260
     assert contract.height_scan_dim == 187
@@ -78,3 +83,20 @@ def test_policy_env_and_contract_dimensions():
         action = session.run([session.get_outputs()[0].name], {session.get_inputs()[0].name: _make_obs(contract, scan)})[0]
         assert action.shape[-1] == 12
         assert np.isfinite(action).all()
+
+
+def test_repository_training_leg_pd_is_40_1():
+    env_cfg = _load_policy_env()
+    actuators = env_cfg["scene"]["robot"]["actuators"]
+
+    for joint_name in env_cfg["dog_joint_names"]:
+        matching_gains = [
+            (float(actuator["stiffness"]), float(actuator["damping"]))
+            for actuator in actuators.values()
+            if any(
+                re.fullmatch(pattern, joint_name)
+                for pattern in actuator.get("joint_names_expr", [])
+            )
+        ]
+        assert matching_gains, f"missing training PD for {joint_name}"
+        assert matching_gains[-1] == (40.0, 1.0)

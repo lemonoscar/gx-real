@@ -345,8 +345,6 @@ class WBCNodeLeg12ArmPassthrough(Node):
         startup_action_delta_limit: float = 0.35,
         estop_repeat_count: int = 5,
         estop_repeat_period_sec: float = 0.02,
-        leg_kp: float = 200.0,
-        leg_kd: float = 10.0,
         enable_height_scan: bool = False,
         height_scan_contract: str = "policies/height_scan_contract.yaml",
         height_scan_source: str = "pointcloud2",
@@ -371,6 +369,15 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.init_action = np.zeros(18, dtype=np.float64)
         self.latest_tick = -1
         self.policy_path = policy_path
+        self.policy_config_path = os.path.join(
+            os.path.dirname(os.path.abspath(policy_path)),
+            "env.yaml",
+        )
+        if not os.path.isfile(self.policy_config_path):
+            raise FileNotFoundError(
+                f"missing policy config: {self.policy_config_path}"
+            )
+        self.policy_config = _load_policy_env_config(self.policy_config_path)
         self.arm_control_owner = arm_control_owner.lower()
         if self.arm_control_owner not in {"none", "wbc", "external_spacemouse"}:
             raise ValueError(
@@ -468,14 +475,28 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.default_arm_hold_pose = np.asarray(
             TRAINING_ARM_JOINT_POSE, dtype=np.float64
         )
-        self.commanded_leg_kp = np.ones(LEG_DOF, dtype=np.float64) * require_finite_scalar(
-            leg_kp,
-            "leg_kp",
+        training_leg_joint_names = list(self.policy_config["dog_joint_names"])
+        training_actuator_cfg = self.policy_config["scene"]["robot"]["actuators"]
+        self.commanded_leg_kp = _build_joint_gain_array(
+            training_leg_joint_names,
+            training_actuator_cfg,
+            "stiffness",
         )
-        self.commanded_leg_kd = np.ones(LEG_DOF, dtype=np.float64) * require_finite_scalar(
-            leg_kd,
-            "leg_kd",
+        self.commanded_leg_kd = _build_joint_gain_array(
+            training_leg_joint_names,
+            training_actuator_cfg,
+            "damping",
         )
+        if (
+            self.commanded_leg_kp.shape != (LEG_DOF,)
+            or self.commanded_leg_kd.shape != (LEG_DOF,)
+            or not np.isfinite(self.commanded_leg_kp).all()
+            or not np.isfinite(self.commanded_leg_kd).all()
+        ):
+            raise RuntimeError(
+                "training env.yaml must define one finite stiffness and damping value for "
+                f"each of the {LEG_DOF} leg joints"
+            )
         self.passive_leg_kd = np.ones(LEG_DOF, dtype=np.float64) * 3.0
         self.passive_command_started = False
         self.policy_takeover_commands = np.array([0.0, 0.0, 0.0], dtype=np.float64)
@@ -3700,10 +3721,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
     def init_policy(self, policy_path: str):
         logging.info("Preparing policy")
         faulthandler.enable()
-        config_path = os.path.join(os.path.dirname(policy_path), "env.yaml")
-        if not os.path.isfile(config_path):
-            raise FileNotFoundError(f"missing policy config: {config_path}")
-        config = _load_policy_env_config(config_path)
+        config_path = self.policy_config_path
+        config = self.policy_config
 
         joint_names = list(config["joint_names"])
         leg_joint_names = list(config["dog_joint_names"])
@@ -3779,10 +3798,24 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.leg_action_offset = deploy_leg_offset.copy()
         self.policy_kp = _build_joint_gain_array(joint_names, actuator_cfg, "stiffness")
         self.policy_kd = _build_joint_gain_array(joint_names, actuator_cfg, "damping")
+        if not np.array_equal(self.commanded_leg_kp, self.policy_kp[:LEG_DOF]):
+            raise RuntimeError(
+                "internal leg Kp mismatch: deployment gains must equal env.yaml stiffness"
+            )
+        if not np.array_equal(self.commanded_leg_kd, self.policy_kd[:LEG_DOF]):
+            raise RuntimeError(
+                "internal leg Kd mismatch: deployment gains must equal env.yaml damping"
+            )
         self.manual_takeover_kp = self.commanded_leg_kp.copy()
         self.manual_takeover_kd = self.commanded_leg_kd.copy()
         self.deploy_policy_kp = self.commanded_leg_kp.copy()
         self.deploy_policy_kd = self.commanded_leg_kd.copy()
+        logging.info(
+            "Training leg PD loaded | source=%s kp=%s kd=%s",
+            config_path,
+            np.array2string(self.commanded_leg_kp, precision=3, floatmode="fixed"),
+            np.array2string(self.commanded_leg_kd, precision=3, floatmode="fixed"),
+        )
         delay_cfg = config.get("sim2sim_action_delay_range", (0, 0))
         self.train_sim2sim_action_delay_range = (
             int(delay_cfg[0]),

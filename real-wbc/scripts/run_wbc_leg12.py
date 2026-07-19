@@ -171,18 +171,6 @@ if __name__ == "__main__":
         default="last_valid_then_zero",
     )
     parser.add_argument("--height-scan-max-last-valid-age", type=float, default=0.5)
-    parser.add_argument(
-        "--leg-kp",
-        type=float,
-        default=200.0,
-        help="Low-level leg position Kp used during internal stand-up, handover, and rollout.",
-    )
-    parser.add_argument(
-        "--leg-kd",
-        type=float,
-        default=10.0,
-        help="Low-level leg damping Kd used during internal stand-up, handover, and rollout.",
-    )
     parser.add_argument("--pose_estimator", type=str, default="none")
     parser.add_argument("--disable-arm", action="store_true")
     parser.add_argument(
