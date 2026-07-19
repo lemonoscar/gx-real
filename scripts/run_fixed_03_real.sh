@@ -8,7 +8,7 @@ exec "${SCRIPT_DIR}/run_leg12_real.sh" \
   --pose_estimator none \
   --standup-mode internal \
   --base-command-source fixed \
-  --cmd-vx 0.2 \
+  --cmd-vx 0.3 \
   --cmd-vy 0.0 \
   --cmd-yaw 0.0 \
   --arm-control-owner external_spacemouse \
