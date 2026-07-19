@@ -2,6 +2,8 @@ doc/
 policies/*
 !policies/
 !policies/env.yaml
+!policies/policy.onnx
+!policies/policy_bundle.json
 __pycache__/
 *.pyc
 logs/

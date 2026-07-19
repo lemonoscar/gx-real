@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "name": "go2_x5_dog_only_flat_2026-05-31_20-42-11_model_19000",
+  "source_checkpoint": {
+    "name": "model_19000.pt",
+    "sha256": "4b586b34a2a01e45bdc5247c4ebc932539e3b4652946ac39014a26443ffb3acc"
+  },
+  "artifacts": {
+    "policy": {
+      "path": "policy.onnx",
+      "sha256": "8648a09e78a20a81321cd1ba35b06be132da958023e9f5270a3ee28f5d8fd7d5"
+    },
+    "env": {
+      "path": "env.yaml",
+      "sha256": "ce08ead30c672fbc2d4447b6d0922962ea42541123650ebcdf453deb01cb3c24"
+    }
+  },
+  "runtime_contract": {
+    "height_scan": "zero",
+    "arm_joint_pose": [0.0, 0.3, 0.5, 0.0, 0.0, 0.0],
+    "policy_input_dim": 260,
+    "policy_output_dim": 12
+  }
+}

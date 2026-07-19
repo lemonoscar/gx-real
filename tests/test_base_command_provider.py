@@ -12,6 +12,7 @@ from modules.base_command_provider import (  # noqa: E402
     CommandSafetyFilter,
     FixedCommandProvider,
     WirelessJoystickCommandProvider,
+    handover_allows_motion,
 )
 
 
@@ -27,6 +28,11 @@ def _open_gate():
 def test_fixed_mode_returns_configured_command():
     provider = FixedCommandProvider(0.5, 0.0, 0.1)
     assert provider.update(now=1.0).as_tuple() == (0.5, 0.0, 0.1)
+
+
+def test_speed_command_waits_for_policy_handover_completion():
+    assert handover_allows_motion(1.199, 1.2) is False
+    assert handover_allows_motion(1.2, 1.2) is True
 
 
 def test_joystick_deadzone_zeros_small_drift():

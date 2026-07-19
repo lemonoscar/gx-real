@@ -10,6 +10,7 @@ from typing import Optional, Sequence, Tuple
 
 import numpy as np
 
+from modules.arm_observation import TRAINING_ARM_JOINT_POSE
 from modules.can_owner_lock import CanOwnerLock
 from modules.runtime_safety import (
     RuntimeSafetyFault,
@@ -23,10 +24,12 @@ ROTATION_AXES = ("rx", "ry", "rz")
 GRIPPER_MIN = 0.0
 GRIPPER_MAX_FALLBACK = 0.08
 ARM_HOME_SETTLE_SEC = 0.7
-BUTTON_HOME_JOINT_POSE = np.array([0.0, 0.3, 0.5, 0.0, 0.0, 0.0], dtype=np.float64)
+BUTTON_HOME_JOINT_POSE = np.asarray(TRAINING_ARM_JOINT_POSE, dtype=np.float64)
 BUTTON_HOME_JOINT_SPEED = 0.5
 BUTTON_HOME_MIN_DURATION_SEC = 1.0
 BUTTON_HOME_MAX_DURATION_SEC = 3.0
+X5_GRIPPER_WIDTH = 0.088
+X5_GRIPPER_OPEN_READOUT = -5.07839
 RAW_AXIS_INDEX = {
     "x": 0,
     "y": 1,
@@ -114,6 +117,14 @@ def can_interface_exists(interface: str) -> bool:
     return os.path.isdir(os.path.join("/sys/class/net", interface))
 
 
+def apply_x5_gripper_calibration(robot_config, model: str) -> bool:
+    if str(model).upper() != "X5":
+        return False
+    robot_config.gripper_width = X5_GRIPPER_WIDTH
+    robot_config.gripper_open_readout = X5_GRIPPER_OPEN_READOUT
+    return True
+
+
 class SpaceMouseArmNode:
     def __init__(
         self,
@@ -130,6 +141,7 @@ class SpaceMouseArmNode:
         dry_run: bool = False,
         require_can: bool = True,
         safety_topic: str = "/safety/estop",
+        lock_training_pose: bool = False,
     ):
         import rclpy
         from rclpy.node import Node
@@ -152,6 +164,7 @@ class SpaceMouseArmNode:
         self.dry_run = bool(dry_run)
         self.require_can = bool(require_can)
         self.safety_topic = str(safety_topic)
+        self.lock_training_pose = bool(lock_training_pose)
         self.shared_memory_manager: Optional[SharedMemoryManager] = None
         self.spacemouse = None
         self.controller = None
@@ -216,6 +229,15 @@ class SpaceMouseArmNode:
         self._log_info(f"deadzone: {self.mapping.deadzone}")
         self._log_info(f"watchdog: {self.sm_watchdog_sec}")
         self._log_info(f"safety estop topic: {self.safety_topic}")
+        if self.lock_training_pose:
+            self._log_info(
+                "arm mode: fixed training-pose lock "
+                + np.array2string(
+                    BUTTON_HOME_JOINT_POSE,
+                    precision=3,
+                    floatmode="fixed",
+                )
+            )
 
     def _init_inputs_and_controller(self) -> None:
         if self.dry_run:
@@ -225,7 +247,6 @@ class SpaceMouseArmNode:
             raise RuntimeError(f"CAN interface {self.can_interface!r} does not exist")
 
         import arx5_interface as arx5
-        from modules.spacemouse_shared_memory import Spacemouse
 
         self.arx5 = arx5
         self.can_owner_lock = CanOwnerLock(
@@ -236,6 +257,12 @@ class SpaceMouseArmNode:
 
         try:
             robot_config = arx5.RobotConfigFactory.get_instance().get_config(self.model)
+            if apply_x5_gripper_calibration(robot_config, self.model):
+                self._log_info(
+                    "Using persistent X5 gripper calibration: "
+                    f"width={X5_GRIPPER_WIDTH:.3f} "
+                    f"open_readout={X5_GRIPPER_OPEN_READOUT:.5f}"
+                )
             urdf_path = os.path.join(ARX5_MODELS_DIR, f"{self.model}.urdf")
             if os.path.isfile(urdf_path):
                 robot_config.urdf_path = urdf_path
@@ -259,6 +286,13 @@ class SpaceMouseArmNode:
             self._refresh_targets_from_controller_state()
             self._enable_current_pose_hold(controller_config)
 
+            if self.lock_training_pose:
+                if not self._command_training_pose("Fixed training-pose lock"):
+                    raise RuntimeError("failed to command fixed X5 training pose")
+                self._log_info("SpaceMouse input disabled while training-pose lock is active")
+                return
+
+            from modules.spacemouse_shared_memory import Spacemouse
             self.shared_memory_manager = SharedMemoryManager()
             self.shared_memory_manager.start()
             self.spacemouse = Spacemouse(
@@ -277,7 +311,7 @@ class SpaceMouseArmNode:
         self.last_update_time = now
         self.tick += 1
 
-        if not self.estopped:
+        if not self.estopped and not self.lock_training_pose:
             spacemouse_input = self._read_spacemouse_input(now=now)
         else:
             spacemouse_input = None
@@ -326,7 +360,11 @@ class SpaceMouseArmNode:
                     rotation=rotation,
                     gripper_changed=gripper_changed,
                 )
-        elif not self.estopped and now - self.last_spacemouse_sample_time > self.sm_watchdog_sec:
+        elif (
+            not self.estopped
+            and not self.lock_training_pose
+            and now - self.last_spacemouse_sample_time > self.sm_watchdog_sec
+        ):
             self._handle_spacemouse_watchdog()
 
         joint_pos, joint_vel, joint_tau, gripper_pos, gripper_vel, arm_state_valid = self._read_arm_state()
@@ -664,6 +702,9 @@ class SpaceMouseArmNode:
         return self.spacemouse_buttons_armed and left_pressed != right_pressed
 
     def _command_button_home_pose(self) -> bool:
+        return self._command_training_pose("SpaceMouse both buttons pressed")
+
+    def _command_training_pose(self, source: str) -> bool:
         if self.controller is None or self.arx5 is None:
             return False
         try:
@@ -703,15 +744,14 @@ class SpaceMouseArmNode:
             self.controller.set_eef_cmd(cmd)
             self.target_pose6d = target_pose6d.copy()
             self.target_joint = target_joint.copy()
-            self._sync_target_joint_from_controller()
             self._log_info(
-                "SpaceMouse both buttons pressed; commanding X5 joint pose "
+                f"{source}; commanding X5 joint pose "
                 f"{np.array2string(target_joint, precision=3, floatmode='fixed')} "
                 f"over {duration:.2f}s"
             )
             return True
         except Exception as exc:
-            self._log_error(f"Failed to command SpaceMouse button home pose: {exc}")
+            self._log_error(f"Failed to command X5 training pose from {source}: {exc}")
             return False
 
     def _send_target(self) -> None:

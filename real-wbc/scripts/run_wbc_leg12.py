@@ -13,6 +13,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REAL_WBC_DIR = os.path.dirname(SCRIPT_DIR)
 GX_REAL_ROOT = os.path.dirname(REAL_WBC_DIR)
 DEFAULT_POLICY_PATH = os.path.join(GX_REAL_ROOT, "policies", "policy.onnx")
+DEFAULT_POLICY_BUNDLE = os.path.join(GX_REAL_ROOT, "policies", "policy_bundle.json")
 DEFAULT_HEIGHT_SCAN_CONTRACT = os.path.join(GX_REAL_ROOT, "policies", "height_scan_contract.yaml")
 DEFAULT_LOG_DIR = os.path.join(GX_REAL_ROOT, "logs")
 
@@ -51,6 +52,12 @@ if __name__ == "__main__":
         "--policy_path",
         type=str,
         default=DEFAULT_POLICY_PATH,
+    )
+    parser.add_argument(
+        "--policy-bundle",
+        type=str,
+        default=DEFAULT_POLICY_BUNDLE,
+        help="Manifest that fixes the allowed policy.onnx and sibling env.yaml hashes.",
     )
     parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument("--arm_pose", type=float, nargs=6, default=None)
@@ -243,6 +250,23 @@ if __name__ == "__main__":
     run_log_dir = configure_logging(args.logging_dir)
     args.logging_dir = run_log_dir
     logging.info(f"Run logs: {run_log_dir}")
+
+    from modules.policy_bundle import validate_policy_bundle
+
+    env_path = os.path.join(os.path.dirname(os.path.abspath(args.policy_path)), "env.yaml")
+    verified_bundle = validate_policy_bundle(
+        policy_path=args.policy_path,
+        env_path=env_path,
+        manifest_path=args.policy_bundle,
+    )
+    logging.info(
+        "Policy bundle verified | name=%s policy_sha256=%s env_sha256=%s manifest=%s",
+        verified_bundle["name"],
+        verified_bundle["artifacts"]["policy"]["sha256"],
+        verified_bundle["artifacts"]["env"]["sha256"],
+        verified_bundle["manifest"],
+    )
+    del args.policy_bundle
 
     import rclpy
     from modules.wbc_node_leg12_arm_passthrough import WBCNodeLeg12ArmPassthrough

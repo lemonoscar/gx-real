@@ -54,6 +54,11 @@ def parse_args():
     parser.add_argument("--sm-watchdog-sec", type=float, default=0.25)
     parser.add_argument("--sm-max-value", type=float, default=500.0)
     parser.add_argument("--gripper-speed", type=float, default=0.03)
+    parser.add_argument(
+        "--lock-training-pose",
+        action="store_true",
+        help="Move X5 to [0, 0.3, 0.5, 0, 0, 0], hold it, and do not start SpaceMouse input.",
+    )
     parser.add_argument("--arm-command-frame", choices=["base", "world", "arm_base"], default="base")
     parser.add_argument(
         "--logging-dir",
@@ -111,6 +116,7 @@ def main() -> int:
         max_value=args.sm_max_value,
         dry_run=args.dry_run,
         require_can=not args.allow_missing_can,
+        lock_training_pose=args.lock_training_pose,
     )
     try:
         rclpy.spin(node.node)

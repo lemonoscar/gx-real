@@ -9,6 +9,12 @@ from typing import Mapping, Optional, Tuple
 JOYSTICK_AXES = ("lx", "ly", "rx", "ry")
 
 
+def handover_allows_motion(policy_elapsed: float, handover_duration: float) -> bool:
+    elapsed = _nonnegative_float(policy_elapsed, "policy_elapsed")
+    duration = _nonnegative_float(handover_duration, "handover_duration")
+    return elapsed >= duration
+
+
 @dataclass(frozen=True)
 class BaseCommand:
     vx: float

@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import time
-from typing import Optional, Sequence
+from typing import Optional, Sequence, Tuple
 
 import numpy as np
 
 
 ARM_DOF = 6
+TRAINING_ARM_JOINT_POSE = (0.0, 0.3, 0.5, 0.0, 0.0, 0.0)
 
 
 @dataclass(frozen=True)
@@ -177,6 +178,27 @@ def should_initialize_wbc_arm_controller(arm_control_owner: str, disable_arm: bo
     if arm_control_owner not in {"none", "wbc", "external_spacemouse"}:
         raise ValueError(f"invalid arm_control_owner: {arm_control_owner!r}")
     return arm_control_owner == "wbc" and not bool(disable_arm)
+
+
+def fixed_arm_pose_readiness(
+    observation: ArmObservation,
+    expected_joint_pose: Sequence[float] = TRAINING_ARM_JOINT_POSE,
+    tolerance: float = 0.08,
+) -> Tuple[bool, str]:
+    expected = _as_arm_array(expected_joint_pose, "expected_joint_pose")
+    tolerance = _positive_float(tolerance, "tolerance")
+    if not observation.state_fresh:
+        return False, "arm state is missing or stale"
+    if not observation.target_fresh:
+        return False, "arm target is missing or stale"
+
+    state_error = float(np.max(np.abs(observation.joint_pos - expected)))
+    target_error = float(np.max(np.abs(observation.joint_target - expected)))
+    if target_error > tolerance:
+        return False, f"arm target error {target_error:.3f} rad exceeds {tolerance:.3f} rad"
+    if state_error > tolerance:
+        return False, f"arm state error {state_error:.3f} rad exceeds {tolerance:.3f} rad"
+    return True, ""
 
 
 def _as_arm_array(values: Sequence[float], name: str) -> np.ndarray:

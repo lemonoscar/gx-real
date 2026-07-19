@@ -77,6 +77,7 @@ def _run_fake_real_entry(
                 f'export GX_REAL_ROOT="{fake_root}"',
                 'export GX_REAL_NETWORK_IFACE="test0"',
                 'export GX_REAL_POLICY_PATH="/tmp/policy.onnx"',
+                'export GX_REAL_POLICY_BUNDLE_PATH="/tmp/policy_bundle.json"',
                 f'export GX_REAL_PYTHON_BIN="{fake_python}"',
             ]
         )
@@ -115,10 +116,16 @@ def test_real_entry_replaces_stale_attestation_only_after_success(tmp_path: Path
 
     assert result.returncode == 0
     lines = events.splitlines()
-    assert lines[0] == "release:test0:unset"
-    assert lines[1].startswith("python:1:")
-    assert lines[1].endswith(
-        "real-wbc/scripts/run_wbc_leg12.py --policy_path /tmp/policy.onnx --device cpu"
+    assert lines[0].startswith("python:stale:")
+    assert lines[0].endswith(
+        "scripts/check_policy_bundle.py --policy /tmp/policy.onnx "
+        "--manifest /tmp/policy_bundle.json"
+    )
+    assert lines[1] == "release:test0:unset"
+    assert lines[2].startswith("python:1:")
+    assert lines[2].endswith(
+        "real-wbc/scripts/run_wbc_leg12.py --policy_path /tmp/policy.onnx "
+        "--policy-bundle /tmp/policy_bundle.json --device cpu"
     )
 
 
@@ -126,4 +133,6 @@ def test_real_entry_does_not_start_python_when_release_fails(tmp_path: Path) -> 
     result, events = _run_fake_real_entry(tmp_path, release_exit=9)
 
     assert result.returncode == 9
-    assert events.splitlines() == ["release:test0:unset"]
+    lines = events.splitlines()
+    assert lines[0].startswith("python:stale:")
+    assert lines[1] == "release:test0:unset"

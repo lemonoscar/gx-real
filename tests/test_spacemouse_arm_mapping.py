@@ -7,8 +7,12 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "real-wbc"))
 
-from modules.spacemouse_arm_node import SpaceMouseMapping, map_spacemouse_motion  # noqa: E402
-from modules.spacemouse_arm_node import SpaceMouseArmNode  # noqa: E402
+from modules.spacemouse_arm_node import (  # noqa: E402
+    SpaceMouseArmNode,
+    SpaceMouseMapping,
+    apply_x5_gripper_calibration,
+    map_spacemouse_motion,
+)
 
 
 def test_spacemouse_mapping_uses_raw_axes_and_configured_signs():
@@ -31,6 +35,21 @@ def test_spacemouse_mapping_deadzone_is_explicit():
     translation, rotation = map_spacemouse_motion([0.05, 0.11, 0.0, 0.09, -0.12, 0.0], mapping)
     np.testing.assert_allclose(translation, [0.0, 0.11, 0.0])
     np.testing.assert_allclose(rotation, [0.0, -0.12, 0.0])
+
+
+def test_x5_gripper_calibration_is_persistent_and_model_specific():
+    config = type("RobotConfig", (), {})()
+    config.gripper_width = 0.01
+    config.gripper_open_readout = 5.03
+    assert apply_x5_gripper_calibration(config, "X5") is True
+    assert config.gripper_width == 0.088
+    assert config.gripper_open_readout == -5.07839
+
+    other = type("RobotConfig", (), {})()
+    other.gripper_width = 0.02
+    other.gripper_open_readout = 1.0
+    assert apply_x5_gripper_calibration(other, "X5_umi") is False
+    assert other.gripper_open_readout == 1.0
 
 
 def test_spacemouse_motion_returns_none_for_stale_sample():

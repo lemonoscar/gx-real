@@ -51,6 +51,7 @@ GX_REAL_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 export GX_REAL_ROOT
 export GX_REAL_POLICY_PATH="${GX_REAL_POLICY_PATH:-${GX_REAL_ROOT}/policies/policy.onnx}"
+export GX_REAL_POLICY_BUNDLE_PATH="${GX_REAL_POLICY_BUNDLE_PATH:-${GX_REAL_ROOT}/policies/policy_bundle.json}"
 export GX_REAL_PYTHON_BIN="${GX_REAL_PYTHON_BIN:-/usr/bin/python3}"
 export GX_REAL_NETWORK_IFACE="${GX_REAL_NETWORK_IFACE:-eth0}"
 GX_REAL_BAD_UNITREE_PY_PATH="${GX_REAL_ROOT}/unitree_sdk2/python"
@@ -141,6 +142,12 @@ if [[ ! -f "${GX_REAL_POLICY_PATH}" ]]; then
   return 1 2>/dev/null || exit 1
 fi
 
+if [[ ! -f "${GX_REAL_POLICY_BUNDLE_PATH}" ]]; then
+  echo "[gx-real] missing policy bundle: ${GX_REAL_POLICY_BUNDLE_PATH}" >&2
+  _gx_real_restore_shellopts
+  return 1 2>/dev/null || exit 1
+fi
+
 if [[ ! -f "${GX_REAL_ROOT}/unitree_sdk2/python/crc_module.so" ]]; then
   echo "[gx-real] missing crc_module.so under unitree_sdk2/python" >&2
   _gx_real_restore_shellopts
@@ -156,6 +163,7 @@ fi
 echo "[gx-real] environment ready"
 echo "[gx-real] root=${GX_REAL_ROOT}"
 echo "[gx-real] policy=${GX_REAL_POLICY_PATH}"
+echo "[gx-real] policy_bundle=${GX_REAL_POLICY_BUNDLE_PATH}"
 echo "[gx-real] python=${GX_REAL_PYTHON_BIN}"
 echo "[gx-real] crc_module=${GX_REAL_CRC_MODULE_PATH}"
 echo "[gx-real] rmw=${RMW_IMPLEMENTATION:-unset}"

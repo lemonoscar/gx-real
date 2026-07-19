@@ -22,6 +22,8 @@ from modules.arm_cartesian_decoder import (
 )
 from modules.arm_observation import (
     ArmObservationCache,
+    TRAINING_ARM_JOINT_POSE,
+    fixed_arm_pose_readiness,
     should_initialize_wbc_arm_controller,
 )
 from modules.base_command_provider import (
@@ -29,6 +31,7 @@ from modules.base_command_provider import (
     CommandSafetyFilter,
     FixedCommandProvider,
     WirelessJoystickCommandProvider,
+    handover_allows_motion,
 )
 from modules.can_owner_lock import CanOwnerLock
 from modules.height_scan_provider import HeightScanProvider
@@ -36,6 +39,11 @@ from modules.height_scan_policy_validation import (
     HEIGHT_SCAN_POLICY_FUNCS,
     ZERO_HEIGHT_SCAN_FUNC,
     validate_height_scan_runtime_mode,
+)
+from modules.leg_joint_limits import (
+    INTERFACE_LEG_JOINT_NAMES,
+    build_go2_leg_target_limits,
+    clip_leg_joint_targets,
 )
 from modules.runtime_safety import (
     RuntimeSafetyFault,
@@ -132,20 +140,6 @@ BUTTON_DPAD_DOWN = int(2**14)
 GRIPPER_MIN = 0.0
 GRIPPER_MAX_FALLBACK = 0.08
 
-INTERFACE_LEG_JOINT_NAMES = [
-    "FR_hip_joint",
-    "FR_thigh_joint",
-    "FR_calf_joint",
-    "FL_hip_joint",
-    "FL_thigh_joint",
-    "FL_calf_joint",
-    "RR_hip_joint",
-    "RR_thigh_joint",
-    "RR_calf_joint",
-    "RL_hip_joint",
-    "RL_thigh_joint",
-    "RL_calf_joint",
-]
 EXPECTED_POLICY_OBS_FUNCS = {
     "base_lin_vel": "isaaclab.envs.mdp.observations:base_lin_vel",
     "base_ang_vel": "isaaclab.envs.mdp.observations:base_ang_vel",
@@ -471,8 +465,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
         )
         if self.estop_repeat_period_sec < 0.0:
             raise ValueError("estop_repeat_period_sec must be >= 0")
-        self.default_arm_hold_pose = np.array(
-            [-0.8, 2.8, 1.9, -0.4, 0.0, 0.0], dtype=np.float64
+        self.default_arm_hold_pose = np.asarray(
+            TRAINING_ARM_JOINT_POSE, dtype=np.float64
         )
         self.commanded_leg_kp = np.ones(LEG_DOF, dtype=np.float64) * require_finite_scalar(
             leg_kp,
@@ -680,6 +674,10 @@ class WBCNodeLeg12ArmPassthrough(Node):
             ],
             dtype=np.float64,
         )
+        self.real_leg_target_lower, self.real_leg_target_upper = (
+            build_go2_leg_target_limits(INTERFACE_LEG_JOINT_NAMES, 0.9)
+        )
+        self.last_joint_target_limit_log_time = -1.0
         self.policy_leg_joint_names = INTERFACE_LEG_JOINT_NAMES.copy()
         self.policy_leg_indices_from_interface = np.arange(LEG_DOF, dtype=np.int64)
         self.interface_leg_indices_from_policy = np.arange(LEG_DOF, dtype=np.int64)
@@ -1818,18 +1816,31 @@ class WBCNodeLeg12ArmPassthrough(Node):
         if self.arm_control_owner == "wbc" or not self.require_arm_state_for_rl:
             return True
         obs = self.arm_observation_cache.get(time.monotonic())
-        if obs.state_fresh:
+        ready, reason = fixed_arm_pose_readiness(
+            obs,
+            self.requested_arm_hold_pose,
+        )
+        if ready:
             return True
         logging.error(
-            "Refusing to enter policy: /arm/state missing or stale "
-            "(owner=%s state_valid=%s state_fresh=%s source=%s timeout=%.3fs). "
-            "Start scripts/run_spacemouse_arm.sh first or pass --no-require-arm-state-for-rl for offline diagnostics."
+            "Refusing to enter policy: fixed arm pose is not ready: %s "
+            "(owner=%s state_valid=%s state_fresh=%s target_valid=%s "
+            "target_fresh=%s expected=%s state=%s target=%s). "
+            "Start scripts/run_arm_training_hold.sh first."
             % (
+                reason,
                 self.arm_control_owner,
                 obs.state_valid,
                 obs.state_fresh,
-                obs.state_source,
-                self.arm_state_timeout_sec,
+                obs.target_valid,
+                obs.target_fresh,
+                np.array2string(
+                    self.requested_arm_hold_pose,
+                    precision=3,
+                    floatmode="fixed",
+                ),
+                np.array2string(obs.joint_pos, precision=3, floatmode="fixed"),
+                np.array2string(obs.joint_target, precision=3, floatmode="fixed"),
             )
         )
         return False
@@ -1837,6 +1848,30 @@ class WBCNodeLeg12ArmPassthrough(Node):
     def update_policy_commands(self):
         if not self.start_policy:
             return
+        now = time.monotonic()
+        if not self.policy_motion_started:
+            self.fixed_commands[:] = self.policy_takeover_commands
+            policy_elapsed = max(now - self.start_policy_time, 0.0)
+            if not handover_allows_motion(
+                policy_elapsed,
+                self.policy_handover_duration,
+            ):
+                return
+            self.policy_motion_started = True
+            self.command_safety_filter.reset(
+                tuple(self.policy_takeover_commands),
+                now=now,
+            )
+            if self.base_command_source == "fixed":
+                self.set_policy_command_target(
+                    self.policy_move_commands,
+                    "handover_complete",
+                    self.policy_command_ramp_duration,
+                )
+            else:
+                logging.info(
+                    "Policy handover complete; wireless base commands are now enabled"
+                )
         if self.base_command_source == "wireless_joystick":
             self.update_wireless_joystick_policy_command()
             return
@@ -1845,7 +1880,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
             return
         ramp_ratio = float(
             np.clip(
-                (time.monotonic() - self.policy_command_ramp_start_time)
+                (now - self.policy_command_ramp_start_time)
                 / max(self.policy_command_current_ramp_duration, 1e-6),
                 0.0,
                 1.0,
@@ -2696,7 +2731,13 @@ class WBCNodeLeg12ArmPassthrough(Node):
             self.last_policy_diag_log_time = -1.0
 
         if self.button_pressed_once(keys, BUTTON_L2, now):
-            if self.start_policy and self.base_command_source == "fixed":
+            if (
+                self.start_policy
+                and self.base_command_source == "fixed"
+                and not self.policy_motion_started
+            ):
+                logging.info("Policy handover is still active; fixed speed remains zero")
+            elif self.start_policy and self.base_command_source == "fixed":
                 self.set_policy_command_target(
                     self.policy_move_commands,
                     "l2_resume_move_command",
@@ -3005,6 +3046,11 @@ class WBCNodeLeg12ArmPassthrough(Node):
         try:
             q = require_finite_vector(q, size=18, name="motor_position_target")
             gripper_pos = require_finite_scalar(gripper_pos, "gripper_pos")
+            q = q.copy()
+            q[:LEG_DOF], _ = self.limit_real_leg_targets(
+                q[:LEG_DOF],
+                source=f"{self.control_phase_label()}_lowcmd",
+            )
         except RuntimeSafetyFault as exc:
             self.trigger_safety_stop(str(exc))
             return
@@ -3343,15 +3389,15 @@ class WBCNodeLeg12ArmPassthrough(Node):
                     self.quadruped_q
                 ).copy()
                 self.fixed_commands[:] = self.policy_takeover_commands
-                self.policy_motion_started = True
+                self.policy_motion_started = False
                 self.last_policy_diag_log_time = -1.0
                 self.prev_action[:] = 0.0
                 self.start_policy = True
                 self.start_policy_time = time.monotonic()
                 self.set_policy_command_target(
-                    self.policy_move_commands,
-                    "policy_start",
-                    self.policy_command_ramp_duration,
+                    self.policy_takeover_commands,
+                    "policy_start_handover_hold",
+                    0.0,
                 )
                 self.policy_ctrl_iter = 0
             return
@@ -3474,6 +3520,14 @@ class WBCNodeLeg12ArmPassthrough(Node):
             wbc_action = np.zeros(18, dtype=np.float64)
             startup_kick_leg_delta = self.get_startup_kick_leg_delta()
             target_leg_q = target_leg_q + startup_kick_leg_delta
+            try:
+                target_leg_q, joint_target_limited = self.limit_real_leg_targets(
+                    target_leg_q,
+                    source="policy_target",
+                )
+            except RuntimeSafetyFault as exc:
+                self.trigger_safety_stop(str(exc))
+                return
             commanded_leg_q = (
                 self.policy_handover_leg_start * (1.0 - handover_ratio)
                 + target_leg_q * handover_ratio
@@ -3489,7 +3543,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
                 >= self.policy_diag_log_interval
             ):
                 logging.info(
-                    "Policy diag | handover=%.3f est_lin_vel=%s commands=%s raw_action=%s clipped_action=%s startup_limited_action=%s startup_limiter_active=%s startup_abs_clipped=%s startup_delta_clipped=%s timed_action=%s applied_action=%s startup_kick=%s target_leg_q=%s commanded_leg_q=%s current_leg_q=%s leg_q_error=%s current_leg_dq=%s current_tau_est=%s motor_mode=%s lowcmd_leg_q_policy=%s lowcmd_leg_q_hw=%s lowcmd_kp=%s lowcmd_kd=%s arm_target=%s arm_current=%s arm_smoothed_cmd=%s sim2sim_delay=%d hold_prob=%.3f foot_force=%s"
+                    "Policy diag | handover=%.3f est_lin_vel=%s commands=%s raw_action=%s clipped_action=%s startup_limited_action=%s startup_limiter_active=%s startup_abs_clipped=%s startup_delta_clipped=%s joint_target_limited=%s timed_action=%s applied_action=%s startup_kick=%s target_leg_q=%s commanded_leg_q=%s current_leg_q=%s leg_q_error=%s current_leg_dq=%s current_tau_est=%s motor_mode=%s lowcmd_leg_q_policy=%s lowcmd_leg_q_hw=%s lowcmd_kp=%s lowcmd_kd=%s arm_target=%s arm_current=%s arm_smoothed_cmd=%s sim2sim_delay=%d hold_prob=%.3f foot_force=%s"
                     % (
                         handover_ratio,
                         np.array2string(
@@ -3520,6 +3574,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
                         startup_limiter_active,
                         startup_abs_clipped,
                         startup_delta_clipped,
+                        joint_target_limited,
                         np.array2string(
                             timed_action,
                             precision=3,
@@ -3634,6 +3689,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
                     "startup_limiter_active": startup_limiter_active,
                     "startup_abs_clipped": startup_abs_clipped,
                     "startup_delta_clipped": startup_delta_clipped,
+                    "joint_target_limited": joint_target_limited,
                     "timed_action": timed_action.copy(),
                     "applied_action": leg_action.copy(),
                     "reordered_wbc_action": wbc_action,
@@ -3665,6 +3721,15 @@ class WBCNodeLeg12ArmPassthrough(Node):
         )
         self.interface_leg_indices_from_policy = np.argsort(
             self.policy_leg_indices_from_interface
+        )
+        soft_joint_pos_limit_factor = float(
+            config["scene"]["robot"].get("soft_joint_pos_limit_factor", 1.0)
+        )
+        self.real_leg_target_lower, self.real_leg_target_upper = (
+            build_go2_leg_target_limits(
+                leg_joint_names,
+                soft_joint_pos_limit_factor,
+            )
         )
         init_joint_pos = config["scene"]["robot"]["init_state"]["joint_pos"]
         self.default_dof_pos = np.array(
@@ -3818,6 +3883,9 @@ class WBCNodeLeg12ArmPassthrough(Node):
             + f" sim2sim_obs_delay_steps: {self.sim2sim_obs_delay_steps},"
             + f" policy_leg_joint_names: {self.policy_leg_joint_names},"
             + f" policy_leg_indices_from_interface: {self.policy_leg_indices_from_interface.tolist()},"
+            + f" real_leg_target_lower: {self.real_leg_target_lower},"
+            + f" real_leg_target_upper: {self.real_leg_target_upper},"
+            + f" soft_joint_pos_limit_factor: {soft_joint_pos_limit_factor},"
             + f" policy_freq: {self.policy_freq},"
             + f" config_path: {config_path},"
             + f" fixed_commands: {self.fixed_commands},"
@@ -3862,6 +3930,44 @@ class WBCNodeLeg12ArmPassthrough(Node):
             name="leg_action",
         )
         return leg_action * self.leg_action_scale + self.leg_action_offset
+
+    def limit_real_leg_targets(
+        self,
+        targets: np.ndarray,
+        *,
+        source: str,
+    ) -> Tuple[np.ndarray, bool]:
+        try:
+            limited, mask = clip_leg_joint_targets(
+                targets,
+                self.real_leg_target_lower,
+                self.real_leg_target_upper,
+            )
+        except ValueError as exc:
+            raise RuntimeSafetyFault(f"invalid real leg target limits: {exc}") from exc
+        was_limited = bool(mask.any())
+        if was_limited:
+            now = time.monotonic()
+            if (
+                self.last_joint_target_limit_log_time < 0.0
+                or (now - self.last_joint_target_limit_log_time)
+                >= self.policy_diag_log_interval
+            ):
+                joint_names = [
+                    self.policy_leg_joint_names[index]
+                    for index in np.flatnonzero(mask)
+                ]
+                logging.warning(
+                    "Real leg target limit applied | source=%s joints=%s requested=%s limited=%s",
+                    source,
+                    joint_names,
+                    np.array2string(
+                        np.asarray(targets), precision=3, floatmode="fixed"
+                    ),
+                    np.array2string(limited, precision=3, floatmode="fixed"),
+                )
+                self.last_joint_target_limit_log_time = now
+        return limited, was_limited
 
     def get_tcp_pose(self, arm_dof_pos: np.ndarray) -> np.ndarray:
         """

@@ -9,6 +9,8 @@ sys.path.insert(0, str(ROOT / "real-wbc"))
 
 from modules.arm_observation import (  # noqa: E402
     ArmObservationCache,
+    TRAINING_ARM_JOINT_POSE,
+    fixed_arm_pose_readiness,
     should_initialize_wbc_arm_controller,
 )
 
@@ -67,3 +69,25 @@ def test_external_spacemouse_owner_does_not_initialize_wbc_arm_controller():
     assert should_initialize_wbc_arm_controller("none", False) is False
     assert should_initialize_wbc_arm_controller("wbc", True) is False
     assert should_initialize_wbc_arm_controller("wbc", False) is True
+
+
+def test_fixed_arm_pose_requires_fresh_state_and_target_at_training_pose():
+    cache = ArmObservationCache(fallback_joint_pos=TRAINING_ARM_JOINT_POSE)
+    cache.update_state(joint_pos=TRAINING_ARM_JOINT_POSE, stamp=1.0)
+    cache.update_target(joint_target=TRAINING_ARM_JOINT_POSE, stamp=1.0)
+    ready, reason = fixed_arm_pose_readiness(cache.get(now=1.1))
+    assert ready is True
+    assert reason == ""
+
+
+def test_fixed_arm_pose_rejects_wrong_or_stale_target():
+    cache = ArmObservationCache(fallback_joint_pos=TRAINING_ARM_JOINT_POSE)
+    cache.update_state(joint_pos=TRAINING_ARM_JOINT_POSE, stamp=1.0)
+    cache.update_target(joint_target=[0.0, 0.5, 0.3, 0.0, 0.0, 0.0], stamp=1.0)
+    ready, reason = fixed_arm_pose_readiness(cache.get(now=1.1))
+    assert ready is False
+    assert "target error" in reason
+
+    ready, reason = fixed_arm_pose_readiness(cache.get(now=2.0))
+    assert ready is False
+    assert "state is missing or stale" in reason
