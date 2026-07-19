@@ -312,6 +312,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         joy_yaw_axis: str = "rx",
         joy_yaw_sign: int = -1,
         joy_deadzone: float = 0.12,
+        joy_min_vx: float = 0.20,
         joy_max_vx: float = 0.50,
         joy_max_vy: float = 0.20,
         joy_max_yaw: float = 0.50,
@@ -350,7 +351,6 @@ class WBCNodeLeg12ArmPassthrough(Node):
         startup_action_delta_limit: float = 0.35,
         estop_repeat_count: int = 5,
         estop_repeat_period_sec: float = 0.02,
-        live_ready_pose_calibration: bool = True,
         leg_kp: float = 200.0,
         leg_kd: float = 10.0,
         enable_height_scan: bool = False,
@@ -413,6 +413,10 @@ class WBCNodeLeg12ArmPassthrough(Node):
                     parsed_tcp_pose,
                 )
         self.standup_mode = standup_mode
+        if self.standup_mode == "manual":
+            raise ValueError(
+                "manual external stand-up is disabled; use standup_mode='internal'"
+            )
         if self.standup_mode in {
             "unitree_auto",
             "unitree_recoverystand",
@@ -420,6 +424,10 @@ class WBCNodeLeg12ArmPassthrough(Node):
         }:
             raise ValueError(
                 "Unitree stand-up modes are unavailable after mandatory MCF release"
+            )
+        if self.standup_mode not in {"internal", "pose_test"}:
+            raise ValueError(
+                f"Invalid standup_mode={standup_mode!r}; expected internal or pose_test"
             )
         self.mcf_release_confirmed = bool(mcf_release_confirmed)
         if not self.mcf_release_confirmed:
@@ -463,7 +471,6 @@ class WBCNodeLeg12ArmPassthrough(Node):
         )
         if self.estop_repeat_period_sec < 0.0:
             raise ValueError("estop_repeat_period_sec must be >= 0")
-        self.live_ready_pose_calibration = live_ready_pose_calibration
         self.default_arm_hold_pose = np.array(
             [-0.8, 2.8, 1.9, -0.4, 0.0, 0.0], dtype=np.float64
         )
@@ -475,6 +482,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
             leg_kd,
             "leg_kd",
         )
+        self.passive_leg_kd = np.ones(LEG_DOF, dtype=np.float64) * 3.0
+        self.passive_command_started = False
         self.policy_takeover_commands = np.array([0.0, 0.0, 0.0], dtype=np.float64)
         self.policy_move_commands = np.array([cmd_vx, cmd_vy, cmd_yaw], dtype=np.float64)
         self.base_command_source = base_command_source.lower()
@@ -492,6 +501,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
             yaw_axis=joy_yaw_axis,
             yaw_sign=joy_yaw_sign,
             deadzone=joy_deadzone,
+            min_vx=joy_min_vx,
             max_vx=joy_max_vx,
             max_vy=joy_max_vy,
             max_yaw=joy_max_yaw,
@@ -628,8 +638,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.last_arm_button_noop_log_time = -1.0
         self.align_to_policy_active = False
         self.align_to_policy_start_time = -1.0
-        self.align_to_policy_duration = 1.5
-        self.align_to_policy_hold_time = 0.4
+        self.align_to_policy_duration = 0.0
+        self.align_to_policy_hold_time = 0.0
         self.align_to_policy_kp = self.commanded_leg_kp.copy()
         self.align_to_policy_kd = self.commanded_leg_kd.copy()
         self.align_to_policy_leg_start = np.zeros(12, dtype=np.float64)
@@ -691,15 +701,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         )
         self.policy_handover_leg_start = np.zeros(12, dtype=np.float64)
         self.policy_handover_duration = 1.2
-        self.stand_target_leg_pos = np.array(
-            [
-                0.00571868, 0.608813, -1.21763,
-                -0.00571868, 0.608813, -1.21763,
-                0.00571868, 0.608813, -1.21763,
-                -0.00571868, 0.608813, -1.21763,
-            ],
-            dtype=np.float64,
-        )
+        self.stand_target_leg_pos = self.real_deploy_leg_offset.copy()
         self.policy_handover_leg_start[:] = self.stand_target_leg_pos
         self.getup_settle_time = 0.0
         self.getup_crouch_time = 0.6
@@ -1095,15 +1097,10 @@ class WBCNodeLeg12ArmPassthrough(Node):
         )
 
     def _build_internal_stand_leg_pos(self, policy_leg_pos: np.ndarray) -> np.ndarray:
-        del policy_leg_pos
-        return np.array(
-            [
-                0.00571868, 0.608813, -1.21763,
-                -0.00571868, 0.608813, -1.21763,
-                0.00571868, 0.608813, -1.21763,
-                -0.00571868, 0.608813, -1.21763,
-            ],
-            dtype=np.float64,
+        return require_finite_vector(
+            policy_leg_pos,
+            size=LEG_DOF,
+            name="policy_ready_leg_pos",
         )
 
     def _build_pre_getup_leg_pos(self, stand_target_leg_pos: np.ndarray) -> np.ndarray:
@@ -1273,12 +1270,43 @@ class WBCNodeLeg12ArmPassthrough(Node):
             self.can_owner_lock = None
 
     def low_level_control_active(self) -> bool:
-        return (
+        requested_control = (
             self.start_policy
             or self.align_to_policy_active
             or self.pose_test_active
             or self.start_time != -1.0
         )
+        passive_control = (
+            self.uses_internal_standup
+            and self.latest_tick != -1
+            and not self.safety_stop_reason
+        )
+        return requested_control or passive_control
+
+    def set_passive_lowcmd_from_state(self) -> None:
+        current_leg_q = require_finite_vector(
+            self.quadruped_q,
+            size=LEG_DOF,
+            name="passive_current_leg_q",
+        )
+        for i in range(LEG_DOF):
+            self.motor_cmd[i].q = float(current_leg_q[i])
+            self.motor_cmd[i].dq = 0.0
+            self.motor_cmd[i].tau = 0.0
+            self.motor_cmd[i].kp = 0.0
+            self.motor_cmd[i].kd = float(self.passive_leg_kd[i])
+        self.quadruped_kp[:] = 0.0
+        self.quadruped_kd[:] = self.passive_leg_kd
+        self.latest_lowcmd_leg_q_hw = current_leg_q.copy()
+        self.latest_lowcmd_leg_q_policy = self.interface_to_policy_leg_order(
+            current_leg_q
+        )
+        self.cmd_msg.motor_cmd = self.motor_cmd.copy()
+        if not self.passive_command_started:
+            logging.info(
+                "Passive control active: tracking current leg pose with Kp=0 Kd=3"
+            )
+            self.passive_command_started = True
 
     def publish_safety_estop(self, *, repeat: bool = False) -> None:
         count = self.estop_repeat_count if repeat else 1
@@ -1546,20 +1574,6 @@ class WBCNodeLeg12ArmPassthrough(Node):
             self.last_height_scan_diag_log_time = now
         return scan
 
-    def set_runtime_leg_offset(self, leg_offset: np.ndarray, source: str):
-        leg_offset = np.asarray(leg_offset, dtype=np.float64)
-        if leg_offset.shape[0] != LEG_DOF:
-            raise RuntimeError(f"Expected {LEG_DOF} leg offsets, got {leg_offset.shape[0]}")
-        self.leg_action_offset = leg_offset.copy()
-        self.obs_dof_pos_offset[:LEG_DOF] = leg_offset.copy()
-        logging.info(
-            "Runtime leg offset update | source=%s leg_action_offset=%s"
-            % (
-                source,
-                np.array2string(self.leg_action_offset, precision=3, floatmode="fixed"),
-            )
-        )
-
     @property
     def uses_unitree_standup(self) -> bool:
         return self.standup_mode in {"unitree_auto", "unitree_standup", "unitree_recoverystand"}
@@ -1595,11 +1609,9 @@ class WBCNodeLeg12ArmPassthrough(Node):
             return "RecoveryStand"
         if self.standup_mode == "unitree_standup":
             return "StandUp"
-        if self.standup_mode == "manual":
-            return "manual stand-up"
         if self.standup_mode == "pose_test":
             return "pose test"
-        return "unitree_mujoco get-up"
+        return "internal FixStand"
 
     def sport_state_cb(self, msg: SportModeState):
         self.sport_mode = int(msg.mode)
@@ -1700,9 +1712,6 @@ class WBCNodeLeg12ArmPassthrough(Node):
             ready_error <= self.internal_skip_crouch_max_error
             or ready_error < crouch_error
         )
-        if self.internal_direct_stand_active and self.live_ready_pose_calibration:
-            self.set_runtime_leg_offset(self.init_leg_pos, "r1_current_standing_pose")
-            ready_error = 0.0
         lowstate = self.get_arm_joint_state()
         self.init_arm_pos = lowstate.pos().copy()
         self.sync_arm_command_filter(self.init_arm_pos, "r1_start")
@@ -1710,13 +1719,13 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.start_time = time.monotonic()
         if self.internal_direct_stand_active:
             logging.info(
-                "Internal ready-pose alignment: current posture is standing-like "
+                "Internal FixStand: current posture is standing-like "
                 "(ready_error=%.3f, crouch_error=%.3f); skipping crouch phase"
                 % (ready_error, crouch_error)
             )
         else:
             logging.info(
-                "Internal stand-up: current posture is not near stand target "
+                "Internal FixStand: current posture is not near policy ready pose "
                 "(ready_error=%.3f, crouch_error=%.3f); running full get-up sequence"
                 % (ready_error, crouch_error)
             )
@@ -1762,11 +1771,6 @@ class WBCNodeLeg12ArmPassthrough(Node):
         if not self.is_arm_state_ready_for_rl():
             return
         current_leg_q = self.interface_to_policy_leg_order(self.quadruped_q).copy()
-        if (
-            self.standup_mode == "manual"
-            and self.live_ready_pose_calibration
-        ):
-            self.set_runtime_leg_offset(current_leg_q, "l2_current_standing_pose")
         self.align_to_policy_active = True
         self.align_to_policy_start_time = time.monotonic()
         self.align_to_policy_leg_start = current_leg_q.copy()
@@ -1788,7 +1792,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.last_policy_block_log_time = -1.0
         self.last_startup_action_limit_log_time = -1.0
         logging.info(
-            "Starting dog-only startup before rollout; command ramp %s -> %s over %.2fs"
+            "Validating FixStand before rollout; command ramp %s -> %s over %.2fs"
             % (
                 self.policy_takeover_commands.tolist(),
                 self.policy_move_commands.tolist(),
@@ -1912,7 +1916,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
         provider = self.wireless_command_provider
         logging.info(
             "Joystick input received before policy | axes=%s mapped_cmd=%s "
-            "formula=[vx=%+d*%s*%.3f, vy=%+d*%s*%.3f, yaw=%+d*%s*%.3f] "
+            "mapping=[vx_sign=%+d vx_axis=%s vx_range=%.3f..%.3f, "
+            "vy=%+d*%s*%.3f, yaw=%+d*%s*%.3f] "
             "deadzone=%.3f valid=%s reason=%s"
             % (
                 axes,
@@ -1923,6 +1928,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
                 ),
                 provider.vx_sign,
                 provider.vx_axis,
+                provider.min_vx,
                 provider.max_vx,
                 provider.vy_sign,
                 provider.vy_axis,
@@ -2673,7 +2679,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
                 logging.info("standing up")
                 self.start()
             else:
-                logging.info("Manual stand-up mode: use the controller to stand the robot up, then press L2")
+                logging.info("R1 is unused in pose-test mode")
 
         if self.button_pressed_once(keys, BUTTON_R2, now):
             logging.info("Stop policy")
@@ -2969,6 +2975,14 @@ class WBCNodeLeg12ArmPassthrough(Node):
             return
         if not self.check_runtime_control_gates():
             return
+        if (
+            self.uses_internal_standup
+            and not self.start_policy
+            and not self.align_to_policy_active
+            and not self.pose_test_active
+            and self.start_time == -1.0
+        ):
+            self.set_passive_lowcmd_from_state()
         if not self.lowcmd_is_finite():
             return
         self.cmd_msg.crc = get_crc(self.cmd_msg)
@@ -3018,7 +3032,9 @@ class WBCNodeLeg12ArmPassthrough(Node):
         if self.pose_test_active:
             return "pose_test"
         if self.start_time != -1.0:
-            return "standup"
+            return "fixstand"
+        if self.uses_internal_standup and self.latest_tick != -1:
+            return "passive"
         return "idle"
 
     def log_arm_diag(self, target_arm_q: np.ndarray, smoothed_arm_q: np.ndarray):
@@ -3356,7 +3372,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
                 )
                 wbc_action[:12] = _blend_arrays(
                     self.init_leg_pos,
-                    self.leg_action_offset,
+                    self.stand_target_leg_pos,
                     direct_ratio,
                 )
                 getup_kp = self.getup_stand_kp.copy()
@@ -3819,7 +3835,6 @@ class WBCNodeLeg12ArmPassthrough(Node):
             + f" mcf_release_confirmed: {self.mcf_release_confirmed},"
             + f" lowstate_watchdog_sec: {self.lowstate_watchdog_sec},"
             + f" sport_state_watchdog_sec: {self.sport_state_watchdog_sec},"
-            + f" live_ready_pose_calibration: {self.live_ready_pose_calibration},"
             + f" fixed_gripper_cmd: {self.fixed_gripper_cmd}"
         )
         return None

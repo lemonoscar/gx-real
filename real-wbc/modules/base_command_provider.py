@@ -65,6 +65,7 @@ class WirelessJoystickCommandProvider:
         yaw_axis: str = "rx",
         yaw_sign: int = -1,
         deadzone: float = 0.12,
+        min_vx: float = 0.20,
         max_vx: float = 0.50,
         max_vy: float = 0.20,
         max_yaw: float = 0.50,
@@ -77,7 +78,14 @@ class WirelessJoystickCommandProvider:
         self.yaw_axis = _validate_axis(yaw_axis, "yaw_axis")
         self.yaw_sign = _validate_sign(yaw_sign, "yaw_sign")
         self.deadzone = _nonnegative_float(deadzone, "deadzone")
+        if self.deadzone >= 1.0:
+            raise ValueError(f"deadzone must be < 1, got {self.deadzone!r}")
+        self.min_vx = _nonnegative_float(min_vx, "min_vx")
         self.max_vx = _nonnegative_float(max_vx, "max_vx")
+        if self.min_vx > self.max_vx:
+            raise ValueError(
+                f"min_vx must be <= max_vx, got {self.min_vx!r} > {self.max_vx!r}"
+            )
         self.max_vy = _nonnegative_float(max_vy, "max_vy")
         self.max_yaw = _nonnegative_float(max_yaw, "max_yaw")
         self.watchdog_sec = _positive_float(watchdog_sec, "watchdog_sec")
@@ -111,7 +119,7 @@ class WirelessJoystickCommandProvider:
         )
 
     def axes_centered(self) -> bool:
-        return all(abs(value) < self.deadzone for value in self.axes.values())
+        return all(abs(value) <= self.deadzone for value in self.axes.values())
 
     def update(self, now: Optional[float] = None) -> BaseCommand:
         stamp = time.monotonic() if now is None else float(now)
@@ -137,7 +145,11 @@ class WirelessJoystickCommandProvider:
                 reason="wirelesscontroller_stale",
             )
 
-        vx = self.vx_sign * self._axis(self.vx_axis) * self.max_vx
+        vx = self.vx_sign * self._axis_speed(
+            self.vx_axis,
+            self.min_vx,
+            self.max_vx,
+        )
         vy = self.vy_sign * self._axis(self.vy_axis) * self.max_vy
         yaw_rate = self.yaw_sign * self._axis(self.yaw_axis) * self.max_yaw
         return BaseCommand(
@@ -151,9 +163,23 @@ class WirelessJoystickCommandProvider:
 
     def _axis(self, axis_name: str) -> float:
         value = self.axes[axis_name]
-        if abs(value) < self.deadzone:
+        if abs(value) <= self.deadzone:
             return 0.0
         return value
+
+    def _axis_speed(
+        self,
+        axis_name: str,
+        min_speed: float,
+        max_speed: float,
+    ) -> float:
+        value = self.axes[axis_name]
+        magnitude = abs(value)
+        if magnitude <= self.deadzone or max_speed == 0.0:
+            return 0.0
+        active_ratio = (magnitude - self.deadzone) / (1.0 - self.deadzone)
+        speed = min_speed + active_ratio * (max_speed - min_speed)
+        return math.copysign(speed, value)
 
 
 class CommandSafetyFilter:

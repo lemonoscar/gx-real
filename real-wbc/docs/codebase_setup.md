@@ -138,15 +138,15 @@ scripts/run_leg12_real.sh \
 启动后手柄流程：
 
 1. 看到 `Deploy node ready`。
-2. 按 `R1`：启动 internal 起身；如果狗已经站好，会尽量按当前站姿做小幅对齐。
+2. 节点收到 LowState 后会持续发送 `Kp=0, Kd=3` 的 Passive 命令；按 `R1` 进入 internal FixStand，并平滑运动到 policy ready pose。
 3. 等待起身结束。
-4. 按 `L2`：启动低层对齐并进入 RL rollout。
+4. 按 `L2`：确认 FixStand 跟踪误差后直接进入 RL rollout。
 
 按键说明：
 
 - `L1`：紧急停止。
-- `R1`：internal 起身。
-- `L2`：起身结束后启动 policy；rollout 中再次按下可恢复配置的速度命令。
+- `R1`：从 Passive 进入 internal FixStand。
+- `L2`：FixStand 结束后启动 policy；rollout 中再次按下可恢复配置的速度命令。
 - `A`：机械臂去 `--button-arm-pose`。
 - `X`：机械臂回 `--arm-reset-pose`。
 - `Y`：底盘 command 平滑切到 `0 0 0`，policy 保持运行。
@@ -179,7 +179,7 @@ scripts/run_leg12_real.sh \
 --leg-kd 10
 ```
 
-这组增益用于 internal 起身、低层对齐和 policy rollout。实际下发值会在启动日志里打印为 `commanded_leg_kp`、`commanded_leg_kd`、`deploy_policy_kp`、`deploy_policy_kd`。
+这组增益用于 internal FixStand 和 policy rollout；Passive 固定使用 `Kp=0, Kd=3`。实际下发值会在启动日志里打印为 `commanded_leg_kp`、`commanded_leg_kd`、`deploy_policy_kp`、`deploy_policy_kd`。
 
 ### 机械臂初始化
 

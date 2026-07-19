@@ -35,12 +35,34 @@ def test_joystick_deadzone_zeros_small_drift():
     assert provider.update(now=1.01).as_tuple() == (0.0, 0.0, 0.0)
 
 
+@pytest.mark.parametrize(
+    ("ly", "expected_vx"),
+    [
+        (0.10, 0.0),
+        (0.100001, 0.20),
+        (0.55, 0.35),
+        (1.0, 0.50),
+        (-0.55, -0.35),
+        (-1.0, -0.50),
+    ],
+)
+def test_joystick_vx_maps_active_travel_from_minimum_to_maximum(ly, expected_vx):
+    provider = WirelessJoystickCommandProvider(
+        deadzone=0.10,
+        min_vx=0.20,
+        max_vx=0.50,
+    )
+    provider.update_wireless(lx=0.0, ly=ly, rx=0.0, ry=0.0, stamp=1.0)
+    assert provider.update(now=1.01).vx == pytest.approx(expected_vx, abs=1e-6)
+
+
 def test_joystick_axis_sign_and_scale_are_parameterized():
     provider = WirelessJoystickCommandProvider(
         vx_axis="ly",
         vx_sign=-1,
+        min_vx=0.0,
         max_vx=0.3,
-        deadzone=0.10,
+        deadzone=0.0,
     )
     provider.update_wireless(lx=0.0, ly=-0.8, rx=0.0, ry=0.0, stamp=1.0)
     assert provider.update(now=1.01).vx == pytest.approx(0.24)
@@ -54,12 +76,12 @@ def test_joystick_clips_axis_before_scaling():
 
 def test_acceleration_limit_bounds_command_step():
     provider = WirelessJoystickCommandProvider(max_vx=0.3, deadzone=0.0)
-    provider.update_wireless(lx=0.0, ly=-1.0, rx=0.0, ry=0.0, stamp=1.0)
+    provider.update_wireless(lx=0.0, ly=1.0, rx=0.0, ry=0.0, stamp=1.0)
     raw = provider.update(now=1.0)
     safety = CommandSafetyFilter(acc_vx=0.3, acc_vy=0.3, acc_yaw=0.6)
     safety.reset((0.0, 0.0, 0.0), now=1.0)
     safe = safety.update(raw, _open_gate(), axes_centered=False, now=1.02)
-    assert safe.vx <= 0.006 + 1e-12
+    assert 0.0 < safe.vx <= 0.006 + 1e-12
 
 
 def test_watchdog_invalidates_stale_wireless_input():
@@ -76,7 +98,7 @@ def test_y_inhibit_holds_until_axes_return_to_deadzone():
     safety = CommandSafetyFilter(acc_vx=10.0, acc_vy=10.0, acc_yaw=10.0)
     gate = _open_gate()
 
-    provider.update_wireless(lx=0.0, ly=-0.5, rx=0.0, ry=0.0, stamp=1.0)
+    provider.update_wireless(lx=0.0, ly=0.5, rx=0.0, ry=0.0, stamp=1.0)
     moving = safety.update(provider.update(now=1.0), gate, axes_centered=False, now=1.0)
     assert moving.vx > 0.0
 
@@ -93,7 +115,7 @@ def test_y_inhibit_holds_until_axes_return_to_deadzone():
     released = safety.update(provider.update(now=1.3), gate, axes_centered=True, now=1.3)
     assert released.inhibited is False
 
-    provider.update_wireless(lx=0.0, ly=-0.5, rx=0.0, ry=0.0, stamp=1.4)
+    provider.update_wireless(lx=0.0, ly=0.5, rx=0.0, ry=0.0, stamp=1.4)
     moving_again = safety.update(provider.update(now=1.4), gate, axes_centered=False, now=1.4)
     assert moving_again.vx > 0.0
 

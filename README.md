@@ -11,7 +11,7 @@
 - X5/ARX5 机械臂：由 `scripts/run_spacemouse_arm.sh` 启动的独立 SpaceMouse Arm 节点控制；WBC 只订阅 `/arm/state` 和 `/arm/target_state` 填 observation。
 - Go2 通信：ROS2 `lowstate/lowcmd`，并使用 Unitree DDS/ROS2 消息包。
 - X5 通信：SocketCAN `can0` + `arx5_interface`，只允许 SpaceMouse Arm 节点打开写控制。
-- 控制流程：先通过 `MotionSwitcherClient::ReleaseMode()` 释放 Go2 MCF，再由 `R1` 起身，最后由 `L2` 进入低层 policy rollout。
+- 控制流程：先通过 `MotionSwitcherClient::ReleaseMode()` 释放 Go2 MCF；节点收到 LowState 后进入持续 Passive 阻尼，由 `R1` 切到 FixStand 并站到 policy ready pose，最后由 `L2` 进入低层 policy rollout。
 - SpaceMouse：单独运行 Arm 节点，默认使用 raw SpaceMouse 输入，经显式 axis/sign/scale 参数映射后直接控制 X5，并发布 arm state/target topic。
 
 主入口链路：
@@ -361,23 +361,25 @@ Deploy node ready
 
 按键顺序：
 
-1. 按 `R1`：启动 internal 起身。如果当前姿态已经接近站姿，程序会尽量跳过预蹲阶段，并用当前站姿校准本次运行的 policy ready/action/obs offset。
+1. `Deploy node ready` 后，节点会持续发送当前关节位置的 Passive 命令（`Kp=0, Kd=3`）。按 `R1` 启动 internal FixStand；如果当前姿态已经接近 policy ready pose，程序会跳过预蹲阶段并平滑对齐到该固定姿态。
 2. 等狗稳定站住。
-3. 按 `L2`：启动低层对齐，然后进入 RL rollout。
+3. 按 `L2`：确认 FixStand 跟踪误差满足要求后直接进入 RL rollout，不再执行第二段站姿对齐。
 
 手柄按键：
 
-- `R1`：启动 internal 起身。
-- `L2`：起身完成后启动低层对齐和 policy；fixed 模式 rollout 中再次按下会恢复配置的移动命令。
+- `R1`：从 Passive 进入 internal FixStand。
+- `L2`：FixStand 完成后进入 policy；fixed 模式 rollout 中再次按下会恢复配置的移动命令。
 - `Y`：底盘 command 平滑切到 `0 0 0`，policy 保持运行；joystick 模式下会 inhibit 到摇杆全部回中。
 - `R2`：停止 policy。
 - `L1`：紧急停止并退出。
 - `A/B/X/↑/↓`：默认 no-op，不再影响机械臂。机械臂动作只来自独立 SpaceMouse Arm 节点。
 
+真机入口只保留 `--standup-mode internal`；`pose_test` 仅用于静态诊断，`manual` 和 Unitree/MCF 外部起身模式不再接受。
+
 底盘 command 来源：
 
 - 默认 `--base-command-source fixed`，继续使用 `--cmd-vx/--cmd-vy/--cmd-yaw`。
-- 可选 `--base-command-source wireless_joystick`，左摇杆/右摇杆映射由 `--joy-*-axis` 和 `--joy-*-sign` 显式配置，并带 deadzone、速度上限、加速度限制、watchdog 和 `Y` inhibit。
+- 可选 `--base-command-source wireless_joystick`，默认前后速度在摇杆越过 deadzone 后从 `0.2 m/s` 起步，随有效行程连续变化，到满推时达到 `0.5 m/s`。可通过 `--joy-min-vx/--joy-max-vx` 调整；轴和方向由 `--joy-*-axis/--joy-*-sign` 显式配置。
 
 ## 7. 控制架构
 
@@ -420,7 +422,7 @@ SpaceMouse raw input
 - Go2 `LowCmd` 下发和 CRC。
 - `/arm/state` 和 `/arm/target_state` 订阅，用于机械臂 observation。
 - 手柄启动、停止、急停。
-- internal 起身和低层对齐。
+- Passive、internal FixStand 和 policy 接管。
 - policy 日志和运行日志落盘。
 
 ## 8. Policy 契约
@@ -580,7 +582,7 @@ ros2 topic echo lf/sportmodestate
 每次运行会在 `logs/YYYYMMDD_HHMMSS/run.log` 下保存日志。重点看这些日志：
 
 - `Runtime targets`：启动参数是否被正确读取，尤其是 `base_command_source`、`arm_control_owner`、`arm_hold_pose`、`commanded_leg_kp/kd`。
-- `Runtime leg offset update`：`R1` 后是否使用当前站姿做 runtime offset。
+- `Runtime targets` 中的 `leg_action_offset`：它同时是 FixStand 终点和 policy ready pose。
 - `Policy diag`：policy 输出、clip、命令、低层目标、真实关节、误差和足端力。
 - `Arm observation stale`：WBC 是否收到新鲜 `/arm/state` 和 `/arm/target_state`。
 - `Pose test diag`：只验证关节目标跟踪时使用。

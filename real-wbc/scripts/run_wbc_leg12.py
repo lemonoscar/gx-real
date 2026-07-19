@@ -102,6 +102,7 @@ if __name__ == "__main__":
     parser.add_argument("--joy-yaw-axis", choices=["lx", "ly", "rx", "ry"], default="rx")
     parser.add_argument("--joy-yaw-sign", type=int, choices=[-1, 1], default=-1)
     parser.add_argument("--joy-deadzone", type=float, default=0.12)
+    parser.add_argument("--joy-min-vx", type=float, default=0.20)
     parser.add_argument("--joy-max-vx", type=float, default=0.50)
     parser.add_argument("--joy-max-vy", type=float, default=0.20)
     parser.add_argument("--joy-max-yaw", type=float, default=0.50)
@@ -218,16 +219,6 @@ if __name__ == "__main__":
     parser.add_argument("--estop-repeat-count", type=int, default=5)
     parser.add_argument("--estop-repeat-period-sec", type=float, default=0.02)
     parser.add_argument(
-        "--no-live-ready-calibration",
-        dest="live_ready_pose_calibration",
-        action="store_false",
-        default=True,
-        help=(
-            "Do not use the current standing leg pose as the runtime policy ready/action "
-            "offset when R1 is pressed in internal mode."
-        ),
-    )
-    parser.add_argument(
         "--logging-dir",
         type=str,
         default=os.environ.get("GX_REAL_LOG_DIR", DEFAULT_LOG_DIR),
@@ -238,11 +229,7 @@ if __name__ == "__main__":
         type=str,
         default="internal",
         choices=[
-            "manual",
             "pose_test",
-            "unitree_auto",
-            "unitree_recoverystand",
-            "unitree_standup",
             "internal",
         ],
     )
@@ -251,15 +238,6 @@ if __name__ == "__main__":
         parser.error(
             "MCF release is not confirmed; start production control with "
             "scripts/run_leg12_real.sh"
-        )
-    if args.standup_mode in {
-        "unitree_auto",
-        "unitree_recoverystand",
-        "unitree_standup",
-    }:
-        parser.error(
-            "Unitree stand-up modes require the built-in controller, which is unavailable "
-            "after mandatory MCF release; use --standup-mode internal, manual, or pose_test"
         )
     args.mcf_release_confirmed = True
     run_log_dir = configure_logging(args.logging_dir)
