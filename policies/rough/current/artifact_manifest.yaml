@@ -5,17 +5,17 @@ git_commit: UNSET
 dirty_worktree_policy: REJECT
 policy:
   path: policies/rough/current/policy.onnx
-  sha256: 04b5b2d631b12dcb762c7e63242ec86499738acc7d5c9684ed4a614dc60e6970
+  sha256: 0a1244d1dd2bca0bf7754e593d6fb973876c9514ac79bf8be17240773fd72840
 environment_config:
   path: policies/rough/current/env.yaml
-  sha256: d0f99275b86c169d1f6bc6a88d3b199fc7975337c6fbd44fd520d4257ad1bf07
+  sha256: bbf9c77c05f57cff660a04faae6f23dd8e19d020524c1b60844c11c004a7db25
 height_observation:
   mode: live_elevation_map
   dimension: 187
   slice: [66, 253]
 height_scan_contract:
   path: policies/rough/current/height_scan_contract.yaml
-  sha256: 27362da18130687caf2b0e360fb286dfa9f8ae0c41bfcf7dba326e502d2826e7
+  sha256: 27bcc54c0a213b2f446f709d9043b9224b500ed49952ad63bf1438864f2615a0
 height_scan_grid:
   path: policies/rough/current/height_scan_contract.npz
   sha256: ae080f65fd278f6ae1e36485aa22eadc3702515aac2372352343f64a680db260
@@ -24,22 +24,22 @@ height_scan_reference:
   sha256: ae080f65fd278f6ae1e36485aa22eadc3702515aac2372352343f64a680db260
 policy_reference:
   path: policies/rough/current/policy_reference.npz
-  sha256: 427423e41d73b89a51564f18250f38325c6c99aba3e2fbcda4e6474644a6088a
+  sha256: a16540904763c51256bf2cfbc80260cd1bae53baab859f2c6f98b01847be1a3a
 policy_torchscript:
   path: policies/rough/current/policy.pt
-  sha256: a441d2b626f50d218fb65352023125b5208a90dc5eca9a18b8a797c6736406b7
+  sha256: ab44e1f3f118340f7aa03ec63eec8b9fd4222cff5236f11a15599eb9cb0b10b2
 perception_contract:
   path: policies/rough/current/perception_contract.yaml
   sha256: 451ae99746184e5c58047f5ebb416771686b28d3215ff9d353544b032791a9e7
 training_checkpoint:
-  path: policies/rough/current/model_29500.pt
-  sha256: 6b257727fafb8c84d7b449bb389a61d24aff4cdaaa853ad83fe9627a2db77cfd
+  path: policies/rough/current/model_37500.pt
+  sha256: abf4404d717e19436479f467fa1f39dad8a9f29e7d3624897861d0cc360beb3b
 training_agent_config:
   path: policies/rough/current/agent.yaml
-  sha256: a8c47b8c8595f6c355ae59eeb4a22f8099b7d71d23c06f2c70ab3868ae664cb9
+  sha256: a04d5e38e1607cd8f15586969d825bbc24ff681289037c8d82c582ffe753595e
 export_metadata:
   path: policies/rough/current/export_metadata.json
-  sha256: c3364775e6b901520df3f0dd7b2ad8617f2ffffc771ad0f61556ca14d34fcb40
+  sha256: 0c2fe024b9870ba6a2fe2850368bf1b1be7feba83ef12cb37405b63e8181488e
 expected_observation_shape: [260]
 expected_action_shape: [12]
 expected_joint_order:

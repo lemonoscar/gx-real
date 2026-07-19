@@ -8,14 +8,17 @@
 - 本机：`x86_64` 开发机；本轮未连接 Go2、未创建 LowCmd publisher、未打开 X5 CAN controller、未运行真实 ROS2 控制节点。
 - 当前真机放行：**NO**。Flat/Rough manifest 均为 `UNRELEASED`，Rough perception contract 和 Go2 leg safety contract 均未验证。
 
+2026-07-19 更新：Rough `current/` 已从 checkpoint 29500 更新为 Go2-X5-lab R1
+regular-ascent repair `model_37500.pt`。更新仅通过本机离线合同验证，不改变上述真机放行结论。
+
 ## 已完成的软件侧收口
 
 1. Flat/Rough 使用不同 Python、Shell、配置、policy bundle 和 manifest 入口；旧 `run_leg12_real.sh` 固定拒绝策略类别不明确的启动。
 2. Flat 的 187D height slice 由代码直接生成精确零，且不创建 height provider。
 3. Rough 生产只接受 `grid_map_msgs/msg/GridMap` 的 `elevation` layer；严格解析列主序、x/y buffer 轴和 circular start index，并验证 source age、pose/map stamp skew、frame、finite、coverage、critical sentinel 和连续健康帧。Unitree HeightMap/直接点云均为 diagnostic-only，fallback 永远不能获得 motion permit。
 4. 感知 stale/fallback 会清零连续健康帧，恢复后必须重新累计 5 帧。
-5. Rough checkpoint 29500 已重新导出；ONNX 输入/输出为 260/12，10 cm 台阶造成非零动作响应。
-6. 新增 `policy_reference.npz`：期望动作来自 checkpoint/Torch，ONNX 重放最大误差约 `5.36e-7`。
+5. Rough checkpoint 37500 已重新导出；ONNX 输入/输出为 260/12，10 cm 台阶造成非零动作响应。
+6. `policy_reference.npz` 的期望动作来自 checkpoint/Torch，ONNX 重放最大误差约 `9.54e-7`。
 7. Rough manifest 逐项哈希 ONNX、TorchScript、checkpoint、agent/env、height YAML/NPZ、仿真 reference、policy reference、perception contract 和 export metadata。
 8. Rough 发布门要求 perception contract 为 `VERIFIED`，且 LiDAR/固件/外参/self-filter/mapping 字段不能为 `UNSET/UNKNOWN/UNVERIFIED`。
 9. X5 生产 owner 改为策略训练姿态的 `x5_fixed_hold`；生产 WBC 拒绝 SpaceMouse motion、错误 arm pose、无 freshness 和错误 producer。
@@ -31,11 +34,11 @@
 使用临时 `/tmp` ONNX Runtime 环境，不修改 Jetson/系统依赖：
 
 ```text
-pytest: 178 passed, 0 failed, 0 skipped
+pytest: 218 passed, 0 failed, 0 skipped
 Flat contract: PASS, input 260, output 12
 Rough contract: PASS, input 260, output 12
-Rough 10 cm sensitivity: max_action_delta=0.249644
-Torch/ONNX reference parity: max_abs_error≈0.00000054
+Rough 10 cm sensitivity: max_action_delta=0.232790
+Torch/ONNX reference parity: max_abs_error≈0.00000095
 GridMap/Isaac reference parity: 187D max_abs_error<0.000001
 hardware writer inventory: 32 candidate files, all classified
 Python compile / bash -n / git diff --check: PASS

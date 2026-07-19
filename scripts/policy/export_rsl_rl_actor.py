@@ -27,6 +27,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--agent-yaml", required=True)
     parser.add_argument("--output-dir", required=True)
+    parser.add_argument("--expected-iteration", type=int, required=True)
     parser.add_argument("--expected-input-dim", type=int, default=260)
     parser.add_argument("--expected-output-dim", type=int, default=12)
     parser.add_argument(
@@ -98,8 +99,10 @@ def main() -> None:
 
     agent = load_agent_config(agent_path)
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    if int(checkpoint.get("iter", -1)) != 29500:
-        raise RuntimeError(f"expected iteration 29500, got {checkpoint.get('iter')!r}")
+    if int(checkpoint.get("iter", -1)) != args.expected_iteration:
+        raise RuntimeError(
+            f"expected iteration {args.expected_iteration}, got {checkpoint.get('iter')!r}"
+        )
     state = checkpoint.get("model_state_dict")
     if not isinstance(state, dict):
         raise RuntimeError("checkpoint is missing model_state_dict")
@@ -133,7 +136,7 @@ def main() -> None:
 
     onnx.checker.check_model(onnx.load(str(onnx_path)))
     session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
-    rng = np.random.default_rng(29500)
+    rng = np.random.default_rng(args.expected_iteration)
     parity_input = rng.standard_normal((8, args.expected_input_dim)).astype(np.float32)
     with torch.inference_mode():
         torch_output = actor(torch.from_numpy(parity_input)).numpy()
@@ -206,7 +209,7 @@ def main() -> None:
         "schema_version": 1,
         "checkpoint": checkpoint_path.name,
         "agent_config": agent_path.name,
-        "checkpoint_iteration": 29500,
+        "checkpoint_iteration": args.expected_iteration,
         "checkpoint_sha256": sha256_file(checkpoint_path),
         "agent_config_sha256": sha256_file(agent_path),
         "input_dim": args.expected_input_dim,

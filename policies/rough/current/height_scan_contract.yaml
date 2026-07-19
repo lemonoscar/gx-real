@@ -1,9 +1,9 @@
 version: 1
-task: RobotLab-Isaac-Velocity-Rough-Go2-X5-DogOnlyHard-v0
+task: RobotLab-Isaac-Velocity-Rough-Go2-X5-DogOnlyPctRegularAscentRepair-v0
 policy_kind: rough
-checkpoint_iteration: 29500
-checkpoint_sha256: 6b257727fafb8c84d7b449bb389a61d24aff4cdaaa853ad83fe9627a2db77cfd
-environment_config_sha256: d0f99275b86c169d1f6bc6a88d3b199fc7975337c6fbd44fd520d4257ad1bf07
+checkpoint_iteration: 37500
+checkpoint_sha256: abf4404d717e19436479f467fa1f39dad8a9f29e7d3624897861d0cc360beb3b
+environment_config_sha256: bbf9c77c05f57cff660a04faae6f23dd8e19d020524c1b60844c11c004a7db25
 grid_source: saved env height_scanner GridPattern(resolution=0.1,size=[1.6,1.0],ordering=xy)
 obs_dim: 260
 output_dim: 12
@@ -37,7 +37,7 @@ height_scan:
 reference:
   path: height_scan_reference.npz
   source: isaac_lab_runtime
-  note: Same 17x11 live RayCaster contract; production release still requires target-hardware perception parity.
+  note: R1 preserves the captured 17x11 live RayCaster grid and observation slices; production release still requires target-hardware perception parity.
 policy:
   input_dim: 260
   output_dim: 12
