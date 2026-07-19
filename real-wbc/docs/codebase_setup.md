@@ -138,13 +138,13 @@ scripts/run_leg12_real.sh \
 1. 看到 `Deploy node ready`。
 2. 节点收到 LowState 后会持续发送 `Kp=0, Kd=3` 的 Passive 命令；按 `R1` 进入 internal FixStand，并平滑运动到 policy ready pose。
 3. 等待起身结束。
-4. 按 `L2`：确认 FixStand 跟踪误差后直接进入 RL rollout。
+4. 机器人稳定后按 `L2`：以当前实测 FixStand 姿态进入 1.2 秒零速度 policy handover，完成后再平滑启用配置速度。
 
 按键说明：
 
 - `L1`：紧急停止。
 - `R1`：从 Passive 进入 internal FixStand。
-- `L2`：FixStand 结束后启动 policy；rollout 中再次按下可恢复配置的速度命令。
+- `L2`：FixStand 稳定后从当前实测姿态启动零速度 policy handover；rollout 中再次按下可恢复配置的速度命令。
 - `A`：机械臂去 `--button-arm-pose`。
 - `X`：机械臂回 `--arm-reset-pose`。
 - `Y`：底盘 command 平滑切到 `0 0 0`，policy 保持运行。
@@ -170,9 +170,14 @@ scripts/run_leg12_real.sh \
 
 ### 腿部增益
 
-腿部 active PD 不提供命令行覆盖。程序会从与 `policy.onnx` 配套的 `policies/env.yaml` actuator 配置逐关节读取 stiffness/damping，同一组值用于 internal FixStand、handover 和 policy rollout。当前固定模型包为 `Kp=40, Kd=1`。
+腿部 PD 不提供命令行覆盖，并按状态分开：
 
-Passive 固定使用 `Kp=0, Kd=3`，只在 active control 启动前提供阻尼。启动日志 `Training leg PD loaded` 会打印配置来源及实际值；`commanded_leg_kp/kd`、`deploy_policy_kp/kd` 也应与之完全一致。
+- Passive：`Kp=0, Kd=3`。
+- internal FixStand：采用 Unitree RL Lab Go2 配置，每条腿髋/大腿/小腿分别为 `Kp=[60,80,80]`、`Kd=[5,4,4]`。
+- policy rollout：从配套 `policies/env.yaml` actuator stiffness/damping 逐关节读取；当前固定模型包为 `Kp=40, Kd=1`。
+- handover：保持零速度，在 1.2 秒内把关节目标和 PD 从实测 FixStand 状态平滑切换到策略输出和训练 PD。
+
+启动日志 `Unitree RL Lab Go2 FixStand PD` 和 `Training leg PD loaded` 会分别打印两组实际值。
 
 ### 机械臂初始化
 

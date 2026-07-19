@@ -307,7 +307,7 @@ scripts/run_leg12_real.sh \
   --arm-reset-pose 0.0 0.5 0.3 0.0 0.0 0.0
 ```
 
-腿部 active PD 不接受命令行覆盖，会从与 `policy.onnx` 配套的 `env.yaml` actuator 配置逐关节读取，并用于 internal FixStand、handover 和 rollout。当前固定模型包读取到 `Kp=40, Kd=1`。Passive 阶段仍固定使用 `Kp=0, Kd=3`，它只负责未启动 active control 时的阻尼。
+腿部 PD 不接受命令行覆盖，并按控制阶段分开：Passive 使用 `Kp=0, Kd=3`；internal FixStand 使用 Unitree RL Lab 的 Go2 逐关节设置，每条腿 `Kp=[60,80,80]`、`Kd=[5,4,4]`；policy rollout 使用与 `policy.onnx` 配套的 `env.yaml` actuator 配置，当前为 `Kp=40, Kd=1`。1.2 秒零速度 handover 会把 PD 从 FixStand 设置平滑切换到训练设置。
 
 第一次验证建议先确认低层接管和关节顺序。`--arm_pose` 现在只是 WBC observation fallback，不会由 WBC 下发给 X5。
 
@@ -363,12 +363,12 @@ Deploy node ready
 
 1. `Deploy node ready` 后，节点会持续发送当前关节位置的 Passive 命令（`Kp=0, Kd=3`）。按 `R1` 启动 internal FixStand；如果当前姿态已经接近 policy ready pose，程序会跳过预蹲阶段并平滑对齐到该固定姿态。
 2. 等狗稳定站住。
-3. 按 `L2`：确认 FixStand 跟踪误差满足要求后直接进入 RL rollout，不再执行第二段站姿对齐。
+3. 机器人稳定后按 `L2`：以当前实测 FixStand 姿态作为 handover 起点，先保持零速度平滑接管 1.2 秒，再用 1.5 秒把固定速度平滑提升到配置值；训练软 PD 的承重静差不会再阻塞接管。
 
 手柄按键：
 
 - `R1`：从 Passive 进入 internal FixStand。
-- `L2`：FixStand 完成后进入 policy；fixed 模式 rollout 中再次按下会恢复配置的移动命令。
+- `L2`：FixStand 稳定后从当前实测姿态进入零速度 policy handover；fixed 模式 rollout 中再次按下会恢复配置的移动命令。
 - `Y`：底盘 command 平滑切到 `0 0 0`，policy 保持运行；joystick 模式下会 inhibit 到摇杆全部回中。
 - `R2`：停止 policy。
 - `L1`：紧急停止并退出。
@@ -583,7 +583,8 @@ ros2 topic echo lf/sportmodestate
 
 - `Policy bundle verified`：当前模型包名称以及 `policy.onnx`、`env.yaml` 的 SHA256。
 - `Training leg PD loaded`：从配套 `env.yaml` 读取到的逐关节训练 PD。
-- `Runtime targets`：启动参数是否被正确读取，尤其是 `base_command_source`、`arm_control_owner`、`arm_hold_pose`、`commanded_leg_kp/kd`。
+- `Unitree RL Lab Go2 FixStand PD`：FixStand 使用的官方逐关节 PD。
+- `Runtime targets`：启动参数是否被正确读取，尤其是 `base_command_source`、`arm_control_owner`、`arm_hold_pose`、`fixstand_leg_kp/kd`、`training_leg_kp/kd`。
 - `Runtime targets` 中的 `leg_action_offset`：它同时是 FixStand 终点和 policy ready pose。
 - `Policy diag`：policy 输出、clip、命令、低层目标、真实关节、误差和足端力。
 - `Arm observation stale`：WBC 是否收到新鲜 `/arm/state` 和 `/arm/target_state`。

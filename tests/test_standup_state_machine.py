@@ -20,6 +20,17 @@ def _node_method_source(name: str) -> str:
     raise AssertionError(f"method not found: {name}")
 
 
+def _node_constant(name: str):
+    tree = ast.parse(NODE_PATH.read_text(encoding="utf-8"))
+    for item in tree.body:
+        if isinstance(item, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == name
+            for target in item.targets
+        ):
+            return ast.literal_eval(item.value)
+    raise AssertionError(f"constant not found: {name}")
+
+
 def test_internal_fixstand_target_is_the_policy_ready_pose() -> None:
     source = NODE_PATH.read_text(encoding="utf-8")
     method = _node_method_source("_build_internal_stand_leg_pos")
@@ -50,13 +61,19 @@ def test_internal_idle_phase_continuously_publishes_current_pose_damping() -> No
     )
 
 
-def test_l2_validates_fixstand_without_a_second_pose_alignment() -> None:
+def test_l2_handover_starts_from_measured_fixstand_pose() -> None:
     source = NODE_PATH.read_text(encoding="utf-8")
     standup = _node_method_source("policy_timer_callback")
 
     assert "self.align_to_policy_duration = 0.0" in source
     assert "self.align_to_policy_hold_time = 0.0" in source
-    assert "max_leg_error > self.policy_start_max_leg_error" in standup
+    assert "policy_start_max_leg_error" not in source
+    assert "Waiting before rollout: startup tracking error" not in standup
+    assert "self.policy_handover_leg_start = self.interface_to_policy_leg_order" in standup
+    assert "self.fixed_commands[:] = self.policy_takeover_commands" in standup
+    assert '"policy_start_handover_hold"' in standup
+    assert "_blend_arrays(base_kp, self.deploy_policy_kp, handover_ratio)" in standup
+    assert "_blend_arrays(base_kd, self.deploy_policy_kd, handover_ratio)" in standup
     assert "self.start_policy = True" in standup
 
 
@@ -72,7 +89,7 @@ def test_production_entry_rejects_manual_external_standup() -> None:
     assert "invalid choice: 'manual'" in result.stderr
 
 
-def test_active_leg_pd_comes_only_from_policy_env() -> None:
+def test_fixstand_and_policy_use_separate_pd_profiles() -> None:
     node = NODE_PATH.read_text(encoding="utf-8")
     entrypoint = ENTRYPOINT_PATH.read_text(encoding="utf-8")
     fixed_launcher = (ROOT / "scripts/run_fixed_03_real.sh").read_text(
@@ -85,6 +102,8 @@ def test_active_leg_pd_comes_only_from_policy_env() -> None:
     assert "--leg-kd" not in fixed_launcher
     assert "leg_kp: float" not in node
     assert "leg_kd: float" not in node
+    assert _node_constant("GO2_FIXSTAND_KP") == (60.0, 80.0, 80.0) * 4
+    assert _node_constant("GO2_FIXSTAND_KD") == (5.0, 4.0, 4.0) * 4
     assert (
         'training_actuator_cfg = self.policy_config["scene"]["robot"]["actuators"]'
         in node
@@ -97,7 +116,8 @@ def test_active_leg_pd_comes_only_from_policy_env() -> None:
         "getup_stand",
         "unitree_takeover",
         "manual_takeover",
-        "deploy_policy",
     ):
-        assert f"self.{profile}_kp = self.commanded_leg_kp.copy()" in node
-        assert f"self.{profile}_kd = self.commanded_leg_kd.copy()" in node
+        assert f"self.{profile}_kp = self.fixstand_leg_kp.copy()" in node
+        assert f"self.{profile}_kd = self.fixstand_leg_kd.copy()" in node
+    assert "self.deploy_policy_kp = self.training_leg_kp.copy()" in node
+    assert "self.deploy_policy_kd = self.training_leg_kd.copy()" in node
