@@ -89,14 +89,22 @@ ros2 topic hz /terrain/elevation_map
 ros2 topic hz /localization/pose
 ```
 
-另一个终端检查 frame 和 TF：
+Foxy 的 `ros2 topic echo` 不支持后续发行版的 `--once/--field` 组合。另一个终端用
+有限超时检查 frame 和 TF：
 
 ```bash
-ros2 topic echo /lidar/points_deskewed --field header --once
-ros2 topic echo /terrain/elevation_map --field header --once
-ros2 topic echo /localization/pose --field header --once
+timeout -s INT 3s ros2 topic echo --no-arr /lidar/points_deskewed
+timeout -s INT 3s ros2 topic echo --no-arr /terrain/elevation_map
+timeout -s INT 3s ros2 topic echo /localization/pose
 ros2 run tf2_ros tf2_echo base_link lidar
 ros2 run tf2_ros tf2_echo odom base_link
+```
+
+也可以一次生成含系统、ROS graph、Unitree LiDAR 状态/固件、topic 频率、样本和 TF 的
+只读报告：
+
+```bash
+scripts/rough_real_ops.sh probe
 ```
 
 所有生产消息必须使用传感器/算法产生的有效时间戳。用接收时刻冒充采样时刻会让
@@ -135,25 +143,29 @@ deskew 和 30 ms map/pose skew 检查失去意义。
 
 ### 4.2 rosbag
 
-根据实际 ROS2 版本确认 `ros2 bag` 可用后，记录原始和派生数据：
+根据实际 ROS2 版本确认 `ros2 bag` 可用后，用统一入口记录原始和派生数据：
+
+若 Foxy mapper 尚未确定，可先保存 Unitree onboard LIO 原始/派生数据，不会要求
+GridMap：
 
 ```bash
-mkdir -p logs/lidar_calibration
-ros2 bag record \
-  -o logs/lidar_calibration/DATE_ROBOT_SCENE \
-  /lidar/points_deskewed \
-  /lidar/imu_raw \
-  /terrain/elevation_map \
-  /localization/pose \
-  /tf \
-  /tf_static
+GX_REAL_ROUGH_RECORD_DURATION=30 \
+  scripts/rough_real_ops.sh record-raw prone_inventory
 ```
 
-将 `DATE_ROBOT_SCENE` 换成真实日期、机器人编号和场景。若驱动还提供未去畸变原始点云，建议
-一并记录并写明 topic。停止后执行：
+这份趴卧数据可用于盘点 topic、频率、固件和静态噪声，不能替代标准站立几何下的
+LiDAR 外参标定。mapper 启动并通过四个生产 topic/两条 TF 检查后，再记录完整数据：
 
 ```bash
-ros2 bag info logs/lidar_calibration/DATE_ROBOT_SCENE
+GX_REAL_ROUGH_RECORD_DURATION=30 \
+  scripts/rough_real_ops.sh record flat_yaw0
+```
+
+把 `flat_yaw0` 换成不含空格的真实场景名；脚本自动附加时间戳、有限时停止并执行
+`ros2 bag info`。若驱动还提供未去畸变原始点云，建议一并记录并写明 topic。需要时再
+执行：
+
+```bash
 sha256sum path/to/lidar_extrinsic.yaml \
   path/to/self_filter.yaml \
   path/to/mapper.yaml
