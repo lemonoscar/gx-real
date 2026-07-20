@@ -7,6 +7,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "real-wbc"))
 
+import modules.spacemouse_arm_node as spacemouse_arm_node  # noqa: E402
 from modules.spacemouse_arm_node import (  # noqa: E402
     SpaceMouseArmNode,
     SpaceMouseMapping,
@@ -261,6 +262,44 @@ def test_estop_damps_and_blocks_future_sends():
     assert node.controller.sent_count == 0
 
 
+def test_controlled_home_request_returns_to_zero_then_damps(monkeypatch):
+    monkeypatch.setattr(spacemouse_arm_node, "ARM_HOME_SETTLE_SEC", 0.0)
+    node = SpaceMouseArmNode.__new__(SpaceMouseArmNode)
+    node.node = _FakeRosNode()
+    node.controller = _FakeHomeController()
+    node.estopped = False
+    node.arm_position_control_enabled = True
+    node.target_joint = np.ones(6, dtype=np.float64)
+    node.target_pose6d = np.ones(6, dtype=np.float64)
+    node.target_gripper = 0.0
+    node.gripper_min = 0.0
+    node.gripper_max = 0.088
+    node.arm_home_topic = "/arm/home"
+
+    node._arm_home_cb(type("Msg", (), {"data": True})())
+
+    assert node.estopped is True
+    assert node.controller.home_count == 1
+    assert node.controller.damping_count == 1
+    assert node.arm_position_control_enabled is False
+    np.testing.assert_allclose(node.target_joint, np.zeros(6))
+
+
+def test_safety_estop_damps_without_commanding_home():
+    node = SpaceMouseArmNode.__new__(SpaceMouseArmNode)
+    node.node = _FakeRosNode()
+    node.controller = _FakeHomeController()
+    node.estopped = False
+    node.arm_position_control_enabled = True
+    node.safety_topic = "/safety/estop"
+
+    node._safety_estop_cb(type("Msg", (), {"data": True})())
+
+    assert node.estopped is True
+    assert node.controller.home_count == 0
+    assert node.controller.damping_count == 1
+
+
 def test_spacemouse_watchdog_holds_without_damping():
     node = SpaceMouseArmNode.__new__(SpaceMouseArmNode)
     node.node = _FakeRosNode()
@@ -489,6 +528,18 @@ class _FakeController:
     def set_gain(self, gain):
         self.gain_count += 1
         self.last_gain = gain
+
+
+class _FakeHomeController(_FakeController):
+    def __init__(self):
+        super().__init__()
+        self.home_count = 0
+
+    def reset_to_home(self):
+        self.home_count += 1
+
+    def get_eef_cmd(self):
+        return _FakeEEFState()
 
 
 class _FakeEEFState:

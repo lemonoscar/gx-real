@@ -2,6 +2,8 @@
 
 这份文档面向第一次接触本仓库的人，目标是把 `real` 目录下分散的上机、网络、硬件和策略替换说明整理成一条完整开发路径。默认部署环境是机器狗机身上的 Jetson Orin NX 开发板，路径按 `~/gx-real` 书写。当前主线不是原始 UMI-on-Legs 的完整末端轨迹控制链，而是 `Go2 + X5/ARX5` 真机上的分离控制链：WBC 主节点只写 Go2 腿部，独立 SpaceMouse Arm 节点独占 X5/ARX5。
 
+只需要执行上机步骤时，直接阅读 [真机上机使用指南](docs/上机使用指南.md)。
+
 ## 1. 当前系统做什么
 
 当前仓库用于在真机上运行：
@@ -41,12 +43,9 @@ scripts/run_spacemouse_arm.sh         # 推荐 X5 控制入口，另开终端
 real/
   README.md                         # 本文档，新人入口
 
-  doc/
+  docs/
     上机使用指南.md                  # 真机操作细节和故障处理
-    260维输入设计.md                 # policy 观测拼接契约
-    小替换代码清单.md                # 从 UMI WBC 到 leg12 版本的改造说明
-    替换思路.md                      # 替换网络的路线选择
-    README.md                       # 文档导航
+    height_scan_lidar_deployment.md  # Rough/高度扫描部署说明
 
   scripts/
     setup_env.sh                    # 设置 GX_REAL_ROOT、PYTHONPATH、ROS2、SDK 动态库路径
@@ -289,7 +288,15 @@ scripts/disable_sports_mode_go2.sh eth0
 
 ## 6. 标准启动流程
 
-典型 WBC 启动命令。`run_leg12_real.sh` 会在启动 Python 前验证 MCF 已释放。默认 `--arm-control-owner external_spacemouse`，WBC 不会打开 `can0` 或下发 X5 command：
+真机优先使用固定速度入口，不建议在当前上机基线中使用无线摇杆速度：
+
+```bash
+cd ~/gx-real
+export GX_REAL_NETWORK_IFACE=eth0
+scripts/run_fixed_03_real.sh
+```
+
+该入口固定前进速度为 `0.3 m/s`。它最终调用 `run_leg12_real.sh`，并在启动 Python 前验证 MCF 已释放。展开后的等价关键参数如下；默认 `--arm-control-owner external_spacemouse`，WBC 不会打开 `can0` 或下发 X5 command：
 
 ```bash
 cd ~/gx-real
@@ -297,17 +304,18 @@ scripts/run_leg12_real.sh \
   --device cpu \
   --pose_estimator none \
   --standup-mode internal \
-  --cmd-vx 0.5 \
+  --cmd-vx 0.3 \
   --cmd-vy 0.0 \
   --cmd-yaw 0.0 \
   --base-command-source fixed \
   --arm-control-owner external_spacemouse \
+  --require-arm-state-for-rl \
   --gripper-cmd 0.0 \
-  --arm_pose 0.0 0.5 0.3 0.0 0.0 0.0 \
-  --arm-reset-pose 0.0 0.5 0.3 0.0 0.0 0.0
+  --arm_pose 0.0 0.3 0.5 0.0 0.0 0.0 \
+  --arm-reset-pose 0.0 0.3 0.5 0.0 0.0 0.0
 ```
 
-腿部 PD 不接受命令行覆盖，并按控制阶段分开：Passive 使用 `Kp=0, Kd=3`；internal FixStand 使用 Unitree RL Lab 的 Go2 逐关节设置，每条腿 `Kp=[60,80,80]`、`Kd=[5,4,4]`；policy rollout 使用与 `policy.onnx` 配套的 `env.yaml` actuator 配置，当前为 `Kp=40, Kd=1`。1.2 秒零速度 handover 会把 PD 从 FixStand 设置平滑切换到训练设置。
+腿部 PD 不接受命令行覆盖。动态 policy rollout 严格读取与 `policy.onnx` 绑定的 `env.yaml`，当前 12 个腿关节均为 `Kp=40, Kd=1`，不要手工改成 `200/5` 或 `200/10`。控制阶段仍然分开：Passive 使用 `Kp=0, Kd=3`；internal FixStand/趴下过程使用 Unitree RL Lab 的 Go2 逐关节设置，每条腿 `Kp=[60,80,80]`、`Kd=[5,4,4]`；1.2 秒零速度 handover 会把 PD 从 FixStand 平滑切换到训练的 `40/1`。
 
 第一次验证建议先确认低层接管和关节顺序。`--arm_pose` 现在只是 WBC observation fallback，不会由 WBC 下发给 X5。
 
@@ -370,16 +378,18 @@ Deploy node ready
 - `R1`：从 Passive 进入 internal FixStand。
 - `L2`：FixStand 稳定后从当前实测姿态进入零速度 policy handover；fixed 模式 rollout 中再次按下会恢复配置的移动命令。
 - `Y`：底盘 command 平滑切到 `0 0 0`，policy 保持运行；joystick 模式下会 inhibit 到摇杆全部回中。
-- `R2`：停止 policy。
-- `L1`：紧急停止并退出。
+- `R2`：立即停止 policy；不作为正常下机流程。
+- 第一次按 `L1`：进入受控停机。当前速度在 1.5 秒内平滑降到零，然后用 FixStand PD 在 2.4 秒内趴下并短暂保持；狗趴稳后，独立机械臂收到 `/arm/home`，回到 `[0,0,0,0,0,0]`，最后腿进入 `Kp=0, Kd=3` 阻尼。
+- L1 受控停机开始后：除再次按 `L1` 外，其余手柄操作全部屏蔽；完成后不能在同一进程重新起身，需要退出并重新启动。
+- 第二次按 `L1`，或发生 LowState/MCF/数值故障：立即走 `/safety/estop` 硬急停，不再命令机械臂回零。
 - `A/B/X/↑/↓`：默认 no-op，不再影响机械臂。机械臂动作只来自独立 SpaceMouse Arm 节点。
 
 真机入口只保留 `--standup-mode internal`；`pose_test` 仅用于静态诊断，`manual` 和 Unitree/MCF 外部起身模式不再接受。
 
 底盘 command 来源：
 
-- 默认 `--base-command-source fixed`，继续使用 `--cmd-vx/--cmd-vy/--cmd-yaw`。
-- 可选 `--base-command-source wireless_joystick`，默认前后速度在摇杆越过 deadzone 后从 `0.2 m/s` 起步，随有效行程连续变化，到满推时达到 `0.5 m/s`。可通过 `--joy-min-vx/--joy-max-vx` 调整；轴和方向由 `--joy-*-axis/--joy-*-sign` 显式配置。
+- 真机验证推荐 `--base-command-source fixed`，当前标准值为 `--cmd-vx 0.3`、`--cmd-vy 0`、`--cmd-yaw 0`。
+- `wireless_joystick` 保留为可选实验入口，不是当前推荐基线。其前后速度在摇杆越过 deadzone 后从 `0.2 m/s` 起步，随有效行程连续变化，到满推时达到 `0.5 m/s`。
 
 ## 7. 控制架构
 
@@ -598,6 +608,8 @@ ros2 topic echo lf/sportmodestate
 - `check_env.sh --spacemouse` 失败在 `spnav` 或 `atomics`：安装 SpaceMouse Python 依赖；失败在 `spacenavd` 或 `libspnav`：安装/启动系统服务。
 - `undefined symbol: PyCObject_AsVoidPtr`：卸载 PyPI 版 `spnav`，安装 README 中固定的 Cheng Chi fork。
 - 单独机械臂测试失败在 `Error document empty` / `Failed to get chain from kdl tree`：ARX5 Python 扩展可能从 pip 安装目录加载，默认找不到仓库里的 URDF。更新到最新代码后，`scripts/run_arm_spacemouse_test.sh` 会显式把 `arx5-sdk/models` 传给示例。
+- `Gripper position error: got -0.08x but should be in 0~0.088`：这是部分新款 X5 夹爪电机安装方向与 SDK 默认符号相反导致的已知校准问题。当前 `run_spacemouse_arm.sh --model X5` 会在创建 controller 前固定写入 `gripper_width=0.088`、`gripper_open_readout=-5.07839`；启动日志必须出现 `Using persistent X5 gripper calibration`。SDK 校准程序即使打印正的 fully-open readout，也可能需要按电机方向写成负值，不能无条件照抄正号。详见 [真机指南的 ARX 零点说明](docs/上机使用指南.md#7-arx-sdk-夹爪零点校准的可能-bug)。
+- `/usr/bin/python3 -m pip show arx5-interface` 显示 `Package(s) not found`，但 `import arx5_interface` 成功：当前扩展可能是直接放在 `~/.local/lib/python3.8/site-packages` 的 `.so`，没有 pip metadata；以 `arx5_interface.__file__` 为准。
 - `Background send_recv task is running too slow`：这是 ARX5 SDK 的 DEBUG 级通信周期提示。偶发 `2-4 ms` 且机械臂运动平滑、无 `warning/error` 时可以忽略；默认日志级别已改为 `info`，需要排查底层周期时再加 `--log-level debug`。
 - `Inverse kinematics failed: E_EXCEED_JOINT_LIMIT` 或 `Over current detected`：目标末端位姿太快或太远，已经触到 IK/关节/电流保护。立即松开 SpaceMouse 或 `Ctrl+C` 停止；必要时临时降低速度 `--pos-speed 0.03 --ori-speed 0.10`，或加 home 附近工作空间限制。
 - SpaceMouse 没反应：确认接收器插在 Jetson 上，`spacenavd` 正在运行，且没有直接运行 ARX5 SDK 的 SpaceMouse 示例抢设备或抢 `can0`。
@@ -613,15 +625,16 @@ ros2 topic echo lf/sportmodestate
 真机调试时遵守：
 
 - Jetson 上只运行一个 WBC 主节点。X5 写控制也只能有一个进程：默认只允许 `scripts/run_spacemouse_arm.sh` 打开 `can0`。
-- 第一次跑新 policy 时，先 `--cmd-vx 0.0` 或 `0.1`。
+- 当前绑定的 Flat policy 使用固定 `0.3 m/s` 基线；不要临时换成低速摇杆输入或修改训练 PD。更换新 policy 时先在仿真/吊架完成验证，不直接沿用本条放行结论。
 - 机械臂运动空间内不要放手、线缆和工具。
 - 改 X5 电源线前先断电，降压模块输出先用万用表确认约 24V。
 - 不要在 MCF 未经 `CheckMode()` 验证释放时强行跑 `lowcmd`。
 - `max_leg_error` 长期大于 `0.08 rad` 时不要跑动态 policy。
 - WBC 默认不写 X5；不要用 `--arm-control-owner wbc`，除非明确做 legacy 回退测试。
-- `Y` 会清零底盘，joystick 模式下会 inhibit 到摇杆回中；`R2` 停 policy；`L1` 急停退出。
+- `Y` 只清零底盘 command；正常下机使用第一次 `L1` 的受控停机，不使用 `R2` 或 `Ctrl+C` 替代。
 - 不要一开始就同时改 policy、obs、动作 scale、起身流程和 teleop，先保持变量可控。
-- 手柄 `L1` 是第一急停手段，旁边必须有人能及时按下。
+- 第一次 `L1` 后等待完整的归零、趴下和机械臂回零日志，不要在中途关闭两个进程；只有姿态失控时才再次按 `L1` 触发硬急停。
+- `/safety/estop` 是硬急停通道，只进入阻尼；正常机械臂回零使用独立 `/arm/home`，避免真实故障时机械臂继续运动。
 
 ## 13. Demo 区
 
@@ -655,10 +668,8 @@ ros2 topic echo lf/sportmodestate
 
 ## 14. 参考文档
 
-- [上机使用指南](doc/上机使用指南.md)：最细的真机操作步骤。
-- [260维输入设计](doc/260维输入设计.md)：当前 policy obs 契约。
-- [小替换代码清单](doc/小替换代码清单.md)：leg12 + arm passthrough 的改造思路。
-- [替换思路](doc/替换思路.md)：如果后续继续换网络，如何选切入层。
+- [上机使用指南](docs/上机使用指南.md)：当前 main/Flat 真机操作、L1 停机和 ARX 零点说明。
+- [LiDAR/height scan 部署](docs/height_scan_lidar_deployment.md)：Rough 感知链部署说明。
 - [real-wbc 开发文档索引](real-wbc/docs/README.md)：硬件、网络、装配和开发环境细分说明。
 - [网络与通信配置](real-wbc/docs/network.md)：Go2 网络、ROS2、MCF 和 `can0`。
 - [硬件装配说明](real-wbc/docs/assembly.md)：X5 供电、安装、USB-CAN 和外设。

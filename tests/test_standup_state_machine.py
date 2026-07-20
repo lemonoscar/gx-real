@@ -121,3 +121,64 @@ def test_fixstand_and_policy_use_separate_pd_profiles() -> None:
         assert f"self.{profile}_kd = self.fixstand_leg_kd.copy()" in node
     assert "self.deploy_policy_kp = self.training_leg_kp.copy()" in node
     assert "self.deploy_policy_kd = self.training_leg_kd.copy()" in node
+
+
+def test_l1_runs_controlled_stop_before_hard_estop() -> None:
+    node = NODE_PATH.read_text(encoding="utf-8")
+    joystick = _node_method_source("joy_stick_cb")
+    request = _node_method_source("request_graceful_stop")
+    advance = _node_method_source("advance_graceful_stop")
+    lie_down = _node_method_source("run_graceful_lie_down")
+    commands = _node_method_source("update_policy_commands")
+
+    assert 'self.graceful_stop_phase = "idle"' in node
+    assert "self.request_graceful_stop()" in joystick
+    assert "self.emergency_stop()" in joystick
+    assert 'self.graceful_stop_phase != "idle"' in joystick
+    assert '"l1_graceful_stop"' in request
+    assert "self.policy_takeover_commands" in request
+    assert "self.policy_command_ramp_duration" in request
+    assert 'self.graceful_stop_phase == "zeroing"' in commands
+    assert "self.apply_policy_command_ramp(now)" in commands
+    assert 'self.graceful_stop_phase = "lying_down"' in advance
+    assert "self.interface_to_policy_leg_order(self.quadruped_q)" in advance
+    assert "self.pre_getup_leg_pos" in lie_down
+    assert "self.getup_stand_time" in lie_down
+    assert "self.getup_hold_time" in lie_down
+    assert "_smoothstep" in lie_down
+    assert "self.fixstand_leg_kp" in lie_down
+    assert "self.fixstand_leg_kd" in lie_down
+    assert 'self.graceful_stop_phase = "arm_home"' in lie_down
+    assert "self.publish_arm_home()" in lie_down
+    assert 'self.graceful_stop_phase = "complete"' in advance
+    assert "self.graceful_arm_home_wait_time" in advance
+    assert "self.set_passive_lowcmd_from_state()" in advance
+    assert "exit(" not in request
+    assert "exit(" not in advance
+    assert "exit(" not in lie_down
+
+
+def test_controlled_stop_has_separate_arm_home_and_hard_estop_topics() -> None:
+    node = NODE_PATH.read_text(encoding="utf-8")
+    publish_home = _node_method_source("publish_arm_home")
+    hard_stop = _node_method_source("emergency_stop")
+    runtime_stop = _node_method_source("trigger_safety_stop")
+
+    assert 'arm_home_topic: str = "/arm/home"' in node
+    assert "self.arm_home_pub.publish(Bool(data=True))" in publish_home
+    assert "self.safety_pub" not in publish_home
+    assert "self.publish_safety_estop(repeat=True)" in hard_stop
+    assert "reset_to_home" not in hard_stop
+    assert 'self.graceful_stop_phase = "hard_stop"' in runtime_stop
+
+
+def test_operator_docs_match_fixed_speed_pd_and_l1_baseline() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    guide = (ROOT / "docs/上机使用指南.md").read_text(encoding="utf-8")
+
+    for document in (readme, guide):
+        assert "Kp=40, Kd=1" in document
+        assert "run_fixed_03_real.sh" in document
+        assert "/arm/home" in document
+        assert "/safety/estop" in document
+        assert "-5.07839" in document

@@ -31,6 +31,7 @@ def parse_args():
     )
     parser.add_argument("--model", default="X5")
     parser.add_argument("--can-interface", default="can0")
+    parser.add_argument("--arm-home-topic", default="/arm/home")
     parser.add_argument("--safety-topic", default="/safety/estop")
     parser.add_argument("--ctrl-freq", type=float, default=50.0)
     parser.add_argument("--dry-run", action="store_true")
@@ -107,6 +108,7 @@ def main() -> int:
         mapping=mapping,
         arm_command_frame=args.arm_command_frame,
         can_interface=args.can_interface,
+        arm_home_topic=args.arm_home_topic,
         safety_topic=args.safety_topic,
         model=args.model,
         ctrl_freq=args.ctrl_freq,

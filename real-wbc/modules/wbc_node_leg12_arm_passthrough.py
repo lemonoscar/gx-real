@@ -331,6 +331,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         arm_control_owner: str = "external_spacemouse",
         arm_state_topic: str = "/arm/state",
         arm_target_topic: str = "/arm/target_state",
+        arm_home_topic: str = "/arm/home",
         safety_topic: str = "/safety/estop",
         arm_state_timeout_sec: float = 0.25,
         arm_target_timeout_sec: float = 0.25,
@@ -567,6 +568,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         )
         self.arm_state_topic = arm_state_topic
         self.arm_target_topic = arm_target_topic
+        self.arm_home_topic = arm_home_topic
         self.safety_topic = safety_topic
         self.arm_state_timeout_sec = float(arm_state_timeout_sec)
         self.arm_target_timeout_sec = float(arm_target_timeout_sec)
@@ -639,6 +641,11 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.last_lowstate_time = -1.0
         self.safety_stop_reason = ""
         self.last_safety_fault_log_time = -1.0
+        self.graceful_stop_phase = "idle"
+        self.graceful_stop_start_time = -1.0
+        self.graceful_stop_zero_duration = 0.0
+        self.graceful_arm_home_wait_time = 1.0
+        self.graceful_stop_leg_start = np.zeros(LEG_DOF, dtype=np.float64)
         self.height_scan_diag_log_interval = 0.5
         self.last_height_scan_diag_log_time = -1.0
         self.enable_height_scan = bool(enable_height_scan)
@@ -893,6 +900,11 @@ class WBCNodeLeg12ArmPassthrough(Node):
             self.safety_topic,
             low_state_history_depth,
         )
+        self.arm_home_pub = self.create_publisher(
+            Bool,
+            self.arm_home_topic,
+            low_state_history_depth,
+        )
         self.motor_pub = self.create_publisher(
             LowCmd, "lowcmd", low_state_history_depth
         )
@@ -1024,7 +1036,10 @@ class WBCNodeLeg12ArmPassthrough(Node):
             logging.info("Hold SpaceMouse left/right side buttons to open/close the gripper")
         else:
             logging.info("A/X/B/D-pad arm controls are no-op; X5 control moved to standalone SpaceMouse Arm Node")
-        logging.info("Press L1 for emergency stop")
+        logging.info(
+            "Press L1 for controlled stop: ramp speed to zero, lie down, then return X5 home"
+        )
+        logging.info("Press L1 again during controlled stop for immediate emergency stop")
         self.button_debounce_s = 0.5
         self.button_prev_pressed: Dict[int, bool] = {}
         self.button_last_trigger_time: Dict[int, float] = {}
@@ -1309,6 +1324,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
             or self.align_to_policy_active
             or self.pose_test_active
             or self.start_time != -1.0
+            or self.graceful_stop_phase in {"zeroing", "lying_down", "arm_home", "complete"}
         )
         passive_control = (
             self.uses_internal_standup
@@ -1353,6 +1369,12 @@ class WBCNodeLeg12ArmPassthrough(Node):
             if repeat and idx + 1 < count and self.estop_repeat_period_sec > 0.0:
                 time.sleep(self.estop_repeat_period_sec)
 
+    def publish_arm_home(self) -> None:
+        try:
+            self.arm_home_pub.publish(Bool(data=True))
+        except Exception as exc:
+            logging.error("Failed to publish X5 arm home request: %s", exc)
+
     def reset_lowcmd_to_passive(self) -> None:
         for motor_cmd in self.motor_cmd:
             motor_cmd.q = POS_STOP_F
@@ -1383,6 +1405,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
             logging.error("Runtime safety stop: %s", reason)
             self.last_safety_fault_log_time = now
         self.safety_stop_reason = reason
+        self.graceful_stop_phase = "hard_stop"
         self.start_policy = False
         self.align_to_policy_active = False
         self.pose_test_active = False
@@ -1886,6 +1909,9 @@ class WBCNodeLeg12ArmPassthrough(Node):
         if not self.start_policy:
             return
         now = time.monotonic()
+        if self.graceful_stop_phase == "zeroing":
+            self.apply_policy_command_ramp(now)
+            return
         if not self.policy_motion_started:
             self.fixed_commands[:] = self.policy_takeover_commands
             policy_elapsed = max(now - self.start_policy_time, 0.0)
@@ -1915,6 +1941,9 @@ class WBCNodeLeg12ArmPassthrough(Node):
         if self.teleop_mode == TELEOP_MODE_BASE:
             self.update_teleop_base_command()
             return
+        self.apply_policy_command_ramp(now)
+
+    def apply_policy_command_ramp(self, now: float) -> None:
         ramp_ratio = float(
             np.clip(
                 (now - self.policy_command_ramp_start_time)
@@ -2727,6 +2756,17 @@ class WBCNodeLeg12ArmPassthrough(Node):
         now = time.monotonic()
         self.wireless_command_provider.update_message(msg, stamp=now)
         self.log_wireless_joystick_input(now)
+        if self.button_pressed_once(keys, BUTTON_L1, now):
+            if self.graceful_stop_phase != "idle":
+                logging.error("Second L1 press: immediate emergency stop")
+                self.emergency_stop()
+                return
+            self.request_graceful_stop()
+            return
+
+        if self.graceful_stop_phase != "idle":
+            return
+
         if self.arm_control_owner == "wbc":
             self.update_gamepad_gripper_buttons(keys)
         elif keys & (BUTTON_A | BUTTON_B | BUTTON_X | BUTTON_DPAD_UP | BUTTON_DPAD_DOWN):
@@ -2738,10 +2778,6 @@ class WBCNodeLeg12ArmPassthrough(Node):
                     "Ignoring A/X/B/D-pad arm input: arm control moved to standalone SpaceMouse Arm Node"
                 )
                 self.last_arm_button_noop_log_time = now
-
-        if self.button_pressed_once(keys, BUTTON_L1, now):
-            logging.info("Emergency stop")
-            self.emergency_stop()
 
         if self.button_pressed_once(keys, BUTTON_R1, now):
             if self.uses_unitree_standup:
@@ -3053,8 +3089,9 @@ class WBCNodeLeg12ArmPassthrough(Node):
             return
         if not self.check_runtime_control_gates():
             return
-        if (
-            self.uses_internal_standup
+        if self.graceful_stop_phase == "complete" or (
+            self.graceful_stop_phase == "idle"
+            and self.uses_internal_standup
             and not self.start_policy
             and not self.align_to_policy_active
             and not self.pose_test_active
@@ -3108,6 +3145,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.cmd_msg.motor_cmd = self.motor_cmd.copy()
 
     def control_phase_label(self) -> str:
+        if self.graceful_stop_phase != "idle":
+            return f"graceful_stop_{self.graceful_stop_phase}"
         if self.start_policy:
             return "policy"
         if self.align_to_policy_active:
@@ -3192,6 +3231,155 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.arm_smoothed_pose = self.arm_smoothed_pose + delta
         return self.arm_smoothed_pose.copy()
 
+    def request_graceful_stop(self) -> None:
+        if self.graceful_stop_phase != "idle":
+            self.emergency_stop()
+            return
+
+        now = time.monotonic()
+        go2_control_active = (
+            self.start_policy
+            or self.align_to_policy_active
+            or self.pose_test_active
+            or self.start_time != -1.0
+        )
+        self.graceful_stop_phase = "zeroing"
+        self.graceful_stop_start_time = now
+        self.graceful_stop_zero_duration = (
+            self.policy_command_ramp_duration if self.start_policy else 0.0
+        )
+        self.align_to_policy_active = False
+        self.pose_test_active = False
+        self.awaiting_unitree_stand = False
+        self.teleop_base_target[:] = 0.0
+        self.teleop_base_last_time = -1.0
+        self.command_safety_filter.reset(
+            tuple(self.policy_takeover_commands),
+            now=now,
+        )
+        self.set_policy_command_target(
+            self.policy_takeover_commands,
+            "l1_graceful_stop",
+            self.graceful_stop_zero_duration,
+        )
+        logging.info(
+            "Controlled stop requested | speed_ramp=%.2fs lie_down=%.2fs arm_home_wait=%.2fs"
+            % (
+                self.graceful_stop_zero_duration,
+                self.getup_stand_time,
+                self.graceful_arm_home_wait_time,
+            )
+        )
+
+        if self.latest_tick == -1 or not go2_control_active:
+            self.start_policy = False
+            self.start_time = -1.0
+            self.fixed_commands[:] = self.policy_takeover_commands
+            if self.latest_tick != -1:
+                self.set_passive_lowcmd_from_state()
+            self.publish_arm_home()
+            self.graceful_stop_phase = "complete"
+            logging.info(
+                "Go2 is not in active stand/policy control; keeping legs passive and returning X5 home"
+            )
+
+    def advance_graceful_stop(self, now: float) -> bool:
+        if self.graceful_stop_phase == "idle":
+            return False
+        if self.graceful_stop_phase in {"complete", "hard_stop"}:
+            return True
+
+        if self.graceful_stop_phase == "zeroing":
+            zero_elapsed = max(now - self.graceful_stop_start_time, 0.0)
+            if zero_elapsed < self.graceful_stop_zero_duration:
+                return False
+            try:
+                self.graceful_stop_leg_start = require_finite_vector(
+                    self.interface_to_policy_leg_order(self.quadruped_q),
+                    size=LEG_DOF,
+                    name="graceful_stop_leg_start",
+                ).copy()
+            except RuntimeSafetyFault as exc:
+                self.trigger_safety_stop(str(exc))
+                return True
+            self.fixed_commands[:] = self.policy_takeover_commands
+            self.policy_command_start = self.policy_takeover_commands.copy()
+            self.policy_command_target = self.policy_takeover_commands.copy()
+            self.start_policy = False
+            self.policy_motion_started = False
+            self.start_time = -1.0
+            self.prev_action[:] = 0.0
+            self.passive_command_started = False
+            self.graceful_stop_phase = "lying_down"
+            self.graceful_stop_start_time = now
+            self.last_policy_diag_log_time = -1.0
+            logging.info(
+                "Base command reached zero; lowering Go2 from measured pose to prone FixStand pose"
+            )
+
+        if self.graceful_stop_phase in {"lying_down", "arm_home"}:
+            self.run_graceful_lie_down(now)
+
+        if self.graceful_stop_phase == "arm_home":
+            arm_home_elapsed = max(now - self.graceful_stop_start_time, 0.0)
+            if arm_home_elapsed >= self.graceful_arm_home_wait_time:
+                if self.arx5_joint_controller is not None and hasattr(
+                    self.arx5_joint_controller,
+                    "set_to_damping",
+                ):
+                    try:
+                        self.arx5_joint_controller.set_to_damping()
+                    except Exception as exc:
+                        logging.error("Failed to set WBC-owned X5 arm damping mode: %s", exc)
+                self.graceful_stop_phase = "complete"
+                self.start_time = -1.0
+                self.set_passive_lowcmd_from_state()
+                logging.info(
+                    "Controlled stop complete: Go2 is prone in damping and X5 target is [0 0 0 0 0 0]"
+                )
+        return True
+
+    def run_graceful_lie_down(self, now: float) -> None:
+        lie_elapsed = max(now - self.graceful_stop_start_time, 0.0)
+        if self.graceful_stop_phase == "lying_down":
+            lie_ratio = _smoothstep(
+                float(
+                    np.clip(
+                        lie_elapsed / max(self.getup_stand_time, 1e-6),
+                        0.0,
+                        1.0,
+                    )
+                )
+            )
+        else:
+            lie_ratio = 1.0
+
+        wbc_action = np.zeros(18, dtype=np.float64)
+        wbc_action[:LEG_DOF] = _blend_arrays(
+            self.graceful_stop_leg_start,
+            self.pre_getup_leg_pos,
+            lie_ratio,
+        )
+        wbc_action[LEG_DOF:] = self.arm_passthrough_pose.copy()
+        self.set_gains(kp=self.fixstand_leg_kp, kd=self.fixstand_leg_kd)
+        self.set_motor_position(wbc_action, self.gripper_pos_cmd)
+
+        if (
+            self.graceful_stop_phase == "lying_down"
+            and lie_elapsed >= self.getup_stand_time + self.getup_hold_time
+        ):
+            self.graceful_stop_phase = "arm_home"
+            self.graceful_stop_start_time = now
+            if self.arm_control_owner == "wbc":
+                self.set_arm_passthrough_pose(
+                    np.zeros(6, dtype=np.float64),
+                    "l1_graceful_stop_arm_home",
+                )
+            self.publish_arm_home()
+            logging.info(
+                "Go2 is prone; holding FixStand PD while X5 returns to [0 0 0 0 0 0]"
+            )
+
     def emergency_stop(self):
         self.publish_safety_estop(repeat=True)
         if self.arx5_joint_controller is not None and hasattr(
@@ -3199,13 +3387,9 @@ class WBCNodeLeg12ArmPassthrough(Node):
             "set_to_damping",
         ):
             try:
-                if hasattr(self.arx5_joint_controller, "reset_to_home"):
-                    logging.info("Returning WBC-owned X5 arm to joint home before emergency exit")
-                    self.arx5_joint_controller.reset_to_home()
-                    time.sleep(0.7)
                 self.arx5_joint_controller.set_to_damping()
             except Exception as exc:
-                logging.error("Failed to return WBC arm home/damping mode: %s", exc)
+                logging.error("Failed to set WBC arm damping mode: %s", exc)
         if self.debug_log:
             self.dump_logs()
 
@@ -3215,6 +3399,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
     # policy inference
     ##############################
     def policy_timer_callback(self):
+        graceful_stop_active = self.graceful_stop_phase != "idle"
         if self.uses_unitree_standup:
             if self.awaiting_unitree_stand:
                 elapsed = time.monotonic() - self.unitree_stand_request_time
@@ -3239,10 +3424,19 @@ class WBCNodeLeg12ArmPassthrough(Node):
                     logging.warning(
                         f"Timed out waiting for Unitree {self.standup_label}; press R1 to retry"
                     )
-            if not self.start_policy and not self.align_to_policy_active:
+            if (
+                not self.start_policy
+                and not self.align_to_policy_active
+                and not graceful_stop_active
+            ):
                 return
 
-        if self.uses_internal_standup and self.start_time == -1.0 and not self.start_policy:
+        if (
+            self.uses_internal_standup
+            and self.start_time == -1.0
+            and not self.start_policy
+            and not graceful_stop_active
+        ):
             if not self.align_to_policy_active:
                 return
 
@@ -3253,10 +3447,14 @@ class WBCNodeLeg12ArmPassthrough(Node):
             and not self.start_policy
             and not self.align_to_policy_active
             and not self.pose_test_active
+            and not graceful_stop_active
         ):
             return
 
         if self.low_level_control_active() and not self.check_runtime_control_gates():
+            return
+
+        if self.advance_graceful_stop(time.monotonic()):
             return
 
         if (

@@ -140,6 +140,7 @@ class SpaceMouseArmNode:
         max_value: float = 500.0,
         dry_run: bool = False,
         require_can: bool = True,
+        arm_home_topic: str = "/arm/home",
         safety_topic: str = "/safety/estop",
         lock_training_pose: bool = False,
     ):
@@ -163,6 +164,7 @@ class SpaceMouseArmNode:
         self.max_value = float(max_value)
         self.dry_run = bool(dry_run)
         self.require_can = bool(require_can)
+        self.arm_home_topic = str(arm_home_topic)
         self.safety_topic = str(safety_topic)
         self.lock_training_pose = bool(lock_training_pose)
         self.shared_memory_manager: Optional[SharedMemoryManager] = None
@@ -192,6 +194,12 @@ class SpaceMouseArmNode:
 
         self.state_pub = self.node.create_publisher(ArmState, "/arm/state", 10)
         self.target_pub = self.node.create_publisher(ArmTargetState, "/arm/target_state", 10)
+        self.arm_home_sub = self.node.create_subscription(
+            Bool,
+            self.arm_home_topic,
+            self._arm_home_cb,
+            10,
+        )
         self.safety_sub = self.node.create_subscription(
             Bool,
             self.safety_topic,
@@ -228,6 +236,7 @@ class SpaceMouseArmNode:
         self._log_info(f"rot speed: {self.mapping.rot_speed}")
         self._log_info(f"deadzone: {self.mapping.deadzone}")
         self._log_info(f"watchdog: {self.sm_watchdog_sec}")
+        self._log_info(f"controlled home topic: {self.arm_home_topic}")
         self._log_info(f"safety estop topic: {self.safety_topic}")
         if self.lock_training_pose:
             self._log_info(
@@ -373,9 +382,19 @@ class SpaceMouseArmNode:
 
     def _safety_estop_cb(self, msg) -> None:
         if bool(getattr(msg, "data", False)):
-            self._trigger_estop(f"{self.safety_topic}=true")
+            self._trigger_estop(f"{self.safety_topic}=true", return_home=False)
 
-    def _trigger_estop(self, source: str, *, return_home: bool = True) -> None:
+    def _arm_home_cb(self, msg) -> None:
+        if not bool(getattr(msg, "data", False)) or self.estopped:
+            return
+        self.estopped = True
+        self._log_info(
+            f"Controlled home request received from {self.arm_home_topic}; returning X5 home"
+        )
+        self._return_home_before_damping(f"{self.arm_home_topic}=true")
+        self._set_to_damping()
+
+    def _trigger_estop(self, source: str, *, return_home: bool = False) -> None:
         if self.estopped:
             return
         self.estopped = True
@@ -923,7 +942,8 @@ class SpaceMouseArmNode:
 
     def shutdown(self) -> None:
         try:
-            self._return_home_before_damping("node shutdown")
+            if not self.estopped:
+                self._return_home_before_damping("node shutdown")
             self._set_to_damping()
             if self.spacemouse is not None:
                 self.spacemouse.stop()

@@ -126,6 +126,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--arm-state-topic", type=str, default="/arm/state")
     parser.add_argument("--arm-target-topic", type=str, default="/arm/target_state")
+    parser.add_argument("--arm-home-topic", type=str, default="/arm/home")
     parser.add_argument("--safety-topic", type=str, default="/safety/estop")
     parser.add_argument("--arm-state-timeout-sec", type=float, default=0.25)
     parser.add_argument("--arm-target-timeout-sec", type=float, default=0.25)
