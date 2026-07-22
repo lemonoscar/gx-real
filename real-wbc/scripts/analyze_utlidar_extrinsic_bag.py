@@ -176,25 +176,45 @@ def main() -> int:
         )
 
     raw_samples = []
-    base_samples = []
+    corresponding_base_samples = []
+    floor_base_samples = []
+    correspondence_failures = []
     stamp_deltas_ms = []
     for raw_message, base_message, delta_ns in pairs:
-        raw, base = _subsample_pair(
-            pointcloud_xyz(raw_message),
-            pointcloud_xyz(base_message),
-            args.max_points_per_pair,
-        )
-        raw_samples.append(raw)
-        base_samples.append(base)
+        raw_cloud = pointcloud_xyz(raw_message)
+        base_cloud = pointcloud_xyz(base_message)
+        finite_base = base_cloud[np.isfinite(base_cloud).all(axis=1)]
+        if finite_base.shape[0] > args.max_points_per_pair:
+            indices = np.linspace(
+                0,
+                finite_base.shape[0] - 1,
+                args.max_points_per_pair,
+                dtype=np.int64,
+            )
+            finite_base = finite_base[indices]
+        floor_base_samples.append(finite_base)
+        try:
+            raw, corresponding_base = _subsample_pair(
+                raw_cloud,
+                base_cloud,
+                args.max_points_per_pair,
+            )
+        except RuntimeError as exc:
+            correspondence_failures.append(str(exc))
+        else:
+            raw_samples.append(raw)
+            corresponding_base_samples.append(corresponding_base)
         stamp_deltas_ms.append(delta_ns / 1_000_000.0)
 
-    raw_points = np.concatenate(raw_samples, axis=0)
-    base_points = np.concatenate(base_samples, axis=0)
-    transform = fit_rigid_transform(raw_points, base_points)
-    roll, pitch, yaw = rotation_matrix_to_rpy(transform.rotation)
-    matrix = np.eye(4, dtype=np.float64)
-    matrix[:3, :3] = transform.rotation
-    matrix[:3, 3] = transform.translation
+    transform = None
+    raw_points = None
+    if raw_samples:
+        raw_points = np.concatenate(raw_samples, axis=0)
+        corresponding_base_points = np.concatenate(
+            corresponding_base_samples, axis=0
+        )
+        transform = fit_rigid_transform(raw_points, corresponding_base_points)
+    base_points = np.concatenate(floor_base_samples, axis=0)
 
     floor_mask = (
         (np.abs(base_points[:, 0]) <= 1.0)
@@ -211,28 +231,37 @@ def main() -> int:
 
     print(f"bag={bag_path}")
     print(f"paired_clouds={len(pairs)}")
-    print(f"paired_points={raw_points.shape[0]}")
     print(f"max_stamp_delta_ms={max(stamp_deltas_ms):.6f}")
-    print("T_base_lidar=")
-    for row in matrix:
-        print("  [" + ", ".join(f"{value:+.9f}" for value in row) + "]")
-    print(
-        "translation_m="
-        + "["
-        + ", ".join(f"{value:+.9f}" for value in transform.translation)
-        + "]"
-    )
-    print(
-        "rpy_deg="
-        + "["
-        + ", ".join(
-            f"{np.degrees(value):+.6f}" for value in (roll, pitch, yaw)
+    if transform is None:
+        print("T_base_lidar=UNAVAILABLE")
+        print("transform_pairing_status=UNAVAILABLE")
+        print(f"transform_reason={correspondence_failures[0]}")
+    else:
+        roll, pitch, yaw = rotation_matrix_to_rpy(transform.rotation)
+        matrix = np.eye(4, dtype=np.float64)
+        matrix[:3, :3] = transform.rotation
+        matrix[:3, 3] = transform.translation
+        print(f"paired_points={raw_points.shape[0]}")
+        print("T_base_lidar=")
+        for row in matrix:
+            print("  [" + ", ".join(f"{value:+.9f}" for value in row) + "]")
+        print(
+            "translation_m="
+            + "["
+            + ", ".join(f"{value:+.9f}" for value in transform.translation)
+            + "]"
         )
-        + "]"
-    )
-    print(f"transform_residual_median_m={transform.residual_median:.9f}")
-    print(f"transform_residual_p95_m={transform.residual_p95:.9f}")
-    print(f"transform_residual_max_m={transform.residual_max:.9f}")
+        print(
+            "rpy_deg="
+            + "["
+            + ", ".join(
+                f"{np.degrees(value):+.6f}" for value in (roll, pitch, yaw)
+            )
+            + "]"
+        )
+        print(f"transform_residual_median_m={transform.residual_median:.9f}")
+        print(f"transform_residual_p95_m={transform.residual_p95:.9f}")
+        print(f"transform_residual_max_m={transform.residual_max:.9f}")
     print(
         "floor_normal_base="
         + "["
@@ -245,13 +274,14 @@ def main() -> int:
     print(f"floor_residual_median_m={floor.residual_median:.6f}")
     print(f"floor_residual_p95_m={floor.residual_p95:.6f}")
 
-    if transform.residual_p95 > 0.005:
+    if transform is not None and transform.residual_p95 > 0.005:
         print(
             "ERROR: raw/base p95 residual exceeds 5 mm; point correspondence or rigid-transform assumptions are invalid",
             file=sys.stderr,
         )
         return 2
-    print("transform_pairing_status=PASS")
+    if transform is not None:
+        print("transform_pairing_status=PASS")
     print("flat_geometry_review=PENDING")
     return 0
 

@@ -86,24 +86,22 @@ def test_flat_profile_only_accepts_zero_height_policy() -> None:
         )
 
 
-def test_rough_profile_requires_live_height_and_elevation_map_source() -> None:
+def test_rough_profile_requires_live_native_height_map_source() -> None:
     profile = RoughDeployment(required_consecutive_valid_frames=1)
     profile.validate_policy_height_func(
         next(iter(REAL_HEIGHT_SCAN_FUNCS)),
         config_path="rough/env.yaml",
     )
-    profile.validate_height_source("grid_map", "elevation")
+    profile.validate_height_source("height_map_array", "")
 
     with pytest.raises(DeploymentProfileFault, match="rough.*_zero_height_scan"):
         profile.validate_policy_height_func(
             ZERO_HEIGHT_SCAN_FUNC,
             config_path="flat/env.yaml",
         )
-    with pytest.raises(DeploymentProfileFault, match="production source.*grid_map"):
+    with pytest.raises(DeploymentProfileFault, match="production source.*height_map_array"):
         profile.validate_height_source("pointcloud2")
-    with pytest.raises(DeploymentProfileFault, match="production source.*grid_map"):
-        profile.validate_height_source("height_map_array")
-    with pytest.raises(DeploymentProfileFault, match="layer must be 'elevation'"):
+    with pytest.raises(DeploymentProfileFault, match="production source.*height_map_array"):
         profile.validate_height_source("grid_map", "variance")
 
 
@@ -137,8 +135,8 @@ def test_rough_profile_accepts_only_finite_fresh_nonfallback_scan() -> None:
         "used_fallback": False,
         "consecutive_valid_frames": 2,
         "source_stamp_valid": True,
-        "height_scan_source": "grid_map",
-        "map_layer": "elevation",
+        "height_scan_source": "height_map_array",
+        "map_layer": "",
     }
     good = profile.height_observation(
         provider=FakeProvider(np.linspace(-0.1, 0.1, 187), good_diag),

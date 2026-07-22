@@ -381,19 +381,22 @@ class WBCNodeLeg12ArmPassthrough(Node):
         leg_kp: float = 200.0,
         leg_kd: float = 10.0,
         height_scan_contract: str = "policies/rough/current/height_scan_contract.yaml",
-        height_scan_source: str = "grid_map",
-        height_scan_topic: str = "/terrain/elevation_map",
-        height_scan_pose_topic: str = "/localization/pose",
-        height_scan_map_layer: str = "elevation",
+        height_scan_source: str = "height_map_array",
+        height_scan_topic: str = "/utlidar/height_map_array",
+        height_scan_pose_topic: str = "/utlidar/robot_pose",
+        height_scan_map_layer: str = "",
         height_scan_base_frame: str = "base_link",
         height_scan_lidar_frame: str = "lidar",
         height_scan_extrinsic: Optional[str] = None,
         height_scan_timeout: float = 0.25,
-        height_scan_min_valid_ratio: float = 0.60,
+        height_scan_min_valid_ratio: float = 0.95,
+        height_scan_min_raw_valid_ratio: float = 0.55,
         height_scan_min_critical_valid_ratio: float = 0.95,
         height_scan_max_critical_sentinel_cells: int = 0,
         height_scan_sentinel_abs_threshold: float = 5.0,
         height_scan_max_last_valid_age: float = 0.1,
+        height_scan_controlled_plane_completion: bool = True,
+        height_scan_cache_max_age: float = 0.5,
         final_command_contract: str = "config/go2_leg_safety_contract.yaml",
     ):
         super().__init__("deploy_node")  # type: ignore
@@ -703,10 +706,15 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.height_scan_extrinsic = height_scan_extrinsic
         self.height_scan_timeout = float(height_scan_timeout)
         self.height_scan_min_valid_ratio = float(height_scan_min_valid_ratio)
+        self.height_scan_min_raw_valid_ratio = float(height_scan_min_raw_valid_ratio)
         self.height_scan_min_critical_valid_ratio = float(height_scan_min_critical_valid_ratio)
         self.height_scan_max_critical_sentinel_cells = int(height_scan_max_critical_sentinel_cells)
         self.height_scan_sentinel_abs_threshold = float(height_scan_sentinel_abs_threshold)
         self.height_scan_max_last_valid_age = float(height_scan_max_last_valid_age)
+        self.height_scan_controlled_plane_completion = bool(
+            height_scan_controlled_plane_completion
+        )
+        self.height_scan_cache_max_age = float(height_scan_cache_max_age)
         self.height_scan_provider: Optional[HeightScanProvider] = None
         self.latest_height_scan_diag: Dict[str, object] = {
             "height_scan_ok": False,
@@ -1197,6 +1205,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
             extrinsic_path=self.height_scan_extrinsic,
             timeout_s=self.height_scan_timeout,
             min_valid_ratio=self.height_scan_min_valid_ratio,
+            min_raw_valid_ratio=self.height_scan_min_raw_valid_ratio,
             min_critical_valid_ratio=self.height_scan_min_critical_valid_ratio,
             max_critical_sentinel_cells=self.height_scan_max_critical_sentinel_cells,
             sentinel_abs_threshold=self.height_scan_sentinel_abs_threshold,
@@ -1207,6 +1216,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
             ),
             require_source_stamp=self.deployment_profile.require_source_stamp,
             max_pose_map_skew_s=self.deployment_profile.max_pose_map_skew_sec,
+            controlled_plane_completion=self.height_scan_controlled_plane_completion,
+            height_cache_max_age_s=self.height_scan_cache_max_age,
         )
         contract = self.height_scan_provider.contract
         if contract.obs_dim != self.obs_dim:
@@ -1222,7 +1233,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
             )
         logging.info(
             "Height scan provider enabled | source=%s topic=%s pose_topic=%s layer=%s contract=%s timeout=%.3f "
-            "min_valid_ratio=%.2f min_critical_valid_ratio=%.2f max_critical_sentinel_cells=%d "
+            "min_valid_ratio=%.2f min_raw_valid_ratio=%.2f min_critical_valid_ratio=%.2f "
+            "max_critical_sentinel_cells=%d completion=%s cache_max_age=%.2f "
             "required_valid_frames=%d require_source_stamp=%s max_pose_map_skew=%.3f "
             "max_last_valid_age=%.3f"
             % (
@@ -1233,8 +1245,11 @@ class WBCNodeLeg12ArmPassthrough(Node):
                 contract_path,
                 self.height_scan_timeout,
                 self.height_scan_min_valid_ratio,
+                self.height_scan_min_raw_valid_ratio,
                 self.height_scan_min_critical_valid_ratio,
                 self.height_scan_max_critical_sentinel_cells,
+                self.height_scan_controlled_plane_completion,
+                self.height_scan_cache_max_age,
                 self.deployment_profile.required_consecutive_valid_frames,
                 self.deployment_profile.require_source_stamp,
                 self.deployment_profile.max_pose_map_skew_sec,

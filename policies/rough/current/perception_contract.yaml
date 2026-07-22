@@ -1,26 +1,25 @@
 schema_version: 1
 verification_status: UNVERIFIED
 policy_kind: rough
-production_source: grid_map
+production_source: height_map_array
 topics:
-  lidar_points_deskewed: /lidar/points_deskewed
-  lidar_imu: /lidar/imu_raw
-  elevation_map: /terrain/elevation_map
-  robot_pose: /localization/pose
-grid_map:
-  message_type: grid_map_msgs/msg/GridMap
-  layer: elevation
-  matrix_storage: column_major
-  circular_buffer_indices: required
+  lidar_points_deskewed: /utlidar/cloud_deskewed
+  lidar_imu: /utlidar/imu
+  elevation_map: /utlidar/height_map_array
+  robot_pose: /utlidar/robot_pose
 unitree_height_map:
-  role: diagnostic_ab_only
+  role: production
   message_type: unitree_go/msg/HeightMap
-  may_grant_motion_permission: false
+  data_layout: x_major_data_width_times_iy_plus_ix
+  origin_semantics: world_position_of_cell_0_0
+  resolution_units: meters_per_cell
+  height_units: meters
+  may_grant_motion_permission: true
 frames:
   world: odom
   robot: base_link
   sampling: base_yaw_aligned
-  lidar: lidar
+  lidar: utlidar_lidar
 timing:
   require_source_stamp: true
   max_message_age_sec: 0.25
@@ -28,9 +27,17 @@ timing:
   required_consecutive_valid_frames: 5
   max_last_valid_age_sec: 0.10
 coverage:
-  min_global_valid_ratio: 0.60
+  min_global_valid_ratio: 0.95
+  min_sensor_raw_valid_ratio: 0.55
   min_critical_valid_ratio: 0.95
   max_critical_sentinel_cells: 0
+completion:
+  world_height_cache_max_age_sec: 0.50
+  self_occlusion_x_range_m: [-0.35, 0.25]
+  self_occlusion_y_range_m: [-0.30, 0.30]
+  method: robust_local_plane
+  preserve_measured_cells: true
+  may_complete_critical_nonfootprint_unknown: false
 fallback:
   may_feed_zero_to_policy: false
   may_feed_fallback_to_policy: false
@@ -41,12 +48,13 @@ calibration:
   lidar_to_base_extrinsic: UNSET
   self_filter: UNSET
 mapping:
-  implementation: UNSET
+  implementation: Unitree_onboard_height_map_array
   configuration_hash: UNSET
 evidence: >-
-  UNVERIFIED until the selected LiDAR, rigid mount, 6DoF extrinsic,
-  Point-LIO/elevation-map configuration, latency distribution, coverage and
-  hardware perception-parity tests are recorded and independently reviewed.
-  The Unitree HeightMap topic remains diagnostic-only because its public IDL
-  does not define the data-axis, origin-cell or scaling semantics required to
-  prove Go2-X5-lab input parity.
+  UNVERIFIED for release until the selected LiDAR firmware, rigid mount,
+  self-filter and held-out walking trials are recorded and independently
+  reviewed. Three stationary hardware bags on 2026-07-22 established the
+  published x-major/origin/metre semantics, about 14.5 Hz output, 13-25 ms
+  typical pose-map skew, and preserved 0.15-0.20 m front/left obstacles. These
+  bags justify native adapter development but do not by themselves authorize
+  leg motion or mark this contract VERIFIED.

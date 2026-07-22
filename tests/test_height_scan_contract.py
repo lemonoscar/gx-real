@@ -13,7 +13,9 @@ from modules.height_scan_core import load_height_scan_contract  # noqa: E402
 
 
 def test_exported_contract_loads():
-    contract = load_height_scan_contract(str(ROOT / "policies" / "height_scan_contract.yaml"))
+    contract = load_height_scan_contract(
+        str(ROOT / "policies" / "rough" / "current" / "height_scan_contract.yaml")
+    )
     assert contract.obs_dim == 260
     assert contract.height_scan_dim == 187
     assert contract.observation_slices["height_scan"] == [66, 253]

@@ -280,29 +280,47 @@ def _verify_rough_perception_release_contract(root: Path, artifact: Any) -> None
         raise ArtifactManifestFault("rough perception contract must be a YAML mapping")
     if str(data.get("verification_status", "")).upper() != "VERIFIED":
         raise ArtifactManifestFault("rough perception contract is not VERIFIED")
-    if data.get("production_source") != "grid_map":
+    if data.get("production_source") != "height_map_array":
         raise ArtifactManifestFault(
-            "rough perception contract production_source must be grid_map"
+            "rough perception contract production_source must be height_map_array"
         )
 
-    grid_map = data.get("grid_map")
-    if not isinstance(grid_map, dict):
-        raise ArtifactManifestFault("rough perception contract requires grid_map section")
-    expected_grid_map = {
-        "message_type": "grid_map_msgs/msg/GridMap",
-        "layer": "elevation",
-        "matrix_storage": "column_major",
-        "circular_buffer_indices": "required",
-    }
-    mismatched_grid_map = [
-        name
-        for name, expected in expected_grid_map.items()
-        if grid_map.get(name) != expected
-    ]
-    if mismatched_grid_map:
+    unitree_height_map = data.get("unitree_height_map")
+    if not isinstance(unitree_height_map, dict):
         raise ArtifactManifestFault(
-            "rough perception contract has invalid GridMap wire contract: "
-            f"{mismatched_grid_map}"
+            "rough perception contract requires unitree_height_map section"
+        )
+    expected_height_map = {
+        "role": "production",
+        "message_type": "unitree_go/msg/HeightMap",
+        "data_layout": "x_major_data_width_times_iy_plus_ix",
+        "origin_semantics": "world_position_of_cell_0_0",
+        "resolution_units": "meters_per_cell",
+        "height_units": "meters",
+        "may_grant_motion_permission": True,
+    }
+    mismatched_height_map = [
+        name
+        for name, expected in expected_height_map.items()
+        if unitree_height_map.get(name) != expected
+    ]
+    if mismatched_height_map:
+        raise ArtifactManifestFault(
+            "rough perception contract has invalid Unitree HeightMap wire contract: "
+            f"{mismatched_height_map}"
+        )
+
+    completion = data.get("completion")
+    if not isinstance(completion, dict):
+        raise ArtifactManifestFault(
+            "rough perception contract requires completion section"
+        )
+    if completion.get("preserve_measured_cells") is not True or completion.get(
+        "may_complete_critical_nonfootprint_unknown"
+    ) is not False:
+        raise ArtifactManifestFault(
+            "rough perception completion must preserve measurements and fail closed "
+            "on critical non-footprint unknown cells"
         )
 
     calibration = data.get("calibration")

@@ -66,10 +66,10 @@ SLCAN_SPEED_CODE="${SLCAN_SPEED_CODE:-8}"
 ROS_TOPIC_TIMEOUT="${ROS_TOPIC_TIMEOUT:-4}"
 JOYSTICK_MOTION_TIMEOUT="${JOYSTICK_MOTION_TIMEOUT:-6}"
 JOYSTICK_MOTION_THRESHOLD="${JOYSTICK_MOTION_THRESHOLD:-0.20}"
-ROUGH_LIDAR_POINTS_TOPIC="${GX_REAL_ROUGH_LIDAR_POINTS_TOPIC:-/lidar/points_deskewed}"
-ROUGH_LIDAR_IMU_TOPIC="${GX_REAL_ROUGH_LIDAR_IMU_TOPIC:-/lidar/imu_raw}"
-ROUGH_HEIGHT_TOPIC="${GX_REAL_ROUGH_HEIGHT_TOPIC:-/terrain/elevation_map}"
-ROUGH_POSE_TOPIC="${GX_REAL_ROUGH_POSE_TOPIC:-/localization/pose}"
+ROUGH_LIDAR_POINTS_TOPIC="${GX_REAL_ROUGH_LIDAR_POINTS_TOPIC:-/utlidar/cloud_deskewed}"
+ROUGH_LIDAR_IMU_TOPIC="${GX_REAL_ROUGH_LIDAR_IMU_TOPIC:-/utlidar/imu}"
+ROUGH_HEIGHT_TOPIC="${GX_REAL_ROUGH_HEIGHT_TOPIC:-/utlidar/height_map_array}"
+ROUGH_POSE_TOPIC="${GX_REAL_ROUGH_POSE_TOPIC:-/utlidar/robot_pose}"
 
 info() {
   printf '[gx-real] %s\n' "$*"
@@ -514,12 +514,12 @@ check_rough_perception_topics() {
   fi
   require_ros_topic "deskewed LiDAR points" "${ROUGH_LIDAR_POINTS_TOPIC}"
   require_ros_topic "LiDAR IMU" "${ROUGH_LIDAR_IMU_TOPIC}"
-  require_ros_topic "rough elevation map" "${ROUGH_HEIGHT_TOPIC}"
-  require_ros_topic "rough localization pose" "${ROUGH_POSE_TOPIC}"
+  require_ros_topic "rough Unitree height map" "${ROUGH_HEIGHT_TOPIC}"
+  require_ros_topic "rough Unitree robot pose" "${ROUGH_POSE_TOPIC}"
   require_ros_topic_type "deskewed LiDAR points" "${ROUGH_LIDAR_POINTS_TOPIC}" "sensor_msgs/msg/PointCloud2"
   require_ros_topic_type "LiDAR IMU" "${ROUGH_LIDAR_IMU_TOPIC}" "sensor_msgs/msg/Imu"
-  require_ros_topic_type "rough elevation map" "${ROUGH_HEIGHT_TOPIC}" "grid_map_msgs/msg/GridMap"
-  require_ros_topic_type "rough localization pose" "${ROUGH_POSE_TOPIC}" "geometry_msgs/msg/PoseStamped"
+  require_ros_topic_type "rough Unitree height map" "${ROUGH_HEIGHT_TOPIC}" "unitree_go/msg/HeightMap"
+  require_ros_topic_type "rough Unitree robot pose" "${ROUGH_POSE_TOPIC}" "geometry_msgs/msg/PoseStamped"
 }
 
 check_wireless_joystick_motion() {

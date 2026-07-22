@@ -37,7 +37,8 @@ def test_help_describes_safe_and_actuated_stages() -> None:
     assert "GX_REAL_OPERATOR_CONFIRM_ACTUATORS=YES" in result.stdout
     assert "GX_REAL_OPERATOR_CONFIRM_CALIBRATION_STAND=YES" in result.stdout
     assert "never publishes LowCmd" in result.stdout
-    assert "ROS 1 Noetic/catkin" in result.stdout
+    assert "/utlidar/height_map_array" in result.stdout
+    assert "no external mapper required" not in result.stderr
 
 
 def test_missing_and_unknown_commands_fail() -> None:
@@ -70,6 +71,16 @@ def test_script_pins_foxy_grid_map_and_avoids_newer_ros_cli_flags() -> None:
     assert "--field" not in script
     assert 'exec "${PERCEPTION_LAUNCHER}" "$@"' in script
     assert "eval " not in script
+
+
+def test_native_height_map_is_the_production_monitor_path() -> None:
+    script = SCRIPT.read_text(encoding="utf-8")
+
+    assert "--source height_map_array" in script
+    assert "--topic /utlidar/height_map_array" in script
+    assert "--pose-topic /utlidar/robot_pose" in script
+    assert "height_source=height_map_array" in script
+    assert "--min-raw-valid-ratio 0.55" in script
 
 
 def test_record_rejects_an_unsafe_scene_name_before_touching_ros() -> None:

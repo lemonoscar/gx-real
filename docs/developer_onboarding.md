@@ -11,7 +11,7 @@
 ## 1. 系统合同
 
 ```text
-Go2 LowState + WirelessController + GridMap(Rough only)
+Go2 LowState + WirelessController + Unitree HeightMap(Rough only)
                          |
                          v
               WBC observation builder
@@ -33,7 +33,7 @@ X5 CAN <-> x5_fixed_hold -> /arm/state, /arm/target_state
 - actor 的 arm observation 在进程整个生命周期固定，绝不读取实测关节值；
 - 实测 `/arm/state` 和 `/arm/target_state` 仍参与独立的 freshness、producer、tracking
   和 lease 安全门；
-- Rough `[66:253]` 必须是 live GridMap 187D scan，fallback 只能诊断，不能放行；
+- Rough `[66:253]` 必须是通过生产门的 Unitree HeightMap 187D scan，fallback 只能诊断，不能放行；
 - artifact、训练合同、writer inventory 或最终腿命令安全不满足时 fail-closed。
 
 这一区分很重要：**观测去耦不等于物理安全去耦**。修改 arm 代码时，既要证明 actor
@@ -79,7 +79,7 @@ gx-real/
     wbc_node_leg12_arm_passthrough.py  观测拼接、推理、Go2 状态机/输出
     deployment_profile.py             Flat/Rough 配置与训练固定臂合同
     arm_observation.py                 arm state cache 与固定观测值
-    height_scan_core.py                纯 NumPy GridMap/坐标/采样逻辑
+    height_scan_core.py                纯 NumPy HeightMap/坐标/采样逻辑
     height_scan_provider.py            ROS2 provider、时序/frame/coverage
     height_scan_policy_validation.py   ONNX height 敏感性检查
     spacemouse_arm_node.py             fixed-hold owner；另含隔离的 legacy 模式
@@ -241,7 +241,7 @@ git diff --check
 - fixed-hold 内部 fault 发布 `/safety/estop`；
 - Flat/Rough 配置互斥和固定训练合同；
 - 260D/12D ONNX shape、height sensitivity 和 reference parity；
-- GridMap 列主序、x/y 轴、circular start index、yaw、frame、stamp、coverage；
+- HeightMap x-major、origin、x/y 轴、yaw、frame、stamp、coverage 和受控补全；
 - 保存的 Isaac Lab 187D reference 精确重放；
 - writer inventory、manifest、lease、最终腿命令和启动脚本 fail-closed。
 
@@ -290,13 +290,13 @@ y_m = y_r + sin(yaw) * x_b + cos(yaw) * y_b
 v   = clip(base_z - elevation(x_m, y_m) - 0.5, -1, 1)
 ```
 
-`grid_xy` 顺序来自发布包，x-fast/y-outer。GridMap 数据来自 Eigen 列主序，轴为
-`[x_buffer_index, y_buffer_index]`，必须应用 outer/inner start index。不要用 NumPy
-默认直觉重排，也不要忽略 circular buffer。
+`grid_xy` 顺序来自发布包，x-fast/y-outer。Unitree HeightMap 数据使用
+`data[width * iy + ix]`，origin 是 cell `[0,0]` 的世界坐标。实测 cell 必须保留；
+world cache 和局部平面补全不得掩盖关键前向未知。
 
 纯数学、message parsing 和 ROS subscription 分别留在 `height_scan_core.py` 与
 `height_scan_provider.py`，这样坐标转换可离线测试。新增后端不能自动获得生产资格；
-只有 `grid_map` 由当前 Rough deployment 允许，其他 source 保持 diagnostic-only。
+只有 `height_map_array` 由当前 Rough deployment 允许，其他 source 保持 diagnostic-only。
 
 ### 7.4 修改安全或 writer
 
@@ -363,8 +363,8 @@ contract 也必须先为真实 `VERIFIED`，只改 artifact manifest 不够。
 
 - **“机械臂锁住，所以直接读实测值没问题”**：不对。策略训练合同要求固定 actor
   输入；实测值只属于安全门。
-- **“GridMap 是二维数组，reshape 就行”**：不对。必须处理 Eigen 列主序、x/y 轴和
-  circular start index。
+- **“HeightMap 是二维数组，随便 reshape 就行”**：不对。必须遵守公开 IDL 的
+  x-major 索引、origin cell 和米制单位。
 - **“TF 能连通就说明外参正确”**：不对。还要通过平地、墙、台阶、左右/前后和 yaw
   held-out 验收。
 - **“fallback 能提高鲁棒性”**：对 Rough 生产不成立。fallback 地图与真实环境脱节，

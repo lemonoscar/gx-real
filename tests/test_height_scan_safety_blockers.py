@@ -20,7 +20,7 @@ import modules.height_scan_provider as height_scan_provider_module  # noqa: E402
 from modules.height_scan_provider import HeightScanProvider  # noqa: E402
 
 
-CONTRACT_PATH = ROOT / "policies" / "height_scan_contract.yaml"
+CONTRACT_PATH = ROOT / "policies" / "rough" / "current" / "height_scan_contract.yaml"
 
 
 @pytest.fixture(autouse=True)
@@ -484,12 +484,52 @@ def test_height_map_pose_stamp_skew_fails_closed():
 
     provider._pose_callback(_pose_msg(stamp=99.90))
     provider._height_map_callback(_height_map_msg(data, stamp=99.99))
+    provider._pose_callback(_pose_msg(stamp=100.05))
     _, diag = provider.get_scan()
 
     assert diag["height_scan_ok"] is False
     assert diag["failure_reason"] == "pose_map_stamp_skew"
     assert diag["pose_map_skew_s"] > provider.max_pose_map_skew_s
     assert diag["consecutive_valid_frames"] == 0
+
+
+def test_height_map_waits_for_following_pose_before_failing_skew_gate():
+    provider = _height_map_provider(
+        node=StampedFakeNode(ros_time_s=100.0),
+        require_source_stamp=True,
+        max_pose_map_skew_s=0.03,
+    )
+    data = _flat_height_map()
+    provider._pose_callback(_pose_msg(stamp=99.94))
+
+    provider._height_map_callback(_height_map_msg(data, stamp=99.99))
+    assert len(provider.pending_height_maps) == 1
+    provider._pose_callback(_pose_msg(stamp=100.00))
+    _, diag = provider.get_scan()
+
+    assert len(provider.pending_height_maps) == 0
+    assert diag["height_scan_ok"] is True
+    assert diag["pose_stamp_s"] == pytest.approx(100.00)
+    assert diag["pose_map_skew_s"] == pytest.approx(0.01)
+    assert diag["pose_sync_deferred"] is True
+
+
+def test_height_map_uses_closest_buffered_pose_instead_of_latest_pose():
+    provider = _height_map_provider(
+        node=StampedFakeNode(ros_time_s=100.0),
+        require_source_stamp=True,
+        max_pose_map_skew_s=0.03,
+    )
+    data = _flat_height_map()
+    provider._pose_callback(_pose_msg(x=0.0, stamp=99.95))
+    provider._pose_callback(_pose_msg(x=1.0, stamp=99.98))
+
+    provider._height_map_callback(_height_map_msg(data, stamp=99.951))
+    _, diag = provider.get_scan()
+
+    assert diag["height_scan_ok"] is True
+    assert diag["pose_stamp_s"] == pytest.approx(99.95)
+    assert diag["pose_map_skew_s"] == pytest.approx(0.001)
 
 
 def test_stale_height_map_source_stamp_fails_closed():
@@ -562,6 +602,50 @@ def test_height_map_array_critical_sentinel_fails_closed():
     assert "sentinel_critical" in diag["fallback_reason"]
     assert diag["critical_sentinel_cells"] == 1
     assert diag["footprint_sentinel_cells"] == 0
+
+
+def test_height_map_world_cache_bridges_a_short_critical_occlusion():
+    provider = _height_map_provider(
+        min_raw_valid_ratio=0.55,
+        height_cache_max_age_s=0.5,
+        controlled_plane_completion=True,
+        max_critical_sentinel_cells=0,
+    )
+    valid_data = _flat_height_map(value=0.1)
+    provider._pose_callback(_pose_msg(stamp=10.0))
+    provider._height_map_callback(_height_map_msg(valid_data, stamp=10.0))
+
+    occluded_data = valid_data.copy()
+    _set_height_map_cell(occluded_data, (0.4, 0.0), 1.0e9)
+    provider._pose_callback(_pose_msg(stamp=10.1))
+    provider._height_map_callback(_height_map_msg(occluded_data, stamp=10.1))
+    _, diag = provider.get_scan()
+
+    assert diag["height_scan_ok"] is True
+    assert diag["cache_filled_cells"] >= 1
+    assert diag["critical_sentinel_cells"] == 0
+
+
+def test_height_map_world_cache_does_not_hide_a_stale_critical_unknown():
+    provider = _height_map_provider(
+        min_raw_valid_ratio=0.55,
+        height_cache_max_age_s=0.5,
+        controlled_plane_completion=True,
+        max_critical_sentinel_cells=0,
+    )
+    valid_data = _flat_height_map(value=0.1)
+    provider._pose_callback(_pose_msg(stamp=10.0))
+    provider._height_map_callback(_height_map_msg(valid_data, stamp=10.0))
+
+    occluded_data = valid_data.copy()
+    _set_height_map_cell(occluded_data, (0.4, 0.0), 1.0e9)
+    provider._pose_callback(_pose_msg(stamp=10.6))
+    provider._height_map_callback(_height_map_msg(occluded_data, stamp=10.6))
+    _, diag = provider.get_scan()
+
+    assert diag["height_scan_ok"] is False
+    assert diag["cache_filled_cells"] == 0
+    assert diag["critical_sentinel_cells"] == 1
 
 
 def test_height_map_array_bounded_critical_sentinel_can_be_tolerated():

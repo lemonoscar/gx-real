@@ -22,7 +22,9 @@ from modules.height_scan_core import (  # noqa: E402
 
 
 def _contract():
-    return load_height_scan_contract(str(ROOT / "policies" / "height_scan_contract.yaml"))
+    return load_height_scan_contract(
+        str(ROOT / "policies" / "rough" / "current" / "height_scan_contract.yaml")
+    )
 
 
 def _flat_height_map(width=41, height=41, resolution=0.1, origin=(-2.0, -2.0), value=0.0):
@@ -210,6 +212,125 @@ def test_height_map_footprint_fill_does_not_inflate_coverage_gate():
     assert diag["valid_ratio"] >= 0.60
     assert diag["footprint_filled_cells"] > 0
     assert diag["critical_sentinel_cells"] == 0
+
+
+def test_controlled_completion_densifies_unitree_self_occlusion_without_erasing_obstacle():
+    contract = _contract()
+    data, origin, resolution = _flat_height_map()
+    x = contract.grid_xy[:, 0]
+    y = contract.grid_xy[:, 1]
+    critical = (
+        ((np.abs(x) <= 0.35) & (np.abs(y) <= 0.35))
+        | ((x >= -0.05) & (np.abs(y) <= 0.400001))
+    )
+    footprint = (
+        (x >= -0.35)
+        & (x <= 0.25)
+        & (y >= -0.300001)
+        & (y <= 0.300001)
+    )
+    noncritical = ~critical
+    unknown = footprint.copy()
+    unknown[np.flatnonzero(noncritical)[:34]] = True
+    for index in np.flatnonzero(unknown):
+        _set_map_cell(data, origin, resolution, contract.grid_xy[index], 1.0e9)
+    obstacle_index = int(
+        np.argmin(np.linalg.norm(contract.grid_xy - np.array([0.6, -0.1]), axis=1))
+    )
+    _set_map_cell(
+        data,
+        origin,
+        resolution,
+        contract.grid_xy[obstacle_index],
+        0.20,
+    )
+
+    scan, diag = height_map_to_height_scan(
+        data.reshape(-1),
+        data.shape[1],
+        data.shape[0],
+        resolution,
+        origin,
+        (0.0, 0.0, 0.0, contract.offset),
+        contract,
+        min_valid_ratio=0.95,
+        min_raw_valid_ratio=0.55,
+        controlled_plane_completion=True,
+    )
+
+    assert diag["ok"] is True
+    assert diag["raw_valid_ratio"] >= 0.55
+    assert diag["valid_ratio"] == 1.0
+    assert diag["completion_method"] == "robust_local_plane"
+    assert diag["footprint_filled_cells"] > 0
+    assert diag["noncritical_completed_cells"] > 0
+    assert diag["critical_sentinel_cells"] == 0
+    assert scan[obstacle_index] == pytest.approx(-0.20)
+
+
+def test_controlled_completion_never_invents_critical_forward_terrain():
+    contract = _contract()
+    data, origin, resolution = _flat_height_map()
+    _set_map_cell(data, origin, resolution, (0.4, 0.0), 1.0e9)
+
+    _, diag = height_map_to_height_scan(
+        data.reshape(-1),
+        data.shape[1],
+        data.shape[0],
+        resolution,
+        origin,
+        (0.0, 0.0, 0.0, contract.offset),
+        contract,
+        min_valid_ratio=0.95,
+        min_raw_valid_ratio=0.55,
+        controlled_plane_completion=True,
+    )
+
+    assert diag["ok"] is False
+    assert diag["critical_sentinel_cells"] == 1
+    assert diag["failure_reason"] == "sentinel_critical"
+
+
+def test_controlled_completion_fails_when_no_coherent_support_plane_exists():
+    contract = _contract()
+    data, origin, resolution = _flat_height_map()
+    rng = np.random.default_rng(7)
+    for xy in contract.grid_xy:
+        _set_map_cell(
+            data,
+            origin,
+            resolution,
+            xy,
+            rng.uniform(-0.30, 0.10),
+        )
+    x = contract.grid_xy[:, 0]
+    y = contract.grid_xy[:, 1]
+    footprint = (
+        (x >= -0.35)
+        & (x <= 0.25)
+        & (y >= -0.300001)
+        & (y <= 0.300001)
+    )
+    for index in np.flatnonzero(footprint):
+        _set_map_cell(data, origin, resolution, contract.grid_xy[index], 1.0e9)
+
+    _, diag = height_map_to_height_scan(
+        data.reshape(-1),
+        data.shape[1],
+        data.shape[0],
+        resolution,
+        origin,
+        (0.0, 0.0, 0.0, contract.offset),
+        contract,
+        min_valid_ratio=0.95,
+        min_raw_valid_ratio=0.55,
+        controlled_plane_completion=True,
+    )
+
+    assert diag["ok"] is False
+    assert diag["completion_method"] == "none"
+    assert diag["plane_completed_cells"] == 0
+    assert diag["failure_reason"] == "sentinel_critical"
 
 
 def test_height_map_critical_sentinel_fails_closed():

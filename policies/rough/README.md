@@ -10,9 +10,10 @@ Rough 发布包必须由真实 live-height checkpoint 导出，不能从 flat po
 - `perception_contract.yaml`：LiDAR、frame、topic、外参、时间和覆盖率合同；
 - env 中 live `height_scan` 和非空 `scene.height_scanner`。
 
-`RoughDeployment` 只接受 `grid_map_msgs/msg/GridMap` 的 `elevation` layer
-作为生产源，并严格解析 GridMapRosConverter 的列主序和 circular-buffer
-索引。Unitree `height_map_array` 与直接 pointcloud 都是 diagnostic-only；
+`RoughDeployment` 只接受 Unitree `height_map_array` 作为生产源，并严格解析公开
+IDL 的 x-major 索引、origin cell 和米制单位。adapter 使用 map/pose 时间门、短期
+world cache 和受约束局部平面补全；实测高度原样保留，关键非机身区域未知绝不补全。
+GridMap 与直接 pointcloud 都是 diagnostic-only；
 缺失、过期、时间不同步、覆盖不足或 fallback scan 都不会获得运动许可。
 
 actor 的机械臂相关输入也属于发布合同：训练 default pose 与真机固定目标均为

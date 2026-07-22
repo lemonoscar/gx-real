@@ -1,11 +1,11 @@
 # Rough LiDAR 安装、外参与验收指南
 
 本文定义 `gx-real` Rough 生产链的 LiDAR 校准和放行流程。它适用于
-`PointCloud2 + IMU -> deskew/localization -> self-filter -> elevation mapper -> GridMap`
-拓扑，不把 Unitree HeightMap 或直接点云分箱提升为生产输入。
+`Unitree onboard LiDAR/localization -> /utlidar/height_map_array -> gx-real adapter`
+拓扑。生产不再要求外装 Point-LIO、elevation mapper 或 GridMap workspace。
 
 > 当前状态：`policies/rough/current/perception_contract.yaml` 仍为
-> `UNVERIFIED`，型号、固件、外参、自滤波和 mapper 配置仍为 `UNSET`。
+> `UNVERIFIED`，型号、固件、外参和自滤波证据仍未完整发布。
 > 本文给出如何取得这些证据，不代表当前硬件已经通过校准。没有目标机器的实测
 > rosbag 和独立复核，不得把合同改为 `VERIFIED`。
 
@@ -17,11 +17,11 @@
    只能使用对应型号、固件的厂家流程；升级固件后需要重新核对。
 2. **安装外参**：LiDAR 刚性安装坐标系 `lidar` 到机器人 `base_link` 的 6DoF
    变换。这是本指南的核心。
-3. **链路参数**：时间戳/去畸变、self-filter、LIO 和 elevation mapper 配置。
+3. **链路参数**：Unitree 时间戳/去畸变、self-filter、定位和 onboard HeightMap 配置。
    外参正确但时间不同步或自滤波错误，同样会生成错误的 187D 输入。
 
 安装完成后，支架不得松动、弯曲或有可感知振动。拆装传感器、移动支架、修改
-URDF/static TF、升级固件或改变去畸变/mapper 配置，都视为校准失效。
+URDF/static TF、升级固件或改变 onboard mapping 配置，都视为验证失效。
 
 ## 2. 坐标系合同
 
@@ -31,10 +31,10 @@ URDF/static TF、升级固件或改变去畸变/mapper 配置，都视为校准�
 - `lidar`：使用驱动发布点云 header 中的真实 frame 名；如果名称不是 `lidar`，应在
   感知配置和合同中统一修改，不能在多处设置未声明别名；
 - `odom`：局部世界/地图 frame；
-- `/localization/pose`：`geometry_msgs/msg/PoseStamped`，表示 `base_link` 原点在
+- `/utlidar/robot_pose`：`geometry_msgs/msg/PoseStamped`，表示 `base_link` 原点在
   `odom` 中的姿态，不是 LiDAR 在 `odom` 中的姿态；
-- `/terrain/elevation_map`：`grid_map_msgs/msg/GridMap`，header frame 与 pose header
-  frame 必须相同，生产默认均为 `odom`。
+- `/utlidar/height_map_array`：`unitree_go/msg/HeightMap`，`frame_id` 与 pose header
+  frame 必须相同，生产实测均为 `odom`。
 
 本文将外参记作 `T_base_lidar`，其方向严格定义为：
 
@@ -48,13 +48,15 @@ p_base = T_base_lidar * p_lidar
 ros2 run tf2_ros tf2_echo base_link lidar
 ```
 
-不要同时从 URDF、static transform publisher 和 mapper 配置发布三份相同 TF。
+原装 Unitree 服务可能不发布这条 ROS TF；这不阻塞原生 HeightMap 生产链，因为地图和
+pose 已在 `odom` 下。不要为了通过检查伪造 TF。若外部感知栈确实使用 TF，不能同时从
+URDF、static transform publisher 和 mapper 配置发布三份相同 TF。
 整棵 TF 树只能有一个权威父子关系；重复或反向发布常会表现为偶发跳变，而不是
 稳定报错。
 
-生产 `grid_map` 路径不会使用 WBC 参数 `--height-scan-extrinsic`。外参必须已经被
-deskew/localization/self-filter/mapper 链正确消费；该 WBC 参数只对
-`pointcloud2` 诊断 provider 有意义，不能修复生产 GridMap。
+生产 HeightMap 路径不会使用 WBC 参数 `--height-scan-extrinsic`。原装安装时保留厂家
+内部几何并做本指南的 bag 验收；支架改动后必须通过厂家流程或受控外部感知栈更新，
+不能在 WBC 层补一个外参掩盖问题。
 
 ## 3. 标定前准备
 
@@ -67,37 +69,35 @@ deskew/localization/self-filter/mapper 链正确消费；该 WBC 参数只对
 - 实测高度的刚性台阶，建议使用 0.10 m 标称台阶并记录量具实测值；
 - 卷尺/卡尺、水平仪或可信的姿态基准；
 - Go2 固定支撑或吊架，确保采集过程中不会自行运动；
-- 足够磁盘空间记录原始点云、IMU、TF、定位和 GridMap。
+- 足够磁盘空间记录原始点云、IMU、定位和 HeightMap。
 
 验收数据必须包含一组不参与求解的 held-out rosbag，避免只证明拟合数据本身。
 
 ### 3.2 固件、频率和 frame 盘点
 
-先记录 LiDAR 型号、序列号、固件、驱动 commit、mapper commit 和配置文件。然后在
+先记录 LiDAR 型号、序列号、固件、Unitree 服务版本和配置。然后在
 只启动感知、所有 actuator 禁能的状态下执行：
 
 ```bash
 source scripts/setup_env.sh
-ros2 topic info --verbose /lidar/points_deskewed
-ros2 topic info --verbose /lidar/imu_raw
-ros2 topic info --verbose /terrain/elevation_map
-ros2 topic info --verbose /localization/pose
+ros2 topic info --verbose /utlidar/cloud_deskewed
+ros2 topic info --verbose /utlidar/imu
+ros2 topic info --verbose /utlidar/height_map_array
+ros2 topic info --verbose /utlidar/robot_pose
 
-ros2 topic hz /lidar/points_deskewed
-ros2 topic hz /lidar/imu_raw
-ros2 topic hz /terrain/elevation_map
-ros2 topic hz /localization/pose
+ros2 topic hz /utlidar/cloud_deskewed
+ros2 topic hz /utlidar/imu
+ros2 topic hz /utlidar/height_map_array
+ros2 topic hz /utlidar/robot_pose
 ```
 
 Foxy 的 `ros2 topic echo` 不支持后续发行版的 `--once/--field` 组合。另一个终端用
 有限超时检查 frame 和 TF：
 
 ```bash
-timeout -s INT 3s ros2 topic echo --no-arr /lidar/points_deskewed
-timeout -s INT 3s ros2 topic echo --no-arr /terrain/elevation_map
-timeout -s INT 3s ros2 topic echo /localization/pose
-ros2 run tf2_ros tf2_echo base_link lidar
-ros2 run tf2_ros tf2_echo odom base_link
+timeout -s INT 3s ros2 topic echo --no-arr /utlidar/cloud_deskewed
+timeout -s INT 3s ros2 topic echo --no-arr /utlidar/height_map_array
+timeout -s INT 3s ros2 topic echo /utlidar/robot_pose
 ```
 
 也可以一次生成含系统、ROS graph、Unitree LiDAR 状态/固件、topic 频率、样本和 TF 的
@@ -157,8 +157,7 @@ writer。该检查只能证明采集边界正确，不能替代独立物理支�
 
 根据实际 ROS2 版本确认 `ros2 bag` 可用后，用统一入口记录原始和派生数据：
 
-若 Foxy mapper 尚未确定，可先保存 Unitree onboard LIO 原始/派生数据，不会要求
-GridMap：
+统一入口会同时保存 Unitree onboard LIO、pose 和 HeightMap，不要求 GridMap：
 
 ```bash
 GX_REAL_ROUGH_RECORD_DURATION=30 \
@@ -170,7 +169,9 @@ LiDAR 外参标定。
 
 原装 Unitree 服务可能同时发布 `utlidar_lidar` 下的 `/utlidar/cloud` 和已经内部转换到
 `base_link` 的 `/utlidar/cloud_base`，但不发布对应 ROS TF。标准站立平地 bag 可直接用
-同时间戳、同点序的两种点云反推出服务实际使用的 `T_base_lidar`，并拟合平地做初检：
+同时间戳、同点序的两种点云反推出服务实际使用的 `T_base_lidar`，并拟合平地做初检；
+如果 `cloud_base` 已经过内部过滤而无法证明点对应，分析器会跳过外参反推但仍完成平地
+几何检查：
 
 ```bash
 /usr/bin/python3 real-wbc/scripts/analyze_utlidar_extrinsic_bag.py \
@@ -180,7 +181,7 @@ LiDAR 外参标定。
 分析器会在点数、点序或配对残差不能证明对应关系时失败，不会用 ICP 猜测外参；输出的
 平地结果仍需结合机器人是否水平、机械量测和独立墙面/台阶数据人工复核。
 
-mapper 启动并通过四个生产 topic/两条 TF 检查后，再记录完整数据：
+四个原生生产 topic 通过检查后，可记录完整数据：
 
 ```bash
 GX_REAL_ROUGH_RECORD_DURATION=30 \
@@ -223,7 +224,8 @@ scripts/rough_real_ops.sh calibration-capture first_rough_calibration heldout_st
 ```
 
 `0.100` 必须替换为量具测得的真实台阶高度，不能只填写标称值。held-out 场景不能参与
-外参或 mapper 参数求解。完成后检查采集集合：
+外参或 mapping 参数求解。原装未拆动的 Unitree LiDAR 首先做几何验收；只有验收失败
+或支架曾改动时才进入外参求解。完成后检查采集集合：
 
 ```bash
 scripts/rough_real_ops.sh calibration-status first_rough_calibration
@@ -241,7 +243,7 @@ scripts/rough_real_ops.sh calibration-status first_rough_calibration
 ```bash
 sha256sum path/to/lidar_extrinsic.yaml \
   path/to/self_filter.yaml \
-  path/to/mapper.yaml
+  path/to/unitree_height_map_config.yaml
 ```
 
 不要提交大型 rosbag 到 Git；将只读存储位置、bag 哈希、配置哈希和分析报告写入
@@ -265,11 +267,12 @@ x/y/z/roll/pitch/yaw、单位和变换方向。用新参数重放 held-out bag�
 
 ## 6. 将标定应用到生产链
 
-1. 在 URDF/static TF 或感知栈唯一配置点写入 `T_base_lidar`；
-2. 确认 deskew、LIO、self-filter、mapper 使用同一 TF 树和消息时间戳；
+1. 原装支架不改写厂家内部外参；仅在支架改动且有可复现求解结果时，在感知栈唯一配置
+   点写入 `T_base_lidar`；
+2. 确认 deskew、定位、self-filter 和 HeightMap 使用一致的消息时间戳和世界 frame；
 3. self-filter 使用 X5 固定姿态对应的机器人几何，过滤机身/机械臂但不侵蚀地面；
-4. mapper 发布 `/terrain/elevation_map` 的 `elevation` layer，frame 为 `odom`；
-5. localization 发布同一 `odom` frame 下的 `base_link` pose；
+4. onboard 服务发布 `/utlidar/height_map_array`，frame 为 `odom`；
+5. `/utlidar/robot_pose` 发布同一 `odom` frame 下的 `base_link` pose；
 6. 重启整条感知链，避免旧 TF 或旧地图残留；
 7. 运行下节验收，全部通过后才更新 perception contract。
 
@@ -282,10 +285,10 @@ x/y/z/roll/pitch/yaw、单位和变换方向。用新参数重放 held-out bag�
 
 以下是当前代码直接执行的 Rough motion-permit 合同：
 
-- GridMap source age 不超过 `0.25 s`；
+- HeightMap source age 不超过 `0.25 s`；
 - pose/map stamp 差不超过 `0.03 s`；
 - map 与 pose frame 完全相同；
-- 全局有效率至少 `0.60`；
+- 当前原始有效率至少 `0.55`，受控补全后全局有效率至少 `0.95`；
 - 关键落足区有效率至少 `0.95`；
 - 关键区 sentinel cell 为 `0`；
 - 连续 `5` 帧有效后才可能获得 motion permit；
@@ -295,18 +298,19 @@ x/y/z/roll/pitch/yaw、单位和变换方向。用新参数重放 held-out bag�
 
 ```bash
 /usr/bin/python3 real-wbc/scripts/run_height_scan_monitor.py \
-  --source grid_map \
-  --topic /terrain/elevation_map \
-  --pose-topic /localization/pose \
-  --map-layer elevation \
+  --source height_map_array \
+  --topic /utlidar/height_map_array \
+  --pose-topic /utlidar/robot_pose \
+  --map-layer '' \
   --contract policies/rough/current/height_scan_contract.yaml \
   --timeout 0.25 \
-  --min-valid-ratio 0.60 \
+  --min-valid-ratio 0.95 \
+  --min-raw-valid-ratio 0.55 \
   --min-critical-valid-ratio 0.95 \
   --max-critical-sentinel-cells 0
 ```
 
-日志应持续显示 `shape=187`、`ok=True`、`fallback=False`、`height_source=grid_map`、
+日志应持续显示 `shape=187`、`ok=True`、`fallback=False`、`height_source=height_map_array`、
 正确的 map/pose frame 和满足合同的 age/coverage。一次 `ok=True` 不算通过，应在每个
 标定场景与 held-out bag 中统计分布和故障次数。
 
@@ -331,7 +335,7 @@ x/y/z/roll/pitch/yaw、单位和变换方向。用新参数重放 held-out bag�
 - 左侧台阶只影响正 y；右侧只影响负 y；
 - 机器人原地 yaw 后，map/world 几何不旋转漂移，而 actor 网格随 base yaw 正确取样；
 - actor 数值遵循 `clip(base_z - elevation - 0.5, -1, 1)`：更高地形使数值更小；
-- GridMap layer 不发生 x/y 转置，circular-buffer 滚动后场景不跳格。
+- HeightMap 不发生 x/y 转置；公开 IDL 的索引必须保持 `data[width * iy + ix]`。
 
 ### 7.3 时间和动态验收
 
@@ -349,13 +353,13 @@ x/y/z/roll/pitch/yaw、单位和变换方向。用新参数重放 held-out bag�
 - `calibration.lidar_to_base_extrinsic`：外参配置路径、变换方向和 SHA-256，或稳定的
   证据标识；
 - `calibration.self_filter`：实现、配置路径/commit 和 SHA-256；
-- `mapping.implementation`：LIO/elevation mapper 实现与 commit；
+- `mapping.implementation`：Unitree onboard HeightMap 服务/固件实现标识；
 - `mapping.configuration_hash`：参与生产的完整配置 SHA-256；
 - `evidence`：bag 标识/哈希、验收报告、测试机器和复核人。
 
 只有独立复核确认上述数据和 held-out 结果后，才把 `verification_status` 改为
 `VERIFIED`。随后重新计算 perception contract 的 SHA-256，更新 Rough artifact
-manifest，并按仓库 README 的 manifest-only release 流程发布。修改任何校准或 mapper
+manifest，并按仓库 README 的 manifest-only release 流程发布。修改任何校准或 mapping
 配置后，旧哈希和旧 `VERIFIED` 状态立即失效。
 
 ## 9. 何时必须重新标定或回滚
@@ -365,11 +369,11 @@ manifest，并按仓库 README 的 manifest-only release 流程发布。修改�
 
 - LiDAR/支架拆装、碰撞、松动或明显振动；
 - 型号、序列号、固件、驱动、时间同步方式改变；
-- URDF、static TF、self-filter、LIO 或 mapper 配置改变；
+- URDF、static TF、self-filter、定位或 onboard mapping 配置改变；
 - 平地出现系统偏差、墙面倾斜、台阶镜像/转置或 yaw 相关漂移；
 - age/skew/coverage 经常触发门限；
 - X5 固定姿态产生未过滤 ghost，或 self-filter 误删关键落足区；
 - 不能复现合同中记录的配置 SHA、bag 或 held-out 报告。
 
-回滚必须成套恢复外参、TF、self-filter、mapper 和 perception contract，不能只替换其中
+回滚必须成套恢复外参、TF、self-filter、mapping 和 perception contract，不能只替换其中
 一个文件。

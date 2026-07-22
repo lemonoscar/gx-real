@@ -16,7 +16,9 @@ from modules.height_scan_core import (  # noqa: E402
 
 
 def _contract():
-    return load_height_scan_contract(str(ROOT / "policies" / "height_scan_contract.yaml"))
+    return load_height_scan_contract(
+        str(ROOT / "policies" / "rough" / "current" / "height_scan_contract.yaml")
+    )
 
 
 def test_slope_synthetic_rmse_under_3cm():

@@ -213,11 +213,34 @@ def main(deployment_kind: str) -> None:
         parser.add_argument("--height-scan-lidar-frame", type=str, default="lidar")
         parser.add_argument("--height-scan-extrinsic", type=str, default=None)
         parser.add_argument("--height-scan-timeout", type=float, default=0.25)
-        parser.add_argument("--height-scan-min-valid-ratio", type=float, default=0.60)
-        parser.add_argument("--height-scan-min-critical-valid-ratio", type=float, default=0.95)
-        parser.add_argument("--height-scan-max-critical-sentinel-cells", type=int, default=0)
+        parser.add_argument(
+            "--height-scan-min-valid-ratio",
+            type=float,
+            default=height_config["min_valid_ratio"],
+        )
+        parser.add_argument(
+            "--height-scan-min-raw-valid-ratio",
+            type=float,
+            default=height_config["min_raw_valid_ratio"],
+        )
+        parser.add_argument(
+            "--height-scan-min-critical-valid-ratio",
+            type=float,
+            default=height_config["min_critical_valid_ratio"],
+        )
+        parser.add_argument(
+            "--height-scan-max-critical-sentinel-cells",
+            type=int,
+            default=height_config["max_critical_sentinel_cells"],
+        )
         parser.add_argument("--height-scan-sentinel-abs-threshold", type=float, default=5.0)
         parser.add_argument("--height-scan-max-last-valid-age", type=float, default=0.1)
+        parser.set_defaults(
+            height_scan_controlled_plane_completion=bool(
+                height_config["controlled_plane_completion"]
+            ),
+            height_scan_cache_max_age=float(height_config["height_cache_max_age_sec"]),
+        )
     parser.add_argument(
         "--leg-kp",
         type=float,

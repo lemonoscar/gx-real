@@ -22,10 +22,13 @@ from modules.height_scan_core import height_map_to_height_scan, load_height_scan
 
 
 def _default_contract_path() -> str:
-    rough_contract = os.path.join(GX_REAL_ROOT, "policies", "rough", "height_scan_contract.yaml")
-    if os.path.exists(rough_contract):
-        return rough_contract
-    return os.path.join(GX_REAL_ROOT, "policies", "height_scan_contract.yaml")
+    return os.path.join(
+        GX_REAL_ROOT,
+        "policies",
+        "rough",
+        "current",
+        "height_scan_contract.yaml",
+    )
 
 
 def _yaw_from_quat(quat) -> float:
@@ -137,9 +140,11 @@ def _sample_grid(msg, pose_msg, contract, args: argparse.Namespace) -> dict:
         (pose_x, pose_y, yaw, pose_z),
         contract,
         sentinel_abs_threshold=args.sentinel_abs_threshold,
-        min_valid_ratio=args.min_raw_valid_ratio,
+        min_valid_ratio=args.min_valid_ratio,
+        min_raw_valid_ratio=args.min_raw_valid_ratio,
         min_critical_valid_ratio=args.min_critical_valid_ratio,
         max_critical_sentinel_cells=args.max_critical_sentinel_cells,
+        controlled_plane_completion=True,
     )
     del scan
 
@@ -420,14 +425,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pose-topic", default="/utlidar/robot_pose")
     parser.add_argument("--timeout", type=float, default=5.0)
     parser.add_argument("--sentinel-abs-threshold", type=float, default=5.0)
-    parser.add_argument("--min-raw-valid-ratio", type=float, default=0.85)
+    parser.add_argument("--min-valid-ratio", type=float, default=0.95)
+    parser.add_argument("--min-raw-valid-ratio", type=float, default=0.55)
     parser.add_argument("--min-critical-valid-ratio", type=float, default=0.95)
-    parser.add_argument("--max-critical-sentinel-cells", type=int, default=10)
+    parser.add_argument("--max-critical-sentinel-cells", type=int, default=0)
     parser.add_argument("--max-flatness", type=float, default=0.08)
     parser.add_argument("--footprint-x-min", type=float, default=-0.35)
     parser.add_argument("--footprint-x-max", type=float, default=0.25)
-    parser.add_argument("--footprint-y-min", type=float, default=-0.25)
-    parser.add_argument("--footprint-y-max", type=float, default=0.25)
+    parser.add_argument("--footprint-y-min", type=float, default=-0.30)
+    parser.add_argument("--footprint-y-max", type=float, default=0.30)
     parser.add_argument("--save-plot", default="", help="Optional PNG path for a 187-cell heatmap and coverage mask.")
     parser.add_argument("--plot-vlim-cm", type=float, default=15.0, help="Symmetric color scale for relative height heatmap.")
     parser.add_argument("--plot-dpi", type=int, default=160)

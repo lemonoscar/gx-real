@@ -224,14 +224,99 @@ def _height_scan_critical_mask(grid_xy: np.ndarray) -> np.ndarray:
     x = np.asarray(grid_xy[:, 0], dtype=np.float32)
     y = np.asarray(grid_xy[:, 1], dtype=np.float32)
     body = (np.abs(x) <= 0.35) & (np.abs(y) <= 0.35)
-    front = x >= -0.05
+    # The forward motion corridor is critical.  The outer y=+/-0.50 m corner
+    # cells are beyond the Go2 support polygon and may be plane-completed;
+    # treating them as critical made a repeatable LiDAR edge wedge prevent
+    # startup even while the entire foot/forward corridor was observed.
+    front = (x >= -0.05) & (np.abs(y) <= 0.400001)
     return body | front
 
 
 def _height_map_footprint_unknown_mask(grid_xy: np.ndarray) -> np.ndarray:
     x = np.asarray(grid_xy[:, 0], dtype=np.float32)
     y = np.asarray(grid_xy[:, 1], dtype=np.float32)
-    return (x >= -0.35) & (x <= 0.25) & (y >= -0.25) & (y <= 0.25)
+    # The three on-robot recordings show a repeatable Unitree self-occlusion
+    # band through y=+/-0.30 m.  Keep this mask deliberately smaller than the
+    # policy's critical region; unknown terrain in front of the robot is never
+    # classified as self-occlusion.
+    return (x >= -0.35) & (x <= 0.25) & (y >= -0.300001) & (y <= 0.300001)
+
+
+def _fit_robust_local_plane(
+    grid_xy: np.ndarray,
+    heights: np.ndarray,
+    support_mask: np.ndarray,
+    *,
+    residual_threshold_m: float = 0.03,
+    min_inliers: int = 15,
+    min_inlier_ratio: float = 0.40,
+    max_residual_p95_m: float = 0.035,
+) -> tuple[np.ndarray | None, dict[str, float | int]]:
+    """Fit a deterministic RANSAC plane for controlled unknown-cell completion."""
+
+    xy = np.asarray(grid_xy[support_mask], dtype=np.float64)
+    z = np.asarray(heights[support_mask], dtype=np.float64)
+    finite = np.isfinite(xy).all(axis=1) & np.isfinite(z)
+    xy = xy[finite]
+    z = z[finite]
+    count = int(z.size)
+    base_diag: dict[str, float | int] = {
+        "completion_support_cells": count,
+        "completion_inliers": 0,
+        "completion_inlier_ratio": 0.0,
+        "completion_residual_p95_m": float("inf"),
+    }
+    if count < min_inliers:
+        return None, base_diag
+
+    design = np.column_stack((xy, np.ones(count, dtype=np.float64)))
+    rng = np.random.default_rng(0)
+    best_mask: np.ndarray | None = None
+    best_score: tuple[int, float] = (-1, float("-inf"))
+    iterations = min(96, max(32, count))
+    for _ in range(iterations):
+        sample = rng.choice(count, size=3, replace=False)
+        sample_design = design[sample]
+        if abs(float(np.linalg.det(sample_design))) < 1.0e-8:
+            continue
+        candidate = np.linalg.solve(sample_design, z[sample])
+        residual = np.abs(design @ candidate - z)
+        inliers = residual <= residual_threshold_m
+        inlier_count = int(np.count_nonzero(inliers))
+        if inlier_count < 3:
+            continue
+        score = (inlier_count, -float(np.median(residual[inliers])))
+        if score > best_score:
+            best_score = score
+            best_mask = inliers
+
+    if best_mask is None:
+        return None, base_diag
+    inlier_count = int(np.count_nonzero(best_mask))
+    inlier_ratio = float(inlier_count / count)
+    if inlier_count < min_inliers or inlier_ratio < min_inlier_ratio:
+        base_diag.update(
+            {
+                "completion_inliers": inlier_count,
+                "completion_inlier_ratio": inlier_ratio,
+            }
+        )
+        return None, base_diag
+
+    coefficients, *_ = np.linalg.lstsq(design[best_mask], z[best_mask], rcond=None)
+    inlier_residual = np.abs(design[best_mask] @ coefficients - z[best_mask])
+    residual_p95 = float(np.percentile(inlier_residual, 95.0))
+    slope = float(np.linalg.norm(coefficients[:2]))
+    diag = {
+        "completion_support_cells": count,
+        "completion_inliers": inlier_count,
+        "completion_inlier_ratio": inlier_ratio,
+        "completion_residual_p95_m": residual_p95,
+        "completion_plane_slope": slope,
+    }
+    if residual_p95 > max_residual_p95_m or slope > 1.0:
+        return None, diag
+    return coefficients, diag
 
 
 def _elevation_lookup_to_height_scan(
@@ -242,11 +327,13 @@ def _elevation_lookup_to_height_scan(
     contract: HeightScanContract,
     sentinel_abs_threshold: float,
     min_valid_ratio: float,
+    min_raw_valid_ratio: float | None,
     min_critical_valid_ratio: float,
     max_critical_sentinel_cells: int,
     ground_band: tuple[float, float],
     fill_value: float,
     allow_footprint_fill: bool,
+    controlled_plane_completion: bool,
 ) -> tuple[np.ndarray, dict]:
     """Sample world elevations at the exported Isaac yaw-aligned grid."""
 
@@ -255,8 +342,11 @@ def _elevation_lookup_to_height_scan(
         raise ValueError(f"robot_xy_yaw_z must have shape (4,), got {robot.shape}")
     if not np.isfinite(robot).all():
         raise ValueError("robot_xy_yaw_z must contain only finite values")
+    if min_raw_valid_ratio is None:
+        min_raw_valid_ratio = min_valid_ratio
     for name, ratio in (
         ("min_valid_ratio", min_valid_ratio),
+        ("min_raw_valid_ratio", min_raw_valid_ratio),
         ("min_critical_valid_ratio", min_critical_valid_ratio),
     ):
         if not np.isfinite(ratio) or not 0.0 <= float(ratio) <= 1.0:
@@ -276,6 +366,7 @@ def _elevation_lookup_to_height_scan(
     sentinel_cells = np.zeros((contract.height_scan_dim,), dtype=bool)
     out_of_bounds_cells = np.zeros((contract.height_scan_dim,), dtype=bool)
     ground_band_reject_cells = np.zeros((contract.height_scan_dim,), dtype=bool)
+    sampled_heights = np.full((contract.height_scan_dim,), np.nan, dtype=np.float64)
 
     robot_x, robot_y, yaw, robot_z = robot
     cos_yaw = math.cos(float(yaw))
@@ -292,6 +383,7 @@ def _elevation_lookup_to_height_scan(
         if not math.isfinite(map_height) or abs(map_height) >= sentinel_abs_threshold:
             sentinel_cells[index] = True
             continue
+        sampled_heights[index] = map_height
 
         # Isaac Lab mdp.height_scan is sensor_z - ray_hit_z - offset.  The
         # exported reference proves sensor_z equals the robot root z here.
@@ -311,9 +403,52 @@ def _elevation_lookup_to_height_scan(
 
     critical_mask = _height_scan_critical_mask(contract.grid_xy)
     footprint_mask = _height_map_footprint_unknown_mask(contract.grid_xy)
+    raw_valid_cells = valid_cells.copy()
     footprint_sentinel_mask = sentinel_cells & footprint_mask
     footprint_filled_cells = np.zeros((contract.height_scan_dim,), dtype=bool)
-    if allow_footprint_fill and np.any(footprint_sentinel_mask):
+    plane_completed_cells = np.zeros((contract.height_scan_dim,), dtype=bool)
+    completion_diag: dict[str, float | int | str | bool] = {
+        "completion_enabled": bool(controlled_plane_completion),
+        "completion_method": "none",
+        "completion_support_cells": 0,
+        "completion_inliers": 0,
+        "completion_inlier_ratio": 0.0,
+        "completion_residual_p95_m": float("inf"),
+        "completion_plane_slope": float("inf"),
+    }
+    if controlled_plane_completion and np.any(sentinel_cells):
+        # Preserve every measured height.  The fitted plane is used only for
+        # known self-occlusion and non-critical holes; a never-seen critical
+        # front cell remains invalid and revokes motion permission.
+        support_mask = raw_valid_cells & ~footprint_mask
+        coefficients, fit_diag = _fit_robust_local_plane(
+            contract.grid_xy,
+            sampled_heights,
+            support_mask,
+        )
+        completion_diag.update(fit_diag)
+        if coefficients is not None:
+            eligible = sentinel_cells & (footprint_mask | ~critical_mask)
+            predicted_heights = (
+                contract.grid_xy.astype(np.float64) @ coefficients[:2]
+                + coefficients[2]
+            )
+            predicted_z_base = predicted_heights - robot_z
+            eligible &= (
+                np.isfinite(predicted_heights)
+                & (predicted_z_base >= ground_min)
+                & (predicted_z_base <= ground_max)
+            )
+            scan[eligible] = np.clip(
+                (-predicted_z_base[eligible] - contract.offset) * contract.scale,
+                contract.clip[0],
+                contract.clip[1],
+            ).astype(np.float32)
+            valid_cells[eligible] = True
+            plane_completed_cells[eligible] = True
+            footprint_filled_cells[eligible & footprint_mask] = True
+            completion_diag["completion_method"] = "robust_local_plane"
+    elif allow_footprint_fill and np.any(footprint_sentinel_mask):
         fill_source = valid_cells & ~footprint_mask
         if not np.any(fill_source):
             fill_source = valid_cells
@@ -325,7 +460,7 @@ def _elevation_lookup_to_height_scan(
         footprint_filled_cells[footprint_sentinel_mask] = True
 
     num_valid_cells = int(np.count_nonzero(valid_cells))
-    num_raw_valid_cells = int(np.count_nonzero(valid_cells & ~footprint_filled_cells))
+    num_raw_valid_cells = int(np.count_nonzero(raw_valid_cells))
     num_critical_cells = int(np.count_nonzero(critical_mask))
     num_critical_valid_cells = int(np.count_nonzero(valid_cells & critical_mask))
     valid_ratio = float(num_valid_cells / contract.height_scan_dim) if contract.height_scan_dim else 0.0
@@ -335,13 +470,14 @@ def _elevation_lookup_to_height_scan(
     sentinel_count = int(np.count_nonzero(sentinel_cells))
     footprint_sentinel_count = int(np.count_nonzero(footprint_sentinel_mask))
     footprint_filled_count = int(np.count_nonzero(footprint_filled_cells))
-    # Filled footprint cells are the only unknowns that may be exempted from
-    # the critical sentinel gate, and production GridMap sampling disables
-    # that exemption.
-    critical_sentinel_mask = sentinel_cells & critical_mask & ~footprint_filled_cells
+    # Only controlled self-occlusion completion may exempt a critical unknown.
+    # A critical non-footprint unknown remains visible to the fail-closed gate.
+    critical_sentinel_mask = sentinel_cells & critical_mask & ~plane_completed_cells & ~footprint_filled_cells
     critical_sentinel_count = int(np.count_nonzero(critical_sentinel_mask))
     noncritical_sentinel_count = int(
-        sentinel_count - footprint_filled_count - critical_sentinel_count
+        sentinel_count
+        - int(np.count_nonzero(plane_completed_cells | footprint_filled_cells))
+        - critical_sentinel_count
     )
     tolerated_critical_sentinel_count = min(critical_sentinel_count, max_critical_sentinel_cells)
     critical_sentinel_over_limit_count = max(0, critical_sentinel_count - max_critical_sentinel_cells)
@@ -358,7 +494,8 @@ def _elevation_lookup_to_height_scan(
         or critical_ground_band_reject_count > 0
     )
     ok = bool(
-        raw_valid_ratio >= min_valid_ratio
+        raw_valid_ratio >= float(min_raw_valid_ratio)
+        and valid_ratio >= min_valid_ratio
         and critical_accepted_ratio >= min_critical_valid_ratio
         and not has_critical_reject
     )
@@ -372,7 +509,7 @@ def _elevation_lookup_to_height_scan(
             failure_reason = "ground_band_critical"
         elif critical_accepted_ratio < min_critical_valid_ratio:
             failure_reason = "sparse_critical"
-        elif raw_valid_ratio < min_valid_ratio:
+        elif valid_ratio < min_valid_ratio or raw_valid_ratio < float(min_raw_valid_ratio):
             failure_reason = "sparse_height_map"
 
     diag = {
@@ -391,6 +528,10 @@ def _elevation_lookup_to_height_scan(
         "sentinel_cells": sentinel_count,
         "footprint_sentinel_cells": footprint_sentinel_count,
         "footprint_filled_cells": footprint_filled_count,
+        "plane_completed_cells": int(np.count_nonzero(plane_completed_cells)),
+        "noncritical_completed_cells": int(
+            np.count_nonzero(plane_completed_cells & ~critical_mask)
+        ),
         "critical_sentinel_cells": critical_sentinel_count,
         "critical_sentinel_tolerated_cells": tolerated_critical_sentinel_count,
         "critical_sentinel_over_limit_cells": critical_sentinel_over_limit_count,
@@ -411,6 +552,7 @@ def _elevation_lookup_to_height_scan(
         "used_fallback": False,
         "failure_reason": failure_reason,
     }
+    diag.update(completion_diag)
     return scan.astype(np.float32), diag
 
 
@@ -444,10 +586,12 @@ def height_map_to_height_scan(
     *,
     sentinel_abs_threshold: float = 5.0,
     min_valid_ratio: float = 0.60,
+    min_raw_valid_ratio: float | None = None,
     min_critical_valid_ratio: float = 0.95,
     max_critical_sentinel_cells: int = 0,
     ground_band: tuple[float, float] = (-0.85, 0.15),
     fill_value: float = 0.0,
+    controlled_plane_completion: bool = False,
 ) -> tuple[np.ndarray, dict]:
     """Convert an odom-frame elevation grid into an Isaac-style height scan.
 
@@ -492,11 +636,13 @@ def height_map_to_height_scan(
         contract=contract,
         sentinel_abs_threshold=sentinel_abs_threshold,
         min_valid_ratio=min_valid_ratio,
+        min_raw_valid_ratio=min_raw_valid_ratio,
         min_critical_valid_ratio=min_critical_valid_ratio,
         max_critical_sentinel_cells=max_critical_sentinel_cells,
         ground_band=ground_band,
         fill_value=fill_value,
         allow_footprint_fill=True,
+        controlled_plane_completion=controlled_plane_completion,
     )
 
 
@@ -623,11 +769,13 @@ def grid_map_to_height_scan(
         contract=contract,
         sentinel_abs_threshold=sentinel_abs_threshold,
         min_valid_ratio=min_valid_ratio,
+        min_raw_valid_ratio=None,
         min_critical_valid_ratio=min_critical_valid_ratio,
         max_critical_sentinel_cells=max_critical_sentinel_cells,
         ground_band=ground_band,
         fill_value=fill_value,
         allow_footprint_fill=False,
+        controlled_plane_completion=False,
     )
     diag.update(
         {

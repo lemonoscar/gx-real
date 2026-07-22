@@ -78,10 +78,10 @@ def main() -> int:
         TeleopMode.__class__.__import_type_support__()
         if args.rough:
             from geometry_msgs.msg import PoseStamped  # noqa: F401
-            from grid_map_msgs.msg import GridMap  # noqa: F401
+            from unitree_go.msg import HeightMap  # noqa: F401
 
             PoseStamped.__class__.__import_type_support__()
-            GridMap.__class__.__import_type_support__()
+            HeightMap.__class__.__import_type_support__()
         if args.spacemouse:
             if shutil.which("spacenavd") is None:
                 raise ImportError("spacenavd command not found")

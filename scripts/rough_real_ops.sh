@@ -43,12 +43,12 @@ Usage:
   scripts/rough_real_ops.sh COMMAND [args...]
 
 Safe Rough deployment workflow for ROS 2 Foxy/Jetson:
-  install-grid-map   Build pinned grid_map messages/core in the perception workspace.
+  install-grid-map   Optional: build pinned grid_map tools for offline diagnostics.
   probe              Save a read-only host, ROS, LiDAR and process report.
   lidar-check        Require live Unitree point cloud and raw IMU.
   lio-check          Require live Unitree raw IMU, deskewed cloud and localization.
-  perception-start   Exec the configured Point-LIO/elevation-map launcher.
-  perception-check   Require production topics, types, samples and TF.
+  perception-start   Check onboard Unitree perception, or exec an optional launcher.
+  perception-check   Require native Unitree map/pose/cloud/IMU production topics.
   record-raw [SCENE] Record finite Unitree LiDAR/LIO data before mapper setup.
   record [SCENE]     Record a finite raw/derived perception rosbag.
   calibration-init SESSION
@@ -58,8 +58,8 @@ Safe Rough deployment workflow for ROS 2 Foxy/Jetson:
                       mandatory for step_* and heldout_step scenes.
   calibration-status SESSION
                       Check that every required scene has at least one finalized bag.
-  monitor            Require a trailing run of valid 187D GridMap monitor frames.
-  bootstrap          Run install-grid-map, probe and lidar-check; no actuator writers.
+  monitor            Require trailing valid native HeightMap-to-187D frames.
+  bootstrap          Run probe and native LiDAR/LIO checks; no actuator writers.
   validate           Run perception-check and monitor; no actuator writers.
   preflight          Run validate, then the existing Rough actuator preflight.
   arm                Exec the existing Rough X5 fixed-hold entrypoint.
@@ -72,8 +72,8 @@ Configuration environment variables:
   GX_REAL_ROUGH_PERCEPTION_SETUP
       Perception setup.bash. Default: $GX_REAL_ROUGH_PERCEPTION_WS/install/setup.bash
   GX_REAL_ROUGH_PERCEPTION_LAUNCHER
-      Executable launcher that owns Point-LIO/elevation mapping. It must publish
-      the production topics listed below; shell command strings are not accepted.
+      Optional executable wrapper for site-specific Unitree perception startup.
+      Usually unnecessary because the onboard service already publishes the topics.
   GX_REAL_NETWORK_IFACE
       Unitree DDS interface. Default: eth0
   GX_REAL_CAN_IF
@@ -92,24 +92,22 @@ Configuration environment variables:
       [0, 0.3, 0.5, 0, 0, 0].
 
 Production perception contract:
-  /lidar/points_deskewed   sensor_msgs/msg/PointCloud2
-  /lidar/imu_raw           sensor_msgs/msg/Imu
-  /terrain/elevation_map   grid_map_msgs/msg/GridMap, layer=elevation
-  /localization/pose       geometry_msgs/msg/PoseStamped
-  TF: odom -> base_link and base_link -> lidar
+  /utlidar/cloud_deskewed    sensor_msgs/msg/PointCloud2
+  /utlidar/imu               sensor_msgs/msg/Imu
+  /utlidar/height_map_array  unitree_go/msg/HeightMap
+  /utlidar/robot_pose        geometry_msgs/msg/PoseStamped
 
 The default bootstrap never publishes LowCmd, configures CAN, releases MCF, or
-starts an actuator writer. Point-LIO/elevation mapping must remain a separate
-supervised process; this script validates its outputs before actuator preflight.
+starts an actuator writer. The production adapter consumes the onboard Unitree
+height map directly and validates its output before actuator preflight.
 
 Calibration commands are read-only with respect to actuators. They require an
 active MotionSwitcher mode before and after every capture and never call
 ReleaseMode. They collect evidence; they do not solve the 6DoF extrinsic or mark
 the perception contract VERIFIED.
 
-This script intentionally does not install unitreerobotics/point_lio_unilidar:
-that repository is ROS 1 Noetic/catkin, while this robot deployment is ROS 2
-Foxy. Configure a reviewed Foxy-native perception launcher instead.
+The pinned GridMap installer remains available only for offline comparison; it
+is not needed by the native production path.
 EOF
 }
 
@@ -181,12 +179,9 @@ source_rough_environment() {
 }
 
 require_perception_environment() {
-  [[ -f "${PERCEPTION_SETUP}" ]] || die \
-    "missing perception setup ${PERCEPTION_SETUP}; run install-grid-map or set GX_REAL_ROUGH_PERCEPTION_SETUP"
-  export GX_REAL_ROUGH_PERCEPTION_SETUP="${PERCEPTION_SETUP}"
   source_rough_environment
   "${GX_REAL_PYTHON_BIN}" -c \
-    'from grid_map_msgs.msg import GridMap; print("[gx-real][rough-ops] GridMap import ready")'
+    'from unitree_go.msg import HeightMap; print("[gx-real][rough-ops] Unitree HeightMap import ready")'
 }
 
 check_no_control_writers() {
@@ -441,8 +436,6 @@ probe() {
     /usr/bin/python3 --version
     /usr/bin/python3 -c \
       'import onnxruntime; print("onnxruntime", onnxruntime.__version__)' 2>&1 || true
-    /usr/bin/python3 -c \
-      'from grid_map_msgs.msg import GridMap; print("GridMap", GridMap)' 2>&1 || true
 
     printf '===== ROS GRAPH =====\n'
     timeout 10s ros2 node list 2>&1 || true
@@ -467,10 +460,6 @@ probe() {
       /utlidar/robot_odom \
       /utlidar/lidar_state \
       /utlidar/height_map_array \
-      /lidar/points_deskewed \
-      /lidar/imu_raw \
-      /terrain/elevation_map \
-      /localization/pose \
       /lowstate \
       /wirelesscontroller
     do
@@ -522,8 +511,11 @@ lio_check() {
 perception_start() {
   require_perception_environment
   check_no_control_writers
-  [[ -n "${PERCEPTION_LAUNCHER}" ]] || die \
-    "set GX_REAL_ROUGH_PERCEPTION_LAUNCHER to an executable Point-LIO/elevation-map launcher"
+  if [[ -z "${PERCEPTION_LAUNCHER}" ]]; then
+    info "no external launcher configured; checking onboard Unitree perception"
+    perception_check
+    return
+  fi
   [[ -f "${PERCEPTION_LAUNCHER}" ]] || die "missing perception launcher: ${PERCEPTION_LAUNCHER}"
   [[ -x "${PERCEPTION_LAUNCHER}" ]] || die "perception launcher is not executable: ${PERCEPTION_LAUNCHER}"
   info "starting supervised perception launcher: ${PERCEPTION_LAUNCHER}"
@@ -553,13 +545,11 @@ perception_check() {
   require_perception_environment
   check_no_control_writers
 
-  require_topic /lidar/points_deskewed sensor_msgs/msg/PointCloud2
-  require_topic /lidar/imu_raw sensor_msgs/msg/Imu
-  require_topic /terrain/elevation_map grid_map_msgs/msg/GridMap
-  require_topic /localization/pose geometry_msgs/msg/PoseStamped
-  require_tf base_link lidar
-  require_tf odom base_link
-  info "production perception topics and TF are ready"
+  require_topic /utlidar/cloud_deskewed sensor_msgs/msg/PointCloud2
+  require_topic /utlidar/imu sensor_msgs/msg/Imu
+  require_topic /utlidar/height_map_array unitree_go/msg/HeightMap
+  require_topic /utlidar/robot_pose geometry_msgs/msg/PoseStamped
+  info "native Unitree production perception topics are ready"
 }
 
 record_bag() {
@@ -589,14 +579,6 @@ record_bag() {
       ;;
     full)
       perception_check
-      topics+=(
-        /lidar/points_deskewed
-        /lidar/imu_raw
-        /terrain/elevation_map
-        /localization/pose
-        /tf
-        /tf_static
-      )
       ;;
     *)
       die "internal record mode error: ${mode}"
@@ -742,19 +724,21 @@ monitor() {
   log_path="${output_dir}/${stamp}.log"
   mkdir -p "${output_dir}"
 
-  info "running finite GridMap monitor for ${MONITOR_DURATION}s"
+  info "running finite native Unitree HeightMap monitor for ${MONITOR_DURATION}s"
   set +e
   timeout -s INT "${MONITOR_DURATION}s" \
     "${GX_REAL_PYTHON_BIN}" "${GX_REAL_ROOT}/real-wbc/scripts/run_height_scan_monitor.py" \
-      --source grid_map \
-      --topic /terrain/elevation_map \
-      --pose-topic /localization/pose \
-      --map-layer elevation \
+      --source height_map_array \
+      --topic /utlidar/height_map_array \
+      --pose-topic /utlidar/robot_pose \
+      --map-layer '' \
       --contract "${GX_REAL_ROOT}/policies/rough/current/height_scan_contract.yaml" \
       --timeout 0.25 \
-      --min-valid-ratio 0.60 \
+      --min-valid-ratio 0.95 \
+      --min-raw-valid-ratio 0.55 \
       --min-critical-valid-ratio 0.95 \
       --max-critical-sentinel-cells 0 \
+      --height-cache-max-age 0.50 \
       2>&1 | tee "${log_path}"
   status=${PIPESTATUS[0]}
   set -e
@@ -765,7 +749,7 @@ monitor() {
 
   if ! awk -v minimum="${MONITOR_MIN_VALID_FRAMES}" '
     /shape=187/ {
-      if ($0 ~ /ok=True/ && $0 ~ /fallback=False/ && $0 ~ /height_source=grid_map/) {
+      if ($0 ~ /ok=True/ && $0 ~ /fallback=False/ && $0 ~ /height_source=height_map_array/) {
         consecutive += 1
       } else {
         consecutive = 0
@@ -785,29 +769,24 @@ require_actuator_confirmation() {
 
 runtime_commands() {
   cat <<EOF
-Perception terminal:
+Onboard perception check (no external mapper required):
   cd ${GX_REAL_ROOT}
-  export GX_REAL_ROUGH_PERCEPTION_SETUP=${PERCEPTION_SETUP}
-  export GX_REAL_ROUGH_PERCEPTION_LAUNCHER=/absolute/path/to/start_rough_perception.sh
   scripts/rough_real_ops.sh perception-start
 
 Validation terminal:
   cd ${GX_REAL_ROOT}
-  export GX_REAL_ROUGH_PERCEPTION_SETUP=${PERCEPTION_SETUP}
   scripts/rough_real_ops.sh validate
 
 Ad-hoc diagnostic full capture (not a formal calibration session):
   cd ${GX_REAL_ROOT}
-  export GX_REAL_ROUGH_PERCEPTION_SETUP=${PERCEPTION_SETUP}
   GX_REAL_ROUGH_RECORD_DURATION=30 scripts/rough_real_ops.sh record flat_yaw0
 
-Raw capture before a reviewed mapper is available:
+Native raw/height-map capture:
   cd ${GX_REAL_ROOT}
   GX_REAL_ROUGH_RECORD_DURATION=30 scripts/rough_real_ops.sh record-raw prone_inventory
 
 First full calibration, while MCF remains active and the robot is supported:
   cd ${GX_REAL_ROOT}
-  export GX_REAL_ROUGH_PERCEPTION_SETUP=${PERCEPTION_SETUP}
   export GX_REAL_OPERATOR_CONFIRM_CALIBRATION_STAND=YES
   scripts/rough_real_ops.sh calibration-init first_rough_calibration
   scripts/rough_real_ops.sh calibration-capture first_rough_calibration flat_yaw0
@@ -816,17 +795,14 @@ First full calibration, while MCF remains active and the robot is supported:
 
 Actuator preflight terminal, only after release contracts are VERIFIED:
   cd ${GX_REAL_ROOT}
-  export GX_REAL_ROUGH_PERCEPTION_SETUP=${PERCEPTION_SETUP}
   export GX_REAL_OPERATOR_CONFIRM_ACTUATORS=YES
   scripts/rough_real_ops.sh preflight --network-iface ${NETWORK_IFACE} --can-if ${CAN_IF} --check-joystick-motion
 
 X5 terminal, using the exact command printed by preflight:
-  export GX_REAL_ROUGH_PERCEPTION_SETUP=${PERCEPTION_SETUP}
   export GX_REAL_OPERATOR_CONFIRM_ACTUATORS=YES
   scripts/rough_real_ops.sh arm --model X5 --can-interface ${CAN_IF} --safety-topic /safety/estop
 
 Leg terminal, using the exact reviewed arguments printed by preflight:
-  export GX_REAL_ROUGH_PERCEPTION_SETUP=${PERCEPTION_SETUP}
   export GX_REAL_OPERATOR_CONFIRM_ACTUATORS=YES
   scripts/rough_real_ops.sh legs [reviewed run_leg12_rough_real.sh arguments]
 EOF
@@ -893,9 +869,8 @@ case "${command}" in
     ;;
   bootstrap)
     [[ "$#" -eq 0 ]] || die "bootstrap accepts no arguments"
-    install_grid_map
     probe
-    lidar_check
+    lio_check
     ;;
   validate)
     [[ "$#" -eq 0 ]] || die "validate accepts no arguments"
@@ -906,24 +881,18 @@ case "${command}" in
     require_actuator_confirmation
     perception_check
     monitor
-    export GX_REAL_ROUGH_PERCEPTION_SETUP="${PERCEPTION_SETUP}"
-    export GX_REAL_PERCEPTION_SETUP="${PERCEPTION_SETUP}"
     exec "${GX_REAL_ROOT}/scripts/prepare_rough_run.sh" "$@"
     ;;
   arm)
     require_actuator_confirmation
     perception_check
     monitor
-    export GX_REAL_ROUGH_PERCEPTION_SETUP="${PERCEPTION_SETUP}"
-    export GX_REAL_PERCEPTION_SETUP="${PERCEPTION_SETUP}"
     exec "${GX_REAL_ROOT}/scripts/run_x5_fixed_hold_rough.sh" "$@"
     ;;
   legs)
     require_actuator_confirmation
     perception_check
     monitor
-    export GX_REAL_ROUGH_PERCEPTION_SETUP="${PERCEPTION_SETUP}"
-    export GX_REAL_PERCEPTION_SETUP="${PERCEPTION_SETUP}"
     exec "${GX_REAL_ROOT}/scripts/run_leg12_rough_real.sh" "$@"
     ;;
   runtime-commands)

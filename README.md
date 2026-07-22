@@ -2,7 +2,7 @@
 
 `gx-real` 用于在 Unitree Go2 + ARX5 X5 + Jetson 上部署 `Go2-X5-lab`
 导出的 12 维腿部策略。当前生产路径分为互斥的 Flat 和 Rough 两类；本分支重点是
-Rough 策略、固定机械臂输入和 LiDAR elevation map。
+Rough 策略、固定机械臂输入和 Unitree 原生 LiDAR 高度图。
 
 > 安全状态：仓库中的 Flat/Rough artifact manifest 仍是 `UNRELEASED`，Rough
 > perception contract 仍是 `UNVERIFIED`。真实 LowCmd/CAN 输出会被发布门禁拒绝。
@@ -19,7 +19,7 @@ Rough 策略、固定机械臂输入和 LiDAR elevation map。
 actor。Go2 与 X5 分属两个互斥 writer：
 
 ```text
-Go2 lowstate + joystick + rough GridMap
+Go2 lowstate + joystick + /utlidar/height_map_array
                  |
                  v
        WBC / 260D observation
@@ -43,8 +43,8 @@ X5 CAN <-> x5_fixed_hold node
   `/arm/state` 数值不会复制进 actor。
 - 实测 arm topic 仍用于物理 fixed-hold freshness/tracking 安全门。它们失效会停腿，
   但不会改变固定 actor 输入。
-- Rough actor 只接受 `GridMap/elevation` 产生的 187 维 live scan；zero、last-valid、
-  Unitree HeightMap 和直接点云都不能获得运动许可。
+- Rough actor 只接受通过时间、覆盖率、关键区和补全门控的 Unitree HeightMap 187 维
+  live scan；zero、last-valid 和直接点云都不能获得运动许可。
 - 同时只能存在一个 Go2 LowCmd writer 和一个 X5 CAN writer。
 
 ## 2. 260 维策略观测合同
@@ -63,7 +63,7 @@ X5 CAN <-> x5_fixed_hold node
 | `[12:30]` | 18 | joint position relative | 12 腿实测 + 6 臂固定训练姿态 |
 | `[30:48]` | 18 | joint velocity | 12 腿实测 + 6 臂零速度 |
 | `[48:66]` | 18 | previous action | 12 腿历史动作 + 6 个零 |
-| `[66:253]` | 187 | height scan | Rough GridMap；Flat 为精确零常量 |
+| `[66:253]` | 187 | height scan | Rough Unitree HeightMap；Flat 为精确零常量 |
 | `[253:259]` | 6 | arm joint command | 固定 `[0, 0.3, 0.5, 0, 0, 0]` |
 | `[259:260]` | 1 | gripper command | 固定 `0.0` |
 
@@ -77,18 +77,18 @@ default pose、六组 `[0, 0]` command offset、zero action padding 或固定 gr
 生产拓扑固定为：
 
 ```text
-LiDAR PointCloud2 + IMU
-  -> deskew / localization
-  -> self-filter
-  -> elevation mapper
-  -> grid_map_msgs/msg/GridMap, layer=elevation
+Unitree onboard LiDAR / localization
+  -> /utlidar/height_map_array + /utlidar/robot_pose
+  -> source/pose timestamp gate
+  -> short world-coordinate cache
+  -> constrained self-occlusion/non-critical completion
   -> gx-real 17 x 11 sampler
   -> observation[66:253]
 ```
 
 坐标合同：
 
-- map frame 默认为 `odom`；`/localization/pose` 必须是同一 frame 下的
+- map frame 默认为 `odom`；`/utlidar/robot_pose` 必须是同一 frame 下的
   `base_link` 原点姿态，不是 LiDAR pose。
 - `base_link` 使用 x 向前、y 向左、z 向上；训练扫描网格是
   `base_yaw_aligned`，只使用 base yaw，不使用 roll/pitch 旋转采样平面。
@@ -103,16 +103,20 @@ LiDAR PointCloud2 + IMU
 
 - actor 高度值为
   `clip(base_z - elevation(x_m, y_m) - 0.5, -1.0, 1.0)`。
-- GridMap 按 Eigen 列主序解码，矩阵轴为 `[x_buffer_index, y_buffer_index]`，
-  并应用 `outer_start_index/inner_start_index` circular-buffer 偏移。
+- Unitree `HeightMap.data` 按 `data[width * iy + ix]` 解码；`origin` 是 `[0,0]`
+  cell 的世界坐标，分辨率和高度单位均为米。
+- 所有实测 cell 原样保留。最多复用 0.50 s 的同一世界位置历史高度；稳健局部平面只
+  补已知机身遮挡区和非关键区，中央前向关键未知绝不由平面补全。
+- 当前生产门要求原始覆盖率至少 0.55、补全后全局覆盖率至少 0.95、关键区至少
+  0.95、关键 sentinel 为 0，并连续通过至少 5 帧。
 - map/pose frame 不同、四元数无效、source 过期、时间差超过 30 ms、关键区未知、
   几何/存储顺序不符或 fallback 均 fail-closed。
 - 创建控制节点前还会把 Rough `env.yaml` 中的 0.1 m resolution、1.6×1.0 m size、
   `xy` ordering、yaw/world-down 射线和 observation clip/scale 与运行时 contract
   逐项交叉验证。
 
-这些公式由 `tests/test_height_scan_core.py` 中的 circular-buffer/yaw 测试和保存的
-Isaac Lab ray-hit reference 逐元素验证。实际 LiDAR 外参和 mapper 仍必须按目标硬件
+这些公式由 `tests/test_height_scan_core.py` 中的 Unitree layout/yaw/unknown 测试和保存的
+Isaac Lab ray-hit reference 逐元素验证。实际 LiDAR 几何和 onboard mapping 仍必须按目标硬件
 校准，不能由单元测试替代。
 
 ## 4. 目录与职责
@@ -131,7 +135,7 @@ policies/
 real-wbc/modules/
   wbc_node_leg12_arm_passthrough.py    260D 拼接、12D 推理、Go2 控制与运行时门禁
   deployment_profile.py               Flat/Rough 互斥合同和固定 arm 训练契约
-  height_scan_core.py                  纯 NumPy GridMap/height scan 坐标转换
+  height_scan_core.py                  纯 NumPy HeightMap/height scan 坐标转换
   height_scan_provider.py              ROS2 map/pose 订阅、时序与 frame 检查
   spacemouse_arm_node.py               legacy SpaceMouse 与生产 fixed-hold X5 owner
   artifact_manifest.py                发布资产、commit 和 perception gate
@@ -238,6 +242,6 @@ pose、action scale 或输出维度变化都必须先修改部署代码与测试
 - [上机使用指南](docs/上机使用指南.md)：唯一生产操作手册。
 - [LiDAR 校准指南](docs/lidar_calibration.md)：安装、6DoF 外参、时间同步、map 验收。
 - [开发与仓库指南](docs/developer_onboarding.md)：构建、修改点、验证和交付。
-- [LiDAR/height-map 后端决策](docs/lidar_height_backend_decision_2026-07-16.md)：为什么生产选择 GridMap。
+- [LiDAR/height-map 后端历史决策](docs/lidar_height_backend_decision_2026-07-16.md)：旧 GridMap 方案的审计背景。
 - [Rough 发布包说明](policies/rough/README.md)：模型资产和 release gate。
 - [文档索引](docs/README.md)：当前文档与历史审计材料边界。

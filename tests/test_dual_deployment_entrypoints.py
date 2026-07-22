@@ -68,6 +68,9 @@ def test_preflight_entrypoints_select_mode_and_rough_requires_perception_topics(
     assert "check_rough_perception_topics" in shared
     assert "GX_REAL_ROUGH_HEIGHT_TOPIC" in shared
     assert "GX_REAL_ROUGH_POSE_TOPIC" in shared
+    assert "/utlidar/height_map_array" in shared
+    assert "/utlidar/robot_pose" in shared
+    assert "unitree_go/msg/HeightMap" in shared
     assert "prepare_flat_run.sh" in shared
     assert "prepare_rough_run.sh" in shared
     assert "CHECK_SPACEMOUSE=0" in shared
