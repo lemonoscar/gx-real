@@ -166,7 +166,21 @@ GX_REAL_ROUGH_RECORD_DURATION=30 \
 ```
 
 这份趴卧数据可用于盘点 topic、频率、固件和静态噪声，不能替代标准站立几何下的
-LiDAR 外参标定。mapper 启动并通过四个生产 topic/两条 TF 检查后，再记录完整数据：
+LiDAR 外参标定。
+
+原装 Unitree 服务可能同时发布 `utlidar_lidar` 下的 `/utlidar/cloud` 和已经内部转换到
+`base_link` 的 `/utlidar/cloud_base`，但不发布对应 ROS TF。标准站立平地 bag 可直接用
+同时间戳、同点序的两种点云反推出服务实际使用的 `T_base_lidar`，并拟合平地做初检：
+
+```bash
+/usr/bin/python3 real-wbc/scripts/analyze_utlidar_extrinsic_bag.py \
+  logs/lidar_calibration/20260722-210736_raw_flat_extrinsic_check
+```
+
+分析器会在点数、点序或配对残差不能证明对应关系时失败，不会用 ICP 猜测外参；输出的
+平地结果仍需结合机器人是否水平、机械量测和独立墙面/台阶数据人工复核。
+
+mapper 启动并通过四个生产 topic/两条 TF 检查后，再记录完整数据：
 
 ```bash
 GX_REAL_ROUGH_RECORD_DURATION=30 \
