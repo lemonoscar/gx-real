@@ -13,18 +13,28 @@ from modules.sportmode_wireless import (  # noqa: E402
     OBSTACLE_AVOID_API_ID_SWITCH_GET,
     OBSTACLE_AVOID_API_ID_SWITCH_SET,
     SPORT_API_ID_MOVE,
+    SPORT_API_ID_STAND_DOWN,
     SPORT_API_ID_STOP_MOVE,
     SPORT_API_ID_SWITCH_JOYSTICK,
+    VUI_API_ID_GET_BRIGHTNESS,
+    VUI_API_ID_SET_BRIGHTNESS,
     SportModeCommandSource,
     boolean_parameter,
+    zero_brightness_parameter,
     sport_move_parameter,
     validate_command_limits,
 )
 
 
 def test_vendor_api_ids_and_obstacle_service_contract_match_vendored_sdk() -> None:
-    assert (SPORT_API_ID_STOP_MOVE, SPORT_API_ID_MOVE, SPORT_API_ID_SWITCH_JOYSTICK) == (
+    assert (
+        SPORT_API_ID_STOP_MOVE,
+        SPORT_API_ID_STAND_DOWN,
+        SPORT_API_ID_MOVE,
+        SPORT_API_ID_SWITCH_JOYSTICK,
+    ) == (
         1003,
+        1005,
         1008,
         1027,
     )
@@ -32,6 +42,7 @@ def test_vendor_api_ids_and_obstacle_service_contract_match_vendored_sdk() -> No
         OBSTACLE_AVOID_API_ID_SWITCH_SET,
         OBSTACLE_AVOID_API_ID_SWITCH_GET,
     ) == (1001, 1002)
+    assert (VUI_API_ID_SET_BRIGHTNESS, VUI_API_ID_GET_BRIGHTNESS) == (1005, 1006)
     sport_header = (
         ROOT / "unitree_sdk2/include/unitree/robot/go2/sport/sport_api.hpp"
     ).read_text(encoding="utf-8")
@@ -39,11 +50,17 @@ def test_vendor_api_ids_and_obstacle_service_contract_match_vendored_sdk() -> No
         ROOT
         / "unitree_sdk2/include/unitree/robot/go2/obstacles_avoid/obstacles_avoid_api.hpp"
     ).read_text(encoding="utf-8")
+    vui_header = (
+        ROOT / "unitree_sdk2/include/unitree/robot/go2/vui/vui_api.hpp"
+    ).read_text(encoding="utf-8")
     assert "ROBOT_SPORT_API_ID_STOPMOVE           = 1003" in sport_header
+    assert "ROBOT_SPORT_API_ID_STANDDOWN          = 1005" in sport_header
     assert "ROBOT_SPORT_API_ID_MOVE               = 1008" in sport_header
     assert "ROBOT_SPORT_API_ID_SWITCHJOYSTICK     = 1027" in sport_header
     assert "ROBOT_API_ID_OBSTACLES_AVOID_SWITCH_SET = 1001" in obstacle_header
     assert "ROBOT_API_ID_OBSTACLES_AVOID_SWITCH_GET = 1002" in obstacle_header
+    assert "ROBOT_VUI_API_ID_SETBRIGHTNESS       = 1005" in vui_header
+    assert "ROBOT_VUI_API_ID_GETBRIGHTNESS       = 1006" in vui_header
 
 
 def test_request_parameters_match_unitree_json_contracts() -> None:
@@ -54,6 +71,7 @@ def test_request_parameters_match_unitree_json_contracts() -> None:
     }
     assert json.loads(boolean_parameter(False, field="data")) == {"data": False}
     assert json.loads(boolean_parameter(False, field="enable")) == {"enable": False}
+    assert json.loads(zero_brightness_parameter()) == {"brightness": 0}
 
 
 def test_default_mapping_accepts_only_speed_and_turn_after_centering() -> None:
@@ -106,15 +124,45 @@ def test_limits_reject_nonfinite_negative_and_above_hard_bound() -> None:
         validate_command_limits((0.31, 0.0, 0.0))
 
 
-def test_combined_entrypoint_does_not_start_policy_or_lowcmd() -> None:
+def test_combined_entrypoint_requires_two_terminals() -> None:
     launcher = (ROOT / "scripts/run_sportmode_with_arm.sh").read_text(encoding="utf-8")
-    assert "run_sportmode_wireless.py" in launcher
-    assert "run_spacemouse_arm.py" in launcher
-    assert "real-wbc/scripts/run_wbc" not in launcher
-    assert "--leg-control-backend" not in launcher
-    assert "GX_REAL_REQUIRE_POLICY=0" in launcher
-    assert "[r]un_wbc_leg12.py" in launcher
-    assert "configure_pure_sportmode_go2.sh" in launcher
+    assert "combined SportMode + arm startup is disabled" in launcher
+    assert "scripts/run_sportmode_wireless.sh" in launcher
+    assert "scripts/run_spacemouse_arm.sh" in launcher
+    assert "exit 2" in launcher
+    assert "run_sportmode_wireless.py" not in launcher
+    assert "run_spacemouse_arm.py" not in launcher
+
+
+def test_dog_shutdown_waits_for_arm_then_requests_stand_down() -> None:
+    source = (ROOT / "real-wbc/modules/sportmode_wireless.py").read_text(
+        encoding="utf-8"
+    )
+    shutdown = source[source.index("def shutdown("):]
+    assert shutdown.index("self._wait_for_arm_exit()") < shutdown.index(
+        "self._stand_down_slowly()"
+    )
+    assert "self._send_sport_request(SPORT_API_ID_STAND_DOWN)" in source
+
+
+def test_separate_entrypoints_keep_ros_alive_during_graceful_signals() -> None:
+    for relative_path in (
+        "real-wbc/scripts/run_sportmode_wireless.py",
+        "real-wbc/scripts/run_spacemouse_arm.py",
+    ):
+        source = (ROOT / relative_path).read_text(encoding="utf-8")
+        assert "signal.signal(signal.SIGINT, request_stop)" in source
+        assert "signal.signal(signal.SIGTERM, request_stop)" in source
+        assert source.index("node.shutdown(") < source.index("rclpy.shutdown()")
+
+
+def test_arm_entrypoint_is_self_contained_for_pure_sportmode() -> None:
+    source = (ROOT / "scripts/run_spacemouse_arm.sh").read_text(encoding="utf-8")
+    assert "export GX_REAL_REQUIRE_POLICY=0" in source
+    assert "export GX_REAL_REQUIRE_CRC=0" in source
+    assert 'RMW_IMPLEMENTATION:-}' in source
+    assert 'rmw_cyclonedds_cpp' in source
+    assert 'exec "${GX_REAL_PYTHON_BIN}"' in source
 
 
 def test_direct_sdk_preflight_disables_motion_affecting_boolean_features() -> None:
@@ -139,6 +187,8 @@ def test_direct_sdk_preflight_disables_motion_affecting_boolean_features() -> No
         "extended.Disable(kApiCrossStep)",
         "extended.Disable(kApiAutoRecoverySet)",
         "extended.GetAutoRecovery(auto_recovery_enabled)",
+        "vui.SetBrightness(0)",
+        "vui.GetBrightness(brightness)",
     ):
         assert call in source
     assert 'R"({"data":false})"' in source

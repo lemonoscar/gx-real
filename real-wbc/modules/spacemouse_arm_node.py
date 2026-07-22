@@ -31,6 +31,9 @@ BUTTON_HOME_JOINT_POSE = np.array([0.0, 0.3, 0.5, 0.0, 0.0, 0.0], dtype=np.float
 BUTTON_HOME_JOINT_SPEED = 0.5
 BUTTON_HOME_MIN_DURATION_SEC = 1.0
 BUTTON_HOME_MAX_DURATION_SEC = 3.0
+SHUTDOWN_HOME_TOLERANCE_RAD = 0.05
+SHUTDOWN_HOME_SETTLE_SEC = 0.5
+SAFETY_HEARTBEAT_STARTUP_TIMEOUT_SEC = 5.0
 RAW_AXIS_INDEX = {
     "x": 0,
     "y": 1,
@@ -189,6 +192,10 @@ class SpaceMouseArmNode:
         self.last_spacemouse_stale_log_time = -1.0
         self.estopped = False
         self.estop_latched = False
+        self.base_safety_state: Optional[str] = None
+        self.should_exit = False
+        self.return_home_on_shutdown = False
+        self.exit_due_fault = False
         self._shutdown_complete = False
         self._safety_lock = threading.RLock()
         self.safety_state = SafetyStateMachine()
@@ -222,6 +229,9 @@ class SpaceMouseArmNode:
 
         self._log_startup_config()
         self._init_inputs_and_controller()
+        self.safety_heartbeat_deadline = (
+            time.monotonic() + SAFETY_HEARTBEAT_STARTUP_TIMEOUT_SEC
+        )
         self.safety_state.preflight_passed()
         self.timer = self.node.create_timer(1.0 / self.ctrl_freq, self.timer_callback)
 
@@ -387,13 +397,29 @@ class SpaceMouseArmNode:
         try:
             heartbeat = SafetyHeartbeat.from_json(str(msg.data))
             self.safety_lease.observe(heartbeat, received_at=time.monotonic())
+            self.base_safety_state = heartbeat.safety_state
             if heartbeat.estop_latched:
                 self._trigger_estop("safety heartbeat reports latched ESTOP")
+            elif heartbeat.safety_state == "STOPPING":
+                self._request_process_exit(
+                    "dog process is stopping",
+                    return_home=True,
+                    due_fault=False,
+                )
+            elif (
+                self.output_enabled
+                and heartbeat.safety_state != "SPORTMODE_ACTIVE"
+            ):
+                self._trigger_fault(
+                    "dog safety state left SPORTMODE_ACTIVE while arm was enabled"
+                )
         except SafetyLeaseFault as exc:
             self._trigger_fault(f"invalid safety lease: {exc}")
 
     def _check_safety_lease(self, now: float) -> bool:
         if not self.safety_lease.has_session:
+            if now >= self.safety_heartbeat_deadline:
+                self._trigger_fault("initial dog safety heartbeat timed out")
             return False
         if (
             hasattr(self.node, "count_publishers")
@@ -418,6 +444,7 @@ class SpaceMouseArmNode:
             return
         self._log_error(f"Software ESTOP received from {source}; damping X5 arm")
         self._set_to_damping()
+        self._request_process_exit(source, return_home=False, due_fault=True)
 
     def _handle_spacemouse_watchdog(self) -> None:
         if self.spacemouse_watchdog_damped:
@@ -434,6 +461,24 @@ class SpaceMouseArmNode:
             return
         self._log_error(f"X5 runtime fault: {source}; damping arm")
         self._set_to_damping()
+        self._request_process_exit(source, return_home=False, due_fault=True)
+
+    def _request_process_exit(
+        self,
+        reason: str,
+        *,
+        return_home: bool,
+        due_fault: bool,
+    ) -> None:
+        if getattr(self, "should_exit", False):
+            if due_fault:
+                self.return_home_on_shutdown = False
+                self.exit_due_fault = True
+            return
+        self.should_exit = True
+        self.return_home_on_shutdown = bool(return_home) and not bool(due_fault)
+        self.exit_due_fault = bool(due_fault)
+        self._log_info(f"Arm process exit requested: {reason}")
 
     def _hold_current_pose(self) -> None:
         if self.controller is None or self.arx5 is None or not self.output_enabled:
@@ -673,6 +718,11 @@ class SpaceMouseArmNode:
         if not self.dry_run and not self._check_safety_lease(time.monotonic()):
             self._log_error("Operator ARM rejected: no healthy safety session")
             return False
+        if not self.dry_run and self.base_safety_state != "SPORTMODE_ACTIVE":
+            self._log_error(
+                "Operator ARM rejected: dog state is not SPORTMODE_ACTIVE"
+            )
+            return False
         try:
             robot_config = self.controller.get_robot_config()
             self._validate_controller_feedback(robot_config)
@@ -903,7 +953,7 @@ class SpaceMouseArmNode:
                 return joint_pos, joint_vel, joint_tau, gripper_pos, gripper_vel, True
             except Exception as exc:
                 self._log_error(f"Invalid X5 arm state; damping arm and publishing invalid state: {exc}")
-                self._set_to_damping()
+                self._trigger_fault(f"invalid X5 runtime feedback: {exc}")
                 return (
                     self.target_joint.copy(),
                     np.zeros(6, dtype=np.float64),
@@ -999,15 +1049,115 @@ class SpaceMouseArmNode:
         msg.monotonic_timestamp = time.monotonic()
         self.target_pub.publish(msg)
 
-    def shutdown(self) -> None:
+    def _return_to_fixed_pose_for_shutdown(self) -> bool:
+        if self.dry_run or self.controller is None or self.arx5 is None:
+            return True
+        try:
+            target_joint = BUTTON_HOME_JOINT_POSE.copy()
+            robot_config = self.controller.get_robot_config()
+            solver = self.arx5.Arx5Solver(
+                robot_config.urdf_path,
+                robot_config.joint_dof,
+                robot_config.joint_pos_min,
+                robot_config.joint_pos_max,
+                robot_config.base_link_name,
+                robot_config.eef_link_name,
+                robot_config.gravity_vector,
+            )
+            target_pose6d = require_finite_vector(
+                solver.forward_kinematics(target_joint),
+                size=6,
+                name="x5_shutdown_fixed_pose6d",
+            )
+            current_joint = require_finite_vector(
+                self.controller.get_joint_state().pos(),
+                size=6,
+                name="x5_shutdown_current_joint",
+            )
+            max_error = float(np.max(np.abs(current_joint - target_joint)))
+            duration = float(
+                np.clip(
+                    max_error / max(BUTTON_HOME_JOINT_SPEED, 1e-6),
+                    BUTTON_HOME_MIN_DURATION_SEC,
+                    BUTTON_HOME_MAX_DURATION_SEC,
+                )
+            )
+            cmd = self.arx5.EEFState()
+            cmd.pose_6d()[:] = target_pose6d
+            cmd.gripper_pos = self._clamp_gripper(self.target_gripper)
+            cmd.timestamp = self.controller.get_timestamp() + duration
+            self._log_info(
+                "Returning X5 to shutdown joint pose "
+                "[0.0, 0.3, 0.5, 0.0, 0.0, 0.0] "
+                f"over {duration:.2f}s"
+            )
+            self.controller.set_eef_cmd(cmd)
+            if hasattr(self.controller, "set_gain") and hasattr(self.arx5, "Gain"):
+                controller_config = self.controller.get_controller_config()
+                self.controller.set_gain(
+                    self.arx5.Gain(
+                        controller_config.default_kp,
+                        controller_config.default_kd,
+                        controller_config.default_gripper_kp,
+                        controller_config.default_gripper_kd,
+                    )
+                )
+            deadline = time.monotonic() + duration + SHUTDOWN_HOME_SETTLE_SEC
+            while time.monotonic() < deadline:
+                current_joint = require_finite_vector(
+                    self.controller.get_joint_state().pos(),
+                    size=6,
+                    name="x5_shutdown_joint_feedback",
+                )
+                if float(np.max(np.abs(current_joint - target_joint))) <= SHUTDOWN_HOME_TOLERANCE_RAD:
+                    self.target_pose6d = target_pose6d.copy()
+                    self.target_joint = target_joint.copy()
+                    self._log_info("X5 reached the shutdown fixed pose")
+                    return True
+                time.sleep(0.05)
+            self._log_warning(
+                "X5 shutdown fixed-pose command timed out; entering damping"
+            )
+            return False
+        except Exception as exc:
+            self._log_error(
+                f"Failed to return X5 to shutdown fixed pose; entering damping: {exc}"
+            )
+            return False
+
+    def _shutdown_home_gate_is_open(self) -> bool:
+        if self.dry_run:
+            return True
+        if self.base_safety_state not in {"SPORTMODE_ACTIVE", "STOPPING"}:
+            return False
+        if not self.safety_lease.is_healthy(now=time.monotonic()):
+            return False
+        if (
+            hasattr(self.node, "count_publishers")
+            and self.node.count_publishers(self.safety_heartbeat_topic) == 0
+        ):
+            return False
+        return True
+
+    def shutdown(self, *, return_to_fixed_pose: bool = False) -> None:
         with self._get_safety_lock():
             if getattr(self, "_shutdown_complete", False):
                 return
             self._shutdown_complete = True
+            safety_state = self._get_safety_state()
+            may_return_home = (
+                bool(return_to_fixed_pose)
+                and not safety_state.estop_latched
+                and not safety_state.fault_latched
+                and not getattr(self, "exit_due_fault", False)
+                and self._shutdown_home_gate_is_open()
+            )
             self._get_safety_state().begin_shutdown("arm node shutdown")
             self.output_enabled = False
             self.arm_position_control_enabled = False
         try:
+            if may_return_home:
+                self._return_to_fixed_pose_for_shutdown()
             self._set_to_damping()
             if self.spacemouse is not None:
                 self.spacemouse.stop()

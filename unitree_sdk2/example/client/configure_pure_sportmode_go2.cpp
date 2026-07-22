@@ -4,6 +4,7 @@
 #include <unitree/robot/go2/sport/sport_api.hpp>
 #include <unitree/robot/go2/sport/sport_client.hpp>
 #include <unitree/robot/go2/utrack/utrack_client.hpp>
+#include <unitree/robot/go2/vui/vui_client.hpp>
 
 #include <chrono>
 #include <cstdint>
@@ -129,12 +130,18 @@ int main(int argc, const char** argv) {
   utrack.SetTimeout(5.0f);
   utrack.Init();
 
+  unitree::robot::go2::VuiClient vui;
+  vui.SetTimeout(5.0f);
+  vui.Init();
+
   ExtendedSportFeatureClient extended;
   extended.SetTimeout(5.0f);
   extended.Init();
 
   int failures = 0;
   RecordResult("StopMove before configuration", sport.StopMove(), failures);
+  RecordResult("light brightness=0 before configuration",
+               vui.SetBrightness(0), failures);
 
   RecordResult("obstacle avoidance=false", obstacles.SwitchSet(false), failures);
   bool obstacle_avoidance_enabled = true;
@@ -190,6 +197,16 @@ int main(int argc, const char** argv) {
   }
 
   RecordResult("StopMove after configuration", sport.StopMove(), failures);
+  RecordResult("light brightness=0 after configuration",
+               vui.SetBrightness(0), failures);
+  int brightness = -1;
+  const int32_t brightness_get_ret = vui.GetBrightness(brightness);
+  RecordResult("read light brightness", brightness_get_ret, failures);
+  if (brightness_get_ret == 0 && brightness != 0) {
+    ++failures;
+    std::cerr << "[pure-sportmode] FAILED: light brightness remained "
+              << brightness << " instead of 0" << std::endl;
+  }
   unitree::robot::ChannelFactory::Instance()->Release();
 
   if (failures != 0) {
@@ -199,7 +216,7 @@ int main(int argc, const char** argv) {
   }
 
   std::cout << "[pure-sportmode] all disable calls accepted; readable states "
-               "confirmed off"
+               "and light brightness confirmed at 0"
             << std::endl;
   return 0;
 }

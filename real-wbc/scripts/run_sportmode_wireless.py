@@ -89,16 +89,22 @@ def main() -> int:
         nonlocal stop_requested
         stop_requested = True
 
+    # Take control of both normal termination signals so rclpy does not tear
+    # down the DDS context before STOPPING and StandDown can be published.
+    previous_sigint = signal.signal(signal.SIGINT, request_stop)
     previous_sigterm = signal.signal(signal.SIGTERM, request_stop)
+    graceful_shutdown = False
     try:
         while rclpy.ok() and not node.should_exit and not stop_requested:
             rclpy.spin_once(node.node, timeout_sec=0.1)
+        graceful_shutdown = stop_requested and node.fatal_error is None
     except KeyboardInterrupt:
-        pass
+        graceful_shutdown = node.fatal_error is None
     finally:
-        node.shutdown()
+        node.shutdown(graceful=graceful_shutdown)
         if rclpy.ok():
             rclpy.shutdown()
+        signal.signal(signal.SIGINT, previous_sigint)
         signal.signal(signal.SIGTERM, previous_sigterm)
     return 1 if node.fatal_error is not None else 0
 

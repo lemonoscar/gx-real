@@ -144,16 +144,27 @@ def main() -> int:
         nonlocal stop_requested
         stop_requested = True
 
+    # Keep the ROS context alive until the fixed-pose attempt and damping
+    # transition have completed.
+    previous_sigint = signal.signal(signal.SIGINT, request_stop)
     previous_sigterm = signal.signal(signal.SIGTERM, request_stop)
+    keyboard_interrupt = False
     try:
-        while rclpy.ok() and not stop_requested:
+        while rclpy.ok() and not stop_requested and not node.should_exit:
             rclpy.spin_once(node.node, timeout_sec=0.1)
+    except KeyboardInterrupt:
+        keyboard_interrupt = True
     finally:
-        node.shutdown()
+        return_to_fixed_pose = (
+            (stop_requested or keyboard_interrupt or node.return_home_on_shutdown)
+            and not node.exit_due_fault
+        )
+        node.shutdown(return_to_fixed_pose=return_to_fixed_pose)
         if rclpy.ok():
             rclpy.shutdown()
+        signal.signal(signal.SIGINT, previous_sigint)
         signal.signal(signal.SIGTERM, previous_sigterm)
-    return 0
+    return 1 if node.exit_due_fault else 0
 
 
 if __name__ == "__main__":

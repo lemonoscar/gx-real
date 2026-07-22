@@ -22,12 +22,15 @@
 4. `SwitchJoystick(false)` 和 `Pose(false)`。
 5. 扩展 Sport API 的 `HandStand`、`FreeBound`、`FreeJump`、`FreeAvoid`、`ClassicWalk`、`WalkUpright`、`CrossStep` 全部设为 `false`。
 6. `AutoRecovery=false`，再读回并确认为 `false`；这避免跌倒后固件自主起身，但也意味着不再具备自动恢复能力。
+7. 通过 VUI 将灯光亮度设置值设为 `0`，再读回并确认为 `0`。
 
-随后 ROS 2 节点会再次关闭并读回避障，同时重复发送 `SwitchJoystick(false)`，直到摇杆回中过一次才接受速度。SDK 没有为其余布尔开关提供 Get API，因此这些项只能检查同步调用成功；避障、UWB 跟随和自动恢复则是显式读回确认。
+随后 ROS 2 节点会再次关闭并读回避障，同时重复发送 `SwitchJoystick(false)`。节点还会每秒通过 VUI 重新设置亮度为 `0` 并读回确认，防止其他服务改回该设置值。避障未确认关闭或 VUI 亮度未确认为 `0` 时，不会进入可运动状态；全部确认完成且摇杆回中过一次后才接受速度。SDK 没有为其余布尔开关提供 Get API，因此这些项只能检查同步调用成功；避障、UWB 跟随、自动恢复和 VUI 亮度则是显式读回确认。
+
+注意：`GetBrightness()==0` 只能证明 VUI 设置值已归零，不能证明固件高优先级状态灯必然物理熄灭。关闭避障时的蓝色指示是否受 VUI 亮度控制，必须在对应固件的真机上目视确认。如果读回为 `0` 但蓝灯仍亮，公开 SDK 没有能够可靠关闭该状态灯的接口。
 
 `StaticWalk`、`TrotRun`、`EconomicGait`、`FreeWalk` 和 `SwitchAvoidMode` 是无 `false` 参数的动作/模式或 toggle API，不能安全地“盲调一次来关闭”；启动前后的 `StopMove` 用于终止正在进行的运动。已在新版 SDK 删除的旧 `ContinuousGait` API 也不会发送。
 
-运行中一旦发现 `/lowcmd` 存在发布者，节点会立即 fail-closed、停止 SportMode 运动并联动机械臂软件急停，防止高低层控制同时存在。
+运行中一旦发现 `/lowcmd` 存在发布者，机器狗节点会立即 fail-closed 并停止 SportMode 运动。机器狗节点正常退出时发布 `STOPPING`，机械臂收到后先回到固定关节位置 `[0, 0.3, 0.5, 0, 0, 0]`，再进入 damping 并退出。机械臂自身异常只会让机械臂阻尼并退出，不会停止机器狗。
 
 ## 启动
 
@@ -35,30 +38,21 @@
 
 启动脚本要求 `RMW_IMPLEMENTATION=rmw_cyclonedds_cpp`；如果本机没有安装/构建该 RMW，会直接退出，不会退回到可能无法连接 Go2 的其他 DDS 实现。
 
-一个命令同时启动底盘节点和机械臂节点：
+必须使用两个终端分别启动，且先启动机器狗：
 
 ```bash
+# 终端 A：机器狗
 cd ~/gx-real
-scripts/run_sportmode_with_arm.sh eth0 can0
-```
-
-参数一是 Go2 网络接口，参数二是 X5 CAN 接口。任一节点退出时，启动脚本会终止另一个节点；底盘节点退出前重复发送 `StopMove`，机械臂节点退出时切入 damping。
-
-如需分开调试，可用两个终端：
-
-```bash
-# 终端 A：纯 SportMode 底盘
 export GX_REAL_NETWORK_IFACE=eth0
 scripts/run_sportmode_wireless.sh
 
-# 终端 B：独立 X5 节点
+# 等终端 A 显示 SPORTMODE_ACTIVE 后，打开终端 B：机械臂
+cd ~/gx-real
 export GX_REAL_NETWORK_IFACE=eth0
-export GX_REAL_REQUIRE_POLICY=0
-export GX_REAL_REQUIRE_CRC=0
 scripts/run_spacemouse_arm.sh --can-interface can0
 ```
 
-机械臂保持原有安全约定：先等待底盘节点的 `/safety/heartbeat`，再按 SpaceMouse 双键执行显式使能；异常或安全心跳消失时进入 damping。
+`scripts/run_sportmode_with_arm.sh` 已停用，调用时只会打印双终端指令并退出。机械臂只有在底盘心跳为 `SPORTMODE_ACTIVE` 时才接受 SpaceMouse 双键显式使能；机械臂硬件初始化完成后 5 秒仍未收到首个机器狗心跳时，会进入 damping 并异常退出。
 
 ## 可调参数
 
@@ -75,4 +69,14 @@ scripts/run_sportmode_wireless.sh \
 
 ## 停止与恢复
 
-按 `Ctrl-C` 停止两个节点。纯 SportMode 进程运行期间原厂手柄直通保持关闭，因此不要依赖手柄按键作为本软件链路的急停；必须保证硬件急停始终可触达。若要恢复 Unitree 原厂手柄全部功能，退出本程序后重启 SportMode/机器人控制服务。
+正常停机时，只需在终端 A 对机器狗节点按 `Ctrl-C`：
+
+1. 机器狗停止速度命令并发布 `STOPPING`。
+2. 机械臂先回到 `[0, 0.3, 0.5, 0, 0, 0]`，进入 damping 后退出。
+3. 机器狗等待机械臂退出，然后调用 SportMode `StandDown` 进入趴卧姿态；过渡速度由 Go2 固件控制，SDK 接口本身没有速度参数。
+
+单独在终端 B 停止机械臂时，机械臂正常回固定位置后退出，机器狗保持运行。机械臂自身发生 CAN、反馈、SpaceMouse 或安全门控异常时，不执行主动回位，而是立即 damping 并退出；机器狗不受影响。
+
+机器狗节点故障或心跳消失时，机械臂会按故障路径立即 damping 并退出，不会在底盘状态不可信时主动回位。
+
+`SIGKILL`、断电、CAN 中断或进程崩溃无法保证回位或趴卧动作。纯 SportMode 进程运行期间原厂手柄直通保持关闭，因此不要依赖手柄按键作为本软件链路的急停；必须保证硬件急停始终可触达。

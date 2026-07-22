@@ -19,17 +19,26 @@ from modules.safety_lease import SafetyHeartbeat
 
 
 SPORT_API_ID_STOP_MOVE = 1003
+SPORT_API_ID_STAND_DOWN = 1005
 SPORT_API_ID_MOVE = 1008
 SPORT_API_ID_SWITCH_JOYSTICK = 1027
 OBSTACLE_AVOID_API_ID_SWITCH_SET = 1001
 OBSTACLE_AVOID_API_ID_SWITCH_GET = 1002
+VUI_API_ID_SET_BRIGHTNESS = 1005
+VUI_API_ID_GET_BRIGHTNESS = 1006
 
 SPORT_REQUEST_TOPIC = "/api/sport/request"
 OBSTACLE_AVOID_REQUEST_TOPIC = "/api/obstacles_avoid/request"
 OBSTACLE_AVOID_RESPONSE_TOPIC = "/api/obstacles_avoid/response"
+VUI_REQUEST_TOPIC = "/api/vui/request"
+VUI_RESPONSE_TOPIC = "/api/vui/response"
 WIRELESS_CONTROLLER_TOPIC = "/wirelesscontroller"
 LOW_COMMAND_TOPIC = "/lowcmd"
+ARM_STATE_TOPIC = "/arm/state"
 SPORT_HARD_LIMITS = (0.3, 0.2, 0.3)
+LIGHT_GUARD_INTERVAL_SEC = 1.0
+ARM_EXIT_WAIT_SEC = 5.0
+STAND_DOWN_WAIT_SEC = 3.0
 
 
 def _finite_triplet(values: Iterable[float], name: str) -> Tuple[float, float, float]:
@@ -65,6 +74,10 @@ def sport_move_parameter(command: Iterable[float]) -> str:
 
 def boolean_parameter(value: bool, *, field: str) -> str:
     return json.dumps({field: bool(value)}, sort_keys=True, separators=(",", ":"))
+
+
+def zero_brightness_parameter() -> str:
+    return json.dumps({"brightness": 0}, sort_keys=True, separators=(",", ":"))
 
 
 @dataclass(frozen=True)
@@ -210,11 +223,16 @@ class SportModeWirelessNode:
         self.obstacle_phase = "set"
         self.obstacle_avoidance_disabled = False
         self.last_obstacle_request_time = -1.0
+        self.vui_phase = "set"
+        self.vui_brightness_zero = False
+        self.last_vui_request_time = -1.0
+        self.last_vui_confirmation_time = -1.0
         self.joystick_disable_count = 0
         self.ready = False
         self.fatal_error: Optional[str] = None
         self.should_exit = False
         self.exit_after = -1.0
+        self.stopping = False
         self._shutdown_complete = False
         self.last_command_reason = "startup"
 
@@ -229,6 +247,9 @@ class SportModeWirelessNode:
         )
         self.obstacle_request_pub = self.node.create_publisher(
             Request, OBSTACLE_AVOID_REQUEST_TOPIC, 10
+        )
+        self.vui_request_pub = self.node.create_publisher(
+            Request, VUI_REQUEST_TOPIC, 10
         )
         self.estop_pub = self.node.create_publisher(Bool, self.safety_topic, safety_qos)
         self.heartbeat_pub = self.node.create_publisher(
@@ -246,6 +267,12 @@ class SportModeWirelessNode:
             self._obstacle_response_callback,
             10,
         )
+        self.vui_response_sub = self.node.create_subscription(
+            Response,
+            VUI_RESPONSE_TOPIC,
+            self._vui_response_callback,
+            10,
+        )
         self.control_timer = self.node.create_timer(
             1.0 / self.control_hz, self._control_timer_callback
         )
@@ -259,7 +286,8 @@ class SportModeWirelessNode:
             f"{joystick_config.max_vy:.3f}"
         )
         self.node.get_logger().info(
-            "Waiting to confirm obstacles_avoid=false and disable factory joystick handling"
+            "Waiting to confirm obstacles_avoid=false, light brightness=0, and "
+            "disable factory joystick handling"
         )
 
     def _next_request(self, api_id: int, parameter: str = "", *, noreply: bool):
@@ -337,6 +365,80 @@ class SportModeWirelessNode:
         self.obstacle_request_pub.publish(request)
         self.last_obstacle_request_time = now
 
+    def _vui_response_callback(self, msg) -> None:
+        api_id = int(msg.header.identity.api_id)
+        if api_id not in {
+            VUI_API_ID_SET_BRIGHTNESS,
+            VUI_API_ID_GET_BRIGHTNESS,
+        }:
+            return
+        status_code = int(msg.header.status.code)
+        if status_code != 0:
+            self.vui_brightness_zero = False
+            self.vui_phase = "set"
+            self.last_vui_request_time = -1.0
+            self.node.get_logger().error(
+                f"VUI API {api_id} returned status {status_code}; retrying brightness=0"
+            )
+            return
+        if api_id == VUI_API_ID_SET_BRIGHTNESS:
+            self.vui_phase = "get"
+            self.last_vui_request_time = -1.0
+            return
+        try:
+            payload = json.loads(str(msg.data))
+            brightness = payload["brightness"]
+            if isinstance(brightness, bool) or not isinstance(brightness, int):
+                raise TypeError("brightness must be an integer")
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            self.vui_brightness_zero = False
+            self.vui_phase = "set"
+            self.last_vui_request_time = -1.0
+            self.node.get_logger().error(
+                f"invalid VUI brightness response: {exc}; retrying brightness=0"
+            )
+            return
+        if brightness != 0:
+            self.vui_brightness_zero = False
+            self.vui_phase = "set"
+            self.last_vui_request_time = -1.0
+            self.node.get_logger().warning(
+                f"light brightness changed to {brightness}; forcing it back to 0"
+            )
+            return
+        first_confirmation = not self.vui_brightness_zero
+        self.vui_brightness_zero = True
+        self.vui_phase = "done"
+        self.last_vui_confirmation_time = time.monotonic()
+        if first_confirmation:
+            self.node.get_logger().info(
+                "Confirmed Unitree VUI brightness setting is 0"
+            )
+
+    def _send_vui_request_if_due(self, now: float) -> None:
+        if self.vui_phase == "done":
+            if now - self.last_vui_confirmation_time < LIGHT_GUARD_INTERVAL_SEC:
+                return
+            self.vui_phase = "set"
+            self.last_vui_request_time = -1.0
+        if self.node.count_subscribers(VUI_REQUEST_TOPIC) < 1:
+            return
+        if self.last_vui_request_time >= 0.0 and now - self.last_vui_request_time < 1.0:
+            return
+        if self.vui_phase == "set":
+            request = self._next_request(
+                VUI_API_ID_SET_BRIGHTNESS,
+                zero_brightness_parameter(),
+                noreply=False,
+            )
+        else:
+            request = self._next_request(
+                VUI_API_ID_GET_BRIGHTNESS,
+                noreply=False,
+            )
+        self.vui_request_pub.publish(request)
+        self.last_vui_request_time = now
+
     def _send_sport_request(
         self,
         api_id: int,
@@ -354,10 +456,12 @@ class SportModeWirelessNode:
 
     def _advance_preflight(self, now: float) -> None:
         self._send_obstacle_request_if_due(now)
+        self._send_vui_request_if_due(now)
         if now - self.started_at > self.startup_timeout_sec:
             self._trigger_fatal(
-                "startup timed out before obstacle avoidance was confirmed off and "
-                "the SportMode endpoint became ready"
+                "startup timed out before obstacle avoidance was confirmed off, "
+                "light brightness was confirmed at 0, and the SportMode endpoint "
+                "became ready"
             )
             return
         if self.node.count_subscribers(SPORT_REQUEST_TOPIC) > 0:
@@ -368,11 +472,16 @@ class SportModeWirelessNode:
                     boolean_parameter(False, field="data"),
                 )
                 self.joystick_disable_count += 1
-        if not self.obstacle_avoidance_disabled or self.joystick_disable_count < 3:
+        if (
+            not self.obstacle_avoidance_disabled
+            or not self.vui_brightness_zero
+            or self.joystick_disable_count < 3
+        ):
             return
         self.ready = True
         self.node.get_logger().info(
-            "Pure SportMode ready; center the sticks once before motion is accepted"
+            "Pure SportMode ready (SPORTMODE_ACTIVE); center the sticks once "
+            "before motion is accepted"
         )
 
     def _control_timer_callback(self) -> None:
@@ -389,6 +498,8 @@ class SportModeWirelessNode:
         if not self.ready:
             self._advance_preflight(now)
             return
+
+        self._send_vui_request_if_due(now)
 
         command = self.command_source.update(now=now)
         if command.valid:
@@ -408,6 +519,8 @@ class SportModeWirelessNode:
         self.heartbeat_sequence += 1
         if self.fatal_error is not None:
             state = "FAULT"
+        elif self.stopping:
+            state = "STOPPING"
         elif self.ready:
             state = "SPORTMODE_ACTIVE"
         else:
@@ -438,10 +551,52 @@ class SportModeWirelessNode:
         self.estop_pub.publish(message)
         self._publish_heartbeat()
 
-    def shutdown(self) -> None:
+    def _wait_for_arm_exit(self) -> None:
+        if self.node.count_publishers(ARM_STATE_TOPIC) == 0:
+            return
+        self.node.get_logger().info(
+            "Waiting for the arm node to return to its fixed pose and exit"
+        )
+        deadline = time.monotonic() + ARM_EXIT_WAIT_SEC
+        while (
+            self.node.count_publishers(ARM_STATE_TOPIC) > 0
+            and time.monotonic() < deadline
+        ):
+            self._send_stop()
+            self._publish_heartbeat()
+            time.sleep(0.1)
+        if self.node.count_publishers(ARM_STATE_TOPIC) > 0:
+            self.node.get_logger().warning(
+                "Arm node did not exit before timeout; continuing dog shutdown"
+            )
+
+    def _stand_down_slowly(self) -> None:
+        if self.node.count_subscribers(SPORT_REQUEST_TOPIC) < 1:
+            self.node.get_logger().error(
+                "Cannot request StandDown: SportMode endpoint is unavailable"
+            )
+            return
+        for _ in range(3):
+            self._send_stop()
+            time.sleep(0.02)
+        self.node.get_logger().info("Requesting Unitree SportMode StandDown")
+        self._send_sport_request(SPORT_API_ID_STAND_DOWN)
+        deadline = time.monotonic() + STAND_DOWN_WAIT_SEC
+        while time.monotonic() < deadline:
+            self._publish_heartbeat()
+            time.sleep(0.1)
+
+    def shutdown(self, *, graceful: bool = False) -> None:
         if self._shutdown_complete:
             return
         self._shutdown_complete = True
+        if graceful and self.fatal_error is None:
+            self.ready = False
+            self.stopping = True
+            self._send_stop()
+            self._publish_heartbeat()
+            self._wait_for_arm_exit()
+            self._stand_down_slowly()
         for _ in range(5):
             self._send_stop()
             time.sleep(0.02)

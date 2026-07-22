@@ -2,7 +2,7 @@
 
 这份文档面向第一次接触本仓库的人。默认部署环境是机器狗机身上的 Jetson Orin NX，路径按 `~/gx-real` 书写。当前推荐主线是纯 SportMode 分离控制：无线手柄摇杆只控制 Go2 的速度和转向，独立 SpaceMouse Arm 节点独占 X5/ARX5。旧的 WBC/ONNX/`lowcmd` 链仍保留用于历史实验，但不会由纯 SportMode 入口启动。
 
-完整操作说明见 [纯 SportMode 上机指南](docs/纯SportMode上机指南.md)。
+当前推荐的真机部署流程见本 README 第 4 节，更细的控制约定见 [纯 SportMode 上机指南](docs/纯SportMode上机指南.md)。
 
 ## 1. 当前系统做什么
 
@@ -16,13 +16,14 @@
 - 控制流程：保持 Go2 SportMode；启动时关闭避障并查询确认，然后关闭原厂手柄直通，只解释摇杆轴。
 - SpaceMouse：单独运行 Arm 节点，默认使用 raw SpaceMouse 输入，经显式 axis/sign/scale 参数映射后直接控制 X5，并发布 arm state/target topic。
 
-主入口链路：
+主入口链路必须由两个终端分别启动：
 
 ```text
-scripts/run_sportmode_with_arm.sh eth0 can0
-  -> scripts/setup_env.sh
+terminal A: scripts/run_sportmode_wireless.sh
   -> sportmode_wireless_node -> Unitree Sport Move/StopMove
-  -> spacemouse_arm_node      -> ARX5 can0 command
+
+terminal B: scripts/run_spacemouse_arm.sh --can-interface can0
+  -> spacemouse_arm_node -> ARX5 can0 command
 ```
 
 一句话理解：四足只走 Unitree 高层 SportMode，机械臂只走独立 X5 节点；运行时没有策略推理，也没有低层腿部写控制。
@@ -56,7 +57,7 @@ real/
     setup_arx_can.sh                # 配置 ARX5 SocketCAN can0
     disable_sports_mode_go2.sh      # 编译/调用 Unitree SDK 工具关闭 sport mode
     run_sportmode_wireless.sh       # 纯 SportMode 四足入口
-    run_sportmode_with_arm.sh       # 当前推荐：同时启动四足与机械臂
+    run_sportmode_with_arm.sh       # 已停用：提示改用两个终端
     run_leg12_real.sh               # legacy Go2/WBC 入口
     run_spacemouse_arm.sh           # 推荐 SpaceMouse + X5 独立控制入口
     run_spacemouse_teleop.sh        # legacy teleop topic 发布节点
@@ -93,7 +94,7 @@ real/
   logs/                             # 每次运行的日志目录
 ```
 
-当前优先维护的是 `scripts/run_sportmode_with_arm.sh` 启动的纯 SportMode + 独立 X5 链。`run_leg12_real.sh`、`run_wbc*.py`、EEF trajectory、iPhone/MoCap 等内容属于旧的策略实验链路或后续扩展。
+当前优先维护的是双终端启动的纯 SportMode + 独立 X5 链。`run_leg12_real.sh`、`run_wbc*.py`、EEF trajectory、iPhone/MoCap 等内容属于旧的策略实验链路或后续扩展。
 
 ## 3. 硬件和外部依赖
 
@@ -146,7 +147,251 @@ ls /opt/ros/foxy/setup.bash /opt/ros/humble/setup.bash 2>/dev/null
 - 上机运行默认用 `/usr/bin/python3`。如果 `python3` 指到 conda，不要直接用它跑真机主节点。
 - ROS2 版本由机器系统决定；本仓库脚本会优先 source Foxy，找不到时再 source Humble。
 
-## 4. 第一次部署
+## 4. 纯 SportMode 真机部署（当前推荐）
+
+本节是 `Go2 + X5 + SpaceMouse` 当前主线的可执行上机流程。这条链不加载 policy、不运行 WBC、不发布 `/lowcmd`。不要在这条链上执行 `prepare_real_run.sh`、`disable_sports_mode_go2.sh` 或 `run_leg12_real.sh`；它们属于后文的 legacy 低层链路。
+
+### 4.1 安全前提
+
+上电前必须同时满足：
+
+- Go2 在平整、无人的开阔场地，足端接地稳定，机身周围没有线缆和障碍物。
+- 硬件急停可随时触达，操作员不站在机械臂旋转半径内。
+- Go2 保持原厂 SportMode；本链路只发高层 `Move/StopMove/StandDown`。
+- 不得同时运行 `run_wbc*.py`、`run_leg12_real.sh`、ARX5 SDK 示例或其他 X5 CAN 写进程。
+- 启动前松开所有手柄和 SpaceMouse 输入。纯 SportMode 运行期间原厂手柄按键被关闭，不能把它当成本软件的急停。
+
+### 4.2 首次拉取与后续更新
+
+在 Go2 机身 Jetson 上新建目录并只拉取当前分支：
+
+```bash
+conda deactivate 2>/dev/null || true
+cd ~
+git clone \
+  --branch agent/pure-sportmode-runtime \
+  --single-branch \
+  git@github.com:lemonoscar/gx-real.git \
+  gx-real
+cd ~/gx-real
+git status -sb
+```
+
+如果 Jetson 没有配置 GitHub SSH key，可将 clone URL 换成 `https://github.com/lemonoscar/gx-real.git`。如果目录已经存在，不要再 clone：
+
+```bash
+cd ~/gx-real
+git status --short
+git fetch origin
+git switch agent/pure-sportmode-runtime
+git pull --ff-only origin agent/pure-sportmode-runtime
+```
+
+`git status --short` 有本地修改时先处理或保存这些修改，不要盲目覆盖。
+
+### 4.3 首次构建运行环境
+
+确认运行主机和系统 Python：
+
+```bash
+cd ~/gx-real
+uname -m
+/usr/bin/python3 --version
+ls /opt/ros/foxy/setup.bash /opt/ros/humble/setup.bash 2>/dev/null
+```
+
+真机 Jetson 应显示 `aarch64`。不要用 conda Python 运行 ROS2 真机节点。
+
+首次部署需要编译 Unitree 和本仓库的 ROS2 消息；以 Foxy 为例：
+
+```bash
+cd ~/gx-real/unitree_ros2/cyclonedds_ws
+source /opt/ros/foxy/setup.bash
+colcon build
+
+cd ~/gx-real/real-wbc/ros2
+source /opt/ros/foxy/setup.bash
+colcon build --packages-select robot_state
+```
+
+系统是 Humble 时将两处 `foxy` 换成 `humble`。Unitree SportMode 配置工具会由启动脚本使用 CMake 自动编译。
+
+安装 X5 Python 接口和 SpaceMouse 依赖：
+
+```bash
+cd ~/gx-real/arx5-sdk
+source /opt/ros/foxy/setup.bash
+/usr/bin/python3 -m pip install --user --no-build-isolation .
+
+sudo apt update
+sudo apt install -y can-utils libspnav-dev spacenavd
+sudo systemctl enable --now spacenavd.service
+/usr/bin/python3 -m pip install --user atomics
+/usr/bin/python3 -m pip install --user \
+  https://github.com/cheng-chi/spnav/archive/c1c938ebe3cc542db4685e0d13850ff1abfdb943.tar.gz
+```
+
+如果是 Humble，同样替换 ROS 环境。不要安装 PyPI 默认的 `spnav==0.9`；它在某些 Jetson Python3 环境会出现 `PyCObject_AsVoidPtr` 错误。
+
+### 4.4 每次上机的基础检查
+
+先找到与 Go2 相连、带有 `192.168.123.*` 地址的网卡：
+
+```bash
+conda deactivate 2>/dev/null || true
+cd ~/gx-real
+ip -br address
+ip route
+```
+
+下文以 `eth0` 为例；如果实际是 `enP8p1s0` 或其他名称，所有 `eth0` 都必须替换。
+
+在一个临时终端加载纯 SportMode 环境并检查 ROS2：
+
+```bash
+cd ~/gx-real
+export GX_REAL_NETWORK_IFACE=eth0
+export GX_REAL_REQUIRE_POLICY=0
+export GX_REAL_REQUIRE_CRC=0
+source scripts/setup_env.sh
+
+ros2 topic list
+timeout 3s ros2 topic echo /wirelesscontroller
+ros2 topic info /lowcmd
+```
+
+Foxy 的 `ros2 topic echo` 不一定支持 `--once`，因此文档统一使用 `timeout 3s`。确认 `/wirelesscontroller` 有数据，并且 `/lowcmd` 不存在或 publisher count 为 `0`。如果没有数据，先修复网络、CycloneDDS 或 ROS2 消息包，不得继续启动运动。
+
+再检查没有互斥的写控制进程：
+
+```bash
+pgrep -af 'run_wbc|run_leg12_real|disable_sports_mode_go2|spacemouse_teleop' || true
+```
+
+### 4.5 当前没有机械臂时的联动验证
+
+先把三个速度上限全部设为 `0`，只验证 SportMode 预检、心跳和退出链路，机器狗不会接收非零 `Move` 目标。
+
+终端 A：
+
+```bash
+cd ~/gx-real
+export GX_REAL_NETWORK_IFACE=eth0
+scripts/run_sportmode_wireless.sh \
+  --joy-max-vx 0.0 \
+  --joy-max-vy 0.0 \
+  --joy-max-yaw 0.0
+```
+
+必须看到：
+
+```text
+[pure-sportmode] all disable calls accepted; readable states confirmed off
+Pure SportMode ready (SPORTMODE_ACTIVE)
+```
+
+同时确认日志没有 `detected a lowcmd publisher`。然后在终端 B 启动不打开 CAN、不依赖 SpaceMouse 的机械臂 dry-run：
+
+```bash
+cd ~/gx-real
+export GX_REAL_NETWORK_IFACE=eth0
+scripts/run_spacemouse_arm.sh --dry-run --allow-missing-can
+```
+
+此时在终端 A 按一次 `Ctrl-C`。预期顺序是：
+
+1. 机器狗发布 `STOPPING` 并等待机械臂节点。
+2. dry-run 机械臂节点自动退出。
+3. 机器狗调用 SportMode `StandDown` 后退出。
+
+这只验证 ROS2 门控和进程联动，不验证 X5 CAN、电机反馈、回位或 damping 的真实硬件动作。
+
+### 4.6 安装 X5 后的正式双终端启动
+
+首先上电 X5，松开硬件急停，确认机械臂初始姿态不会与 Go2 或地面碰撞，然后配置 CAN：
+
+```bash
+cd ~/gx-real
+scripts/setup_arx_can.sh auto can0 8
+ip -details link show can0
+timeout 2s candump can0
+```
+
+`can0 UP` 不等于电机已正常反馈；`candump` 完全无数据或 ARX5 报 `None of the motors are initialized` 时，先检查 24V 供电、急停、CAN-H/CAN-L、波特率和型号，不要继续使能。
+
+终端 A 先启动机器狗，首次真机建议仍把速度保持为 `0`：
+
+```bash
+cd ~/gx-real
+export GX_REAL_NETWORK_IFACE=eth0
+scripts/run_sportmode_wireless.sh \
+  --joy-max-vx 0.0 \
+  --joy-max-vy 0.0 \
+  --joy-max-yaw 0.0
+```
+
+等待终端 A 明确显示 `SPORTMODE_ACTIVE`，再打开终端 B：
+
+```bash
+cd ~/gx-real
+export GX_REAL_NETWORK_IFACE=eth0
+scripts/run_spacemouse_arm.sh \
+  --can-interface can0 \
+  --sm-pos-speed 0.02 \
+  --sm-rot-speed 0.05 \
+  --sm-deadzone 0.12
+```
+
+机械臂启动后先保持 SpaceMouse 两个按键都松开，再同时按下两键一次执行显式使能。只有收到 `SPORTMODE_ACTIVE` 且安全心跳有效时才会接受使能。第一次只做小幅度、单轴、短时间测试；确认方向后再逐步提高速度。
+
+两个 SpaceMouse 按键松开后再次同时按下，会请求回到固定关节位置 `[0, 0.3, 0.5, 0, 0, 0]`。回位前必须确认整条轨迹没有碰撞风险。
+
+机械臂验证通过后，重启两个节点，再将机器狗速度从低值开始：
+
+```bash
+scripts/run_sportmode_wireless.sh \
+  --joy-max-vx 0.10 \
+  --joy-max-vy 0.00 \
+  --joy-max-yaw 0.10
+```
+
+不得超过程序硬限制：`vx <= 0.30 m/s`、`vy <= 0.20 m/s`、`yaw <= 0.30 rad/s`。
+
+### 4.7 停机顺序和故障语义
+
+正常联动停机只在终端 A 按一次 `Ctrl-C`，然后等待两个进程自行退出；不要立即再按第二次或使用 `kill -9`。
+
+| 事件 | 机械臂行为 | 机器狗行为 |
+|---|---|---|
+| 终端 A 正常 `Ctrl-C`/`SIGTERM` | 优先回 `[0, 0.3, 0.5, 0, 0, 0]`，然后 damping 并退出 | 等机械臂退出后请求 `StandDown` |
+| 终端 B 单独正常退出 | 优先回固定位置，然后 damping 并退出 | 保持运行 |
+| X5 CAN/反馈/SpaceMouse/门控异常 | 不主动回位，立即 damping 并非零退出 | 保持运行 |
+| 机器狗节点故障或心跳消失 | 不主动回位，立即 damping 并退出 | 停止速度输出；故障路径不保证 `StandDown` |
+
+正常回位只会在安全心跳健康且底盘状态为 `SPORTMODE_ACTIVE` 或 `STOPPING` 时执行。当前 Cartesian controller 用固定关节目标的 FK 位姿生成命令，并用真实关节反馈确认结果。最长运动时间为 3 秒，再加 0.5 秒收敛窗口，反馈误差阈值为 `0.05 rad`。无法在窗口内确认时会放弃主动运动并进入 damping。
+
+机器狗正常退出时最多等待机械臂节点 5 秒；超时会记录 warning 并继续请求 `StandDown`。Go2 `StandDown` 的过渡速度由固件决定，SDK 没有速度参数。
+
+`SIGKILL`、断电、CAN 硬件中断或进程崩溃无法保证回位或趴卧，必须依赖可触达的硬件急停和现场防护。
+
+### 4.8 首次真机验收清单
+
+只有下列项目全部通过，才可以从零速逐步增加命令：
+
+- [ ] Jetson 为 `aarch64`，运行 Python 为 `/usr/bin/python3`。
+- [ ] `setup_env.sh` 显示 `rmw=rmw_cyclonedds_cpp` 和正确的 `cyclonedds_iface`。
+- [ ] `/wirelesscontroller` 持续有数据，`/lowcmd` 不存在或 publisher count 为 `0`。
+- [ ] 所有直接 SDK 关闭调用成功，避障、UWB 跟随、自动恢复和 VUI 亮度读回值符合预期。
+- [ ] 终端 A 显示 `SPORTMODE_ACTIVE`，速度为零时机器狗不移动。
+- [ ] 无机械臂 dry-run 中，狗退出能让臂节点先退出，再请求 `StandDown`。
+- [ ] X5 上电后 `can0` 有有效反馈，不存在第二个 CAN 写进程。
+- [ ] 机械臂只在 `SPORTMODE_ACTIVE` 后能显式使能，小幅单轴方向正确。
+- [ ] 机械臂单独正常退出不影响机器狗。
+- [ ] 狗正常退出时，机械臂回位、damping、退出、Go2 `StandDown` 的顺序正确。
+
+关于灯光：软件会将 VUI brightness 设为 `0` 并读回确认，但固件高优先级系统指示灯可能仍亮。`GetBrightness()==0` 不等于物理指示灯必然熄灭，需要在当前 Go2 固件上目视验证。
+
+## 5. Legacy WBC 第一次部署（非纯 SportMode 主线）
 
 先退出 conda，避免 Python/ROS2 包路径冲突：
 
@@ -217,7 +462,7 @@ sudo systemctl start spacenavd.service
 
 不要安装 PyPI 默认的 `spnav==0.9`。它在 Jetson Python3/aarch64 上可能报 `undefined symbol: PyCObject_AsVoidPtr`，需要先卸载后再安装上面的 GitHub 固定版本。
 
-## 5. 每次上机前检查
+## 6. Legacy WBC 每次上机前检查
 
 推荐把所有可重复的前置构建和接口检查交给脚本：
 
@@ -276,9 +521,9 @@ echo "${GX_REAL_PYTHON_BIN}"
 ip a
 ip route
 ros2 topic list
-ros2 topic echo /lowstate --once
-ros2 topic echo /wirelesscontroller --once
-ros2 topic echo lf/sportmodestate --once
+timeout 3s ros2 topic echo /lowstate
+timeout 3s ros2 topic echo /wirelesscontroller
+timeout 3s ros2 topic echo lf/sportmodestate
 ```
 
 如果 topic 没有数据，先修网络和 CycloneDDS，不要继续进入低层 rollout。
@@ -304,7 +549,7 @@ scripts/disable_sports_mode_go2.sh eth0
 
 `sport_mode` 没关掉时不要进入低层 rollout，因为 Go2 原厂高层控制和低层 `lowcmd` 会抢控制权。
 
-## 6. 标准启动流程
+## 7. Legacy WBC 标准启动流程
 
 典型 WBC 启动命令。默认 `--arm-control-owner external_spacemouse`，WBC 不会打开 `can0` 或下发 X5 command：
 
@@ -396,7 +641,7 @@ Deploy node ready
 - 默认 `--base-command-source fixed`，继续使用 `--cmd-vx/--cmd-vy/--cmd-yaw`。
 - 可选 `--base-command-source wireless_joystick`，左摇杆/右摇杆映射由 `--joy-*-axis` 和 `--joy-*-sign` 显式配置，并带 deadzone、速度上限、加速度限制、watchdog 和 `Y` inhibit。
 
-## 7. 控制架构
+## 8. Legacy WBC 控制架构
 
 运行时主要数据流：
 
@@ -440,7 +685,7 @@ SpaceMouse raw input
 - internal 起身和低层对齐。
 - policy 日志和运行日志落盘。
 
-## 8. Policy 契约
+## 9. Policy 契约
 
 当前部署模型来自：
 
@@ -501,7 +746,7 @@ FR, FL, RR, RL
 
 部署代码会根据 `env.yaml` 中的 `dog_joint_names` 建立策略顺序和接口顺序之间的映射。只要换 policy 或重新导出 `env.yaml`，必须重新检查 `dog_joint_names`、`joint_names[:12]` 和动作维度。
 
-## 9. 修改代码时怎么入手
+## 10. 修改代码时怎么入手
 
 如果只是换一版腿部 policy：
 
@@ -537,7 +782,7 @@ FR, FL, RR, RL
 - 需要重新梳理 `EEFState/EEFTraj`、pose estimator、历史 trajectory teleop 和 whole-body actor。
 - 不建议把这条链和当前 leg12 主链直接混在同一个节点里，先用独立入口验证。
 
-## 10. 开发验证命令
+## 11. 开发验证命令
 
 Jetson 上请优先使用系统 Python 做检查：
 
@@ -593,7 +838,7 @@ ros2 topic echo /wirelesscontroller
 ros2 topic echo lf/sportmodestate
 ```
 
-## 11. 日志和故障定位
+## 12. 日志和故障定位
 
 每次运行会在 `logs/YYYYMMDD_HHMMSS/run.log` 下保存日志。重点看这些日志：
 
@@ -621,7 +866,7 @@ ros2 topic echo lf/sportmodestate
 - `None of the motors are initialized`：`can0` 可能存在，但 X5 电机没有反馈。检查电源、急停、CAN-H/CAN-L/GND、终端电阻、CANable 是否接到 X5 总线、波特率是否为 1Mbps，以及是否误用 `--disable-arm`。用 `ip -s -d link show can0` 看 SDK 运行后是否只有 TX 没有 RX。
 - `commands` 非零但狗不动：看 `Policy diag` 里的 `lowcmd_kp`、`lowcmd_leg_q_policy`、`current_leg_q` 和 `leg_q_error`，优先排查低层控制权、sport mode、力矩限制、电池和关节顺序。
 
-## 12. 安全规则
+## 13. Legacy WBC 安全规则
 
 真机调试时遵守：
 
@@ -634,9 +879,9 @@ ros2 topic echo lf/sportmodestate
 - WBC 默认不写 X5；不要用 `--arm-control-owner wbc`，除非明确做 legacy 回退测试。
 - `Y` 会清零底盘，joystick 模式下会 inhibit 到摇杆回中；`R2` 停 policy；`L1` 急停退出。
 - 不要一开始就同时改 policy、obs、动作 scale、起身流程和 teleop，先保持变量可控。
-- 手柄 `L1` 是第一急停手段，旁边必须有人能及时按下。
+- 仅在 legacy WBC 链路中，手柄 `L1` 才是软件急停输入；纯 SportMode 链路忽略所有手柄按键，必须依赖硬件急停。
 
-## 13. Demo 区
+## 14. Demo 区
 
 这里预留给后续放 demo。建议每个 demo 用同一套模板，便于复现实验。
 
@@ -666,7 +911,7 @@ ros2 topic echo lf/sportmodestate
 - 视频/图片：
 - 结论：
 
-## 14. 参考文档
+## 15. 参考文档
 
 - [上机使用指南](doc/上机使用指南.md)：最细的真机操作步骤。
 - [260维输入设计](doc/260维输入设计.md)：当前 policy obs 契约。

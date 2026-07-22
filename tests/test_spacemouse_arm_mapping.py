@@ -10,6 +10,7 @@ sys.path.insert(0, str(ROOT / "real-wbc"))
 from modules.spacemouse_arm_node import SpaceMouseMapping, map_spacemouse_motion  # noqa: E402
 from modules.spacemouse_arm_node import SpaceMouseArmNode  # noqa: E402
 from modules.safety_state import SafetyStateMachine  # noqa: E402
+from modules.safety_lease import SafetyHeartbeat, SafetyLeaseMonitor  # noqa: E402
 
 
 def test_spacemouse_mapping_uses_raw_axes_and_configured_signs():
@@ -307,6 +308,136 @@ def test_shutdown_and_exception_cleanup_never_call_home():
             assert node.controller.calls == ["damping"]
 
 
+def test_graceful_shutdown_returns_fixed_pose_before_damping():
+    node = SpaceMouseArmNode.__new__(SpaceMouseArmNode)
+    node.node = _DestroyableFakeRosNode()
+    node.controller = _RecordingController()
+    node.estopped = False
+    node.estop_latched = False
+    node.exit_due_fault = False
+    node.output_enabled = True
+    node.arm_position_control_enabled = True
+    node.spacemouse = None
+    node.shared_memory_manager = None
+    node._shutdown_complete = False
+    node._return_to_fixed_pose_for_shutdown = (
+        lambda: node.controller.calls.append("fixed_pose") or True
+    )
+    node._shutdown_home_gate_is_open = lambda: True
+    _mark_test_node_armed(node)
+
+    node.shutdown(return_to_fixed_pose=True)
+
+    assert node.controller.calls == ["fixed_pose", "damping"]
+
+
+def test_graceful_shutdown_skips_motion_when_home_gate_is_closed():
+    node = SpaceMouseArmNode.__new__(SpaceMouseArmNode)
+    node.node = _DestroyableFakeRosNode()
+    node.controller = _RecordingController()
+    node.estopped = False
+    node.estop_latched = False
+    node.exit_due_fault = False
+    node.output_enabled = True
+    node.arm_position_control_enabled = True
+    node.spacemouse = None
+    node.shared_memory_manager = None
+    node._shutdown_complete = False
+    node._return_to_fixed_pose_for_shutdown = (
+        lambda: node.controller.calls.append("fixed_pose") or True
+    )
+    node._shutdown_home_gate_is_open = lambda: False
+    _mark_test_node_armed(node)
+
+    node.shutdown(return_to_fixed_pose=True)
+
+    assert node.controller.calls == ["damping"]
+
+
+def test_dog_stopping_requests_graceful_arm_exit():
+    node = SpaceMouseArmNode.__new__(SpaceMouseArmNode)
+    node.node = _FakeRosNode()
+    node.safety_lease = SafetyLeaseMonitor(timeout_sec=0.5)
+    node.output_enabled = False
+    node.should_exit = False
+    node.return_home_on_shutdown = False
+    node.exit_due_fault = False
+    node.estopped = False
+    node.estop_latched = False
+    heartbeat = SafetyHeartbeat(
+        123,
+        "robot-host",
+        "session-a",
+        1,
+        1.0,
+        "STOPPING",
+        False,
+    )
+    message = type("Message", (), {"data": heartbeat.to_json()})()
+
+    node._safety_heartbeat_cb(message)
+
+    assert node.should_exit is True
+    assert node.return_home_on_shutdown is True
+    assert node.exit_due_fault is False
+
+
+def test_arm_fault_overrides_pending_graceful_exit():
+    node = SpaceMouseArmNode.__new__(SpaceMouseArmNode)
+    node.node = _FakeRosNode()
+    node.should_exit = True
+    node.return_home_on_shutdown = True
+    node.exit_due_fault = False
+
+    node._request_process_exit(
+        "arm feedback failed",
+        return_home=False,
+        due_fault=True,
+    )
+
+    assert node.should_exit is True
+    assert node.return_home_on_shutdown is False
+    assert node.exit_due_fault is True
+
+
+def test_operator_arm_rejects_dog_preflight_state():
+    node = SpaceMouseArmNode.__new__(SpaceMouseArmNode)
+    node.node = _FakeRosNode()
+    node.estop_latched = False
+    node.dry_run = False
+    node.base_safety_state = "PREFLIGHT"
+    node._check_safety_lease = lambda _now: True
+    state = SafetyStateMachine()
+    state.begin_preflight()
+    state.preflight_passed()
+    node.safety_state = state
+
+    assert node._operator_arm() is False
+
+
+def test_missing_initial_dog_heartbeat_damps_and_exits_arm_only():
+    node = SpaceMouseArmNode.__new__(SpaceMouseArmNode)
+    node.node = _FakeRosNode()
+    node.controller = _FakeController()
+    node.safety_lease = SafetyLeaseMonitor(timeout_sec=0.5)
+    node.safety_heartbeat_deadline = 5.0
+    node.output_enabled = False
+    node.arm_position_control_enabled = False
+    node.should_exit = False
+    node.return_home_on_shutdown = False
+    node.exit_due_fault = False
+    _mark_test_node_armed(node)
+
+    assert node._check_safety_lease(4.9) is False
+    assert node.should_exit is False
+
+    assert node._check_safety_lease(5.0) is False
+    assert node.controller.damping_count == 1
+    assert node.should_exit is True
+    assert node.return_home_on_shutdown is False
+    assert node.exit_due_fault is True
+
+
 def test_spacemouse_watchdog_latches_fault_and_damps():
     node = SpaceMouseArmNode.__new__(SpaceMouseArmNode)
     node.node = _FakeRosNode()
@@ -405,11 +536,19 @@ def test_read_arm_state_invalid_joint_values_publish_invalid_and_damps():
     node.gripper_min = 0.0
     node.gripper_max = 0.08
     node.arm_position_control_enabled = True
+    node.output_enabled = True
+    node.should_exit = False
+    node.return_home_on_shutdown = False
+    node.exit_due_fault = False
 
     *_, valid = node._read_arm_state()
 
     assert valid is False
     assert node.controller.damping_count == 1
+    assert node.output_enabled is False
+    assert node.safety_state.fault_latched
+    assert node.should_exit is True
+    assert node.return_home_on_shutdown is False
 
 
 def _make_arm_node_for_unit_tests(sample):
