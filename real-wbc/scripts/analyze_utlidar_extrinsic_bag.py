@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import sqlite3
 import sys
 from typing import Any
 
@@ -61,48 +62,76 @@ def _read_pairs(
     max_stamp_delta_ms: float,
 ) -> list[tuple[Any, Any, int]]:
     try:
-        import rosbag2_py
         from rclpy.serialization import deserialize_message
         from rosidl_runtime_py.utilities import get_message
     except ImportError as exc:
         raise RuntimeError(
-            "ROS 2 Python bag modules are unavailable; run with /usr/bin/python3 after sourcing ROS 2 Foxy"
+            f"required ROS 2 Python module is unavailable: {exc.name}; source ROS 2 Foxy"
         ) from exc
-
-    reader = rosbag2_py.SequentialReader()
-    reader.open(
-        rosbag2_py.StorageOptions(uri=str(bag_path), storage_id="sqlite3"),
-        rosbag2_py.ConverterOptions("", ""),
-    )
-    topic_types = {
-        item.name: item.type for item in reader.get_all_topics_and_types()
-    }
-    missing = [topic for topic in (RAW_TOPIC, BASE_TOPIC) if topic not in topic_types]
-    if missing:
-        raise RuntimeError(f"bag is missing required topics: {missing}")
-    message_types = {
-        topic: get_message(topic_types[topic]) for topic in (RAW_TOPIC, BASE_TOPIC)
-    }
 
     tolerance_ns = int(max_stamp_delta_ms * 1_000_000.0)
     pending: dict[str, list[tuple[int, Any]]] = {RAW_TOPIC: [], BASE_TOPIC: []}
     pairs: list[tuple[Any, Any, int]] = []
-    while reader.has_next() and len(pairs) < max_pairs:
-        topic, serialized, record_time_ns = reader.read_next()
-        if topic not in message_types:
-            continue
-        message = deserialize_message(serialized, message_types[topic])
-        stamp_ns = _stamp_ns(message, record_time_ns)
-        other_topic = BASE_TOPIC if topic == RAW_TOPIC else RAW_TOPIC
-        other, delta_ns = _take_closest(
-            pending[other_topic], stamp_ns, tolerance_ns
+    database_paths = sorted(bag_path.glob("*.db3"))
+    if not database_paths:
+        raise RuntimeError(f"bag contains no sqlite3 database: {bag_path}")
+
+    found_topics: set[str] = set()
+    for database_path in database_paths:
+        connection = sqlite3.connect(
+            f"file:{database_path}?mode=ro", uri=True
         )
-        if other is None:
-            pending[topic].append((stamp_ns, message))
-            pending[topic] = pending[topic][-20:]
-            continue
-        raw, base = (message, other) if topic == RAW_TOPIC else (other, message)
-        pairs.append((raw, base, int(delta_ns)))
+        try:
+            topic_rows = connection.execute(
+                "SELECT id, name, type FROM topics WHERE name IN (?, ?)",
+                (RAW_TOPIC, BASE_TOPIC),
+            ).fetchall()
+            topic_metadata = {
+                int(topic_id): (str(name), str(type_name))
+                for topic_id, name, type_name in topic_rows
+            }
+            found_topics.update(name for name, _ in topic_metadata.values())
+            message_types = {
+                topic_id: get_message(type_name)
+                for topic_id, (_, type_name) in topic_metadata.items()
+            }
+            if not topic_metadata:
+                continue
+            placeholders = ",".join("?" for _ in topic_metadata)
+            query = (
+                "SELECT topic_id, timestamp, data FROM messages "
+                f"WHERE topic_id IN ({placeholders}) ORDER BY timestamp"
+            )
+            for topic_id, record_time_ns, serialized in connection.execute(
+                query, tuple(topic_metadata)
+            ):
+                topic, _ = topic_metadata[int(topic_id)]
+                message = deserialize_message(
+                    bytes(serialized), message_types[int(topic_id)]
+                )
+                stamp_ns = _stamp_ns(message, int(record_time_ns))
+                other_topic = BASE_TOPIC if topic == RAW_TOPIC else RAW_TOPIC
+                other, delta_ns = _take_closest(
+                    pending[other_topic], stamp_ns, tolerance_ns
+                )
+                if other is None:
+                    pending[topic].append((stamp_ns, message))
+                    pending[topic] = pending[topic][-20:]
+                    continue
+                raw, base = (
+                    (message, other) if topic == RAW_TOPIC else (other, message)
+                )
+                pairs.append((raw, base, int(delta_ns)))
+                if len(pairs) >= max_pairs:
+                    return pairs
+        finally:
+            connection.close()
+
+    missing = [
+        topic for topic in (RAW_TOPIC, BASE_TOPIC) if topic not in found_topics
+    ]
+    if missing:
+        raise RuntimeError(f"bag is missing required topics: {missing}")
     return pairs
 
 
