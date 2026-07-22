@@ -14,6 +14,20 @@ fi
 DISABLE_BIN="${SDK_BUILD_DIR}/disable_sports_mode_go2"
 DISABLE_SOURCE="${SDK_DIR}/example/low_level/disable_sports_mode_go2.cpp"
 NETWORK_IFACE="${1:-eth0}"
+MODE_OPTION="${2:-}"
+
+if [[ "$#" -gt 2 ]]; then
+  echo "Usage: $0 [network-interface] [--require-active]" >&2
+  exit 2
+fi
+case "${MODE_OPTION}" in
+  ""|--require-active)
+    ;;
+  *)
+    echo "[gx-real] invalid motion-mode option: ${MODE_OPTION}" >&2
+    exit 2
+    ;;
+esac
 
 if [[ ! -f "${SDK_DIR}/CMakeLists.txt" ]]; then
   echo "[gx-real] missing unitree_sdk2 under ${SDK_DIR}" >&2
@@ -41,4 +55,7 @@ ln -sfn "${THIRDPARTY_LIB_DIR}/libddsc.so" "${RUNTIME_LIB_DIR}/libddsc.so.0"
 ln -sfn "${THIRDPARTY_LIB_DIR}/libddscxx.so" "${RUNTIME_LIB_DIR}/libddscxx.so.0"
 export LD_LIBRARY_PATH="${RUNTIME_LIB_DIR}:${SDK_DIR}/lib/${ARCH}:${THIRDPARTY_LIB_DIR}:${LD_LIBRARY_PATH:-}"
 
+if [[ -n "${MODE_OPTION}" ]]; then
+  exec "${DISABLE_BIN}" "${NETWORK_IFACE}" "${MODE_OPTION}"
+fi
 exec "${DISABLE_BIN}" "${NETWORK_IFACE}"

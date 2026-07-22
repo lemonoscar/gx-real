@@ -30,7 +30,12 @@ def test_help_describes_safe_and_actuated_stages() -> None:
     assert "lidar-check" in result.stdout
     assert "perception-check" in result.stdout
     assert "record-raw" in result.stdout
+    assert "calibration-init" in result.stdout
+    assert "calibration-capture" in result.stdout
+    assert "calibration-status" in result.stdout
+    assert "never call" in result.stdout
     assert "GX_REAL_OPERATOR_CONFIRM_ACTUATORS=YES" in result.stdout
+    assert "GX_REAL_OPERATOR_CONFIRM_CALIBRATION_STAND=YES" in result.stdout
     assert "never publishes LowCmd" in result.stdout
     assert "ROS 1 Noetic/catkin" in result.stdout
 
@@ -73,3 +78,56 @@ def test_record_rejects_an_unsafe_scene_name_before_touching_ros() -> None:
     assert result.returncode != 0
     assert "SCENE may contain only" in result.stderr
     assert "environment ready" not in result.stdout
+
+
+def test_calibration_requires_explicit_standing_confirmation_before_environment() -> None:
+    env = os.environ.copy()
+    env.pop("GX_REAL_OPERATOR_CONFIRM_CALIBRATION_STAND", None)
+
+    result = _run("calibration-init", "first_calibration", env=env)
+
+    assert result.returncode != 0
+    assert "GX_REAL_OPERATOR_CONFIRM_CALIBRATION_STAND=YES" in result.stderr
+    assert "environment ready" not in result.stdout
+
+
+def test_calibration_rejects_unknown_scene_and_missing_step_height_early() -> None:
+    env = os.environ.copy()
+    env["GX_REAL_OPERATOR_CONFIRM_CALIBRATION_STAND"] = "YES"
+
+    unknown = _run("calibration-capture", "first_calibration", "not_a_scene", env=env)
+    assert unknown.returncode != 0
+    assert "unknown calibration scene" in unknown.stderr
+    assert "environment ready" not in unknown.stdout
+
+    missing_height = _run(
+        "calibration-capture",
+        "first_calibration",
+        "step_front",
+        env=env,
+    )
+    assert missing_height.returncode != 0
+    assert "requires a positive measured STEP_HEIGHT_M" in missing_height.stderr
+    assert "environment ready" not in missing_height.stdout
+
+
+def test_calibration_rejects_dot_dot_session() -> None:
+    result = _run("calibration-status", "..")
+
+    assert result.returncode != 0
+    assert "must not be dot or dot-dot" in result.stderr
+
+
+def test_calibration_uses_read_only_motion_mode_gate() -> None:
+    script = SCRIPT.read_text(encoding="utf-8")
+    motion_tool = (
+        ROOT
+        / "unitree_sdk2"
+        / "example"
+        / "low_level"
+        / "disable_sports_mode_go2.cpp"
+    ).read_text(encoding="utf-8")
+
+    assert '"${NETWORK_IFACE}" --require-active' in script
+    assert "if (requireActive)" in motion_tool
+    assert "return EXIT_SUCCESS;" in motion_tool

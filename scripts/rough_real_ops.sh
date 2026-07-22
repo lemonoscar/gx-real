@@ -19,6 +19,23 @@ TOPIC_TIMEOUT="${GX_REAL_ROUGH_TOPIC_TIMEOUT:-7}"
 MONITOR_DURATION="${GX_REAL_ROUGH_MONITOR_DURATION:-30}"
 MONITOR_MIN_VALID_FRAMES="${GX_REAL_ROUGH_MONITOR_MIN_VALID_FRAMES:-5}"
 RECORD_DURATION="${GX_REAL_ROUGH_RECORD_DURATION:-10}"
+CALIBRATION_ROOT="${GX_REAL_ROOT}/logs/lidar_calibration"
+CALIBRATION_SCENES=(
+  flat_yaw0
+  flat_yaw_p90
+  flat_yaw_m90
+  wall_front
+  wall_rear
+  wall_left
+  wall_right
+  step_front
+  step_rear
+  step_left
+  step_right
+  x5_self_filter
+  heldout_flat
+  heldout_step
+)
 
 usage() {
   cat <<'EOF'
@@ -34,6 +51,13 @@ Safe Rough deployment workflow for ROS 2 Foxy/Jetson:
   perception-check   Require production topics, types, samples and TF.
   record-raw [SCENE] Record finite Unitree LiDAR/LIO data before mapper setup.
   record [SCENE]     Record a finite raw/derived perception rosbag.
+  calibration-init SESSION
+                      Create a traceable full-calibration session while MCF stays active.
+  calibration-capture SESSION SCENE [STEP_HEIGHT_M]
+                      Record one required standing-calibration scene; step height is
+                      mandatory for step_* and heldout_step scenes.
+  calibration-status SESSION
+                      Check that every required scene has at least one finalized bag.
   monitor            Require a trailing run of valid 187D GridMap monitor frames.
   bootstrap          Run install-grid-map, probe and lidar-check; no actuator writers.
   validate           Run perception-check and monitor; no actuator writers.
@@ -62,6 +86,10 @@ Configuration environment variables:
       Rosbag duration in seconds. Default: 10
   GX_REAL_OPERATOR_CONFIRM_ACTUATORS=YES
       Required only by preflight, arm and legs.
+  GX_REAL_OPERATOR_CONFIRM_CALIBRATION_STAND=YES
+      Required by calibration-init/capture. Confirms MCF standing is active,
+      the robot is independently supported, and X5 is physically secured in
+      [0, 0.3, 0.5, 0, 0, 0].
 
 Production perception contract:
   /lidar/points_deskewed   sensor_msgs/msg/PointCloud2
@@ -73,6 +101,11 @@ Production perception contract:
 The default bootstrap never publishes LowCmd, configures CAN, releases MCF, or
 starts an actuator writer. Point-LIO/elevation mapping must remain a separate
 supervised process; this script validates its outputs before actuator preflight.
+
+Calibration commands are read-only with respect to actuators. They require an
+active MotionSwitcher mode before and after every capture and never call
+ReleaseMode. They collect evidence; they do not solve the 6DoF extrinsic or mark
+the perception contract VERIFIED.
 
 This script intentionally does not install unitreerobotics/point_lio_unilidar:
 that repository is ROS 1 Noetic/catkin, while this robot deployment is ROS 2
@@ -102,6 +135,15 @@ require_positive_integer() {
   local name="$1"
   local value="$2"
   [[ "${value}" =~ ^[1-9][0-9]*$ ]] || die "${name} must be a positive integer, got ${value}"
+}
+
+require_safe_label() {
+  local name="$1"
+  local value="$2"
+  [[ "${value}" =~ ^[A-Za-z0-9._-]+$ ]] || die \
+    "${name} may contain only letters, digits, dot, underscore and dash"
+  [[ "${value}" != "." && "${value}" != ".." ]] || die \
+    "${name} must not be dot or dot-dot"
 }
 
 source_file() {
@@ -150,13 +192,111 @@ require_perception_environment() {
 check_no_control_writers() {
   require_command pgrep
   local pattern
-  pattern='[r]un_x5_fixed_hold(_flat|_rough)?.py|[r]un_wbc_(flat|rough|leg12).py|[r]un_leg12_(flat|rough)_real.sh|[r]un_wbc.py'
+  pattern='[s]pacemouse_teleop.py|[r]un_arm_spacemouse_test.sh|[r]un_spacemouse_arm.py|[r]un_spacemouse_arm.sh|[r]un_x5_fixed_hold(_flat|_rough)?.py|[r]un_wbc_(flat|rough|leg12).py|[r]un_leg12_(flat|rough)_real.sh|[r]un_wbc.py|[c]ansend|[s]tand_example|[a]rx5.*(example|test)'
   local matches
   matches="$(pgrep -af "${pattern}" || true)"
   if [[ -n "${matches}" ]]; then
     printf '%s\n' "${matches}" >&2
     die "an actuator writer is already running"
   fi
+}
+
+require_calibration_confirmation() {
+  [[ "${GX_REAL_OPERATOR_CONFIRM_CALIBRATION_STAND:-}" == "YES" ]] || die \
+    "set GX_REAL_OPERATOR_CONFIRM_CALIBRATION_STAND=YES only after MCF is holding a standard stand, the robot is independently supported, and X5 is physically secured at the production pose"
+}
+
+require_active_motion_mode() {
+  check_no_control_writers
+  info "checking active MotionSwitcher mode without releasing MCF"
+  "${GX_REAL_ROOT}/scripts/disable_sports_mode_go2.sh" \
+    "${NETWORK_IFACE}" --require-active
+}
+
+is_calibration_scene() {
+  local requested="$1"
+  local scene
+  for scene in "${CALIBRATION_SCENES[@]}"; do
+    if [[ "${requested}" == "${scene}" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+scene_requires_step_height() {
+  local scene="$1"
+  [[ "${scene}" == step_* || "${scene}" == "heldout_step" ]]
+}
+
+require_step_height() {
+  local scene="$1"
+  local height="$2"
+  if ! scene_requires_step_height "${scene}"; then
+    [[ -z "${height}" ]] || die "STEP_HEIGHT_M is accepted only for step scenes"
+    return
+  fi
+  [[ "${height}" =~ ^(0|[1-9][0-9]*)(\.[0-9]+)?$ ]] || die \
+    "${scene} requires a positive measured STEP_HEIGHT_M, for example 0.100"
+  awk -v value="${height}" 'BEGIN { exit(value > 0.0 && value <= 1.0 ? 0 : 1) }' || die \
+    "STEP_HEIGHT_M must be in (0, 1.0], got ${height}"
+}
+
+calibration_session_dir() {
+  printf '%s/%s\n' "${CALIBRATION_ROOT}" "$1"
+}
+
+require_calibration_session_revision() {
+  local session_dir="$1"
+  local expected_commit
+  local actual_commit
+  expected_commit="$(awk '$1 == "git_commit:" { print $2; exit }' \
+    "${session_dir}/session.yaml")"
+  actual_commit="$(git -C "${GX_REAL_ROOT}" rev-parse HEAD)"
+  [[ -n "${expected_commit}" && "${actual_commit}" == "${expected_commit}" ]] || die \
+    "repository commit changed during calibration session: expected ${expected_commit:-missing}, got ${actual_commit}"
+  [[ -z "$(git -C "${GX_REAL_ROOT}" status --porcelain)" ]] || die \
+    "calibration evidence requires a clean worktree"
+}
+
+calibration_init() {
+  local session="$1"
+  require_safe_label SESSION "${session}"
+  require_calibration_confirmation
+  require_perception_environment
+  require_active_motion_mode
+  perception_check
+  require_active_motion_mode
+
+  local session_dir
+  local git_status
+  session_dir="$(calibration_session_dir "${session}")"
+  [[ ! -e "${session_dir}" ]] || die \
+    "calibration session already exists: ${session_dir}"
+  git_status="$(git -C "${GX_REAL_ROOT}" status --porcelain)"
+  [[ -z "${git_status}" ]] || die \
+    "calibration evidence requires a clean worktree; preserve or commit local changes first"
+
+  mkdir -p "${session_dir}/captures"
+  {
+    printf 'schema_version: 1\n'
+    printf 'session: %s\n' "${session}"
+    printf 'created_at: %s\n' "$(date --iso-8601=seconds)"
+    printf 'git_commit: %s\n' "$(git -C "${GX_REAL_ROOT}" rev-parse HEAD)"
+    printf 'git_branch: %s\n' "$(git -C "${GX_REAL_ROOT}" branch --show-current)"
+    printf 'network_interface: %s\n' "${NETWORK_IFACE}"
+    printf 'perception_setup: %s\n' "${PERCEPTION_SETUP}"
+    printf 'policy_sha256: %s\n' "$(sha256sum "${ROUGH_POLICY_PATH}" | awk '{print $1}')"
+    printf 'checkpoint_sha256: %s\n' "$(sha256sum "${GX_REAL_ROOT}/policies/rough/current/model_37500.pt" | awk '{print $1}')"
+    printf 'height_contract_sha256: %s\n' "$(sha256sum "${GX_REAL_ROOT}/policies/rough/current/height_scan_contract.yaml" | awk '{print $1}')"
+    printf 'perception_contract_sha256: %s\n' "$(sha256sum "${GX_REAL_ROOT}/policies/rough/current/perception_contract.yaml" | awk '{print $1}')"
+    printf 'mcf_required_active: true\n'
+    printf 'x5_secured_joint_pose: [0.0, 0.3, 0.5, 0.0, 0.0, 0.0]\n'
+    printf 'capture_status_is_geometry_verification: false\n'
+  } >"${session_dir}/session.yaml"
+  printf '%s\n' "${CALIBRATION_SCENES[@]}" >"${session_dir}/required_scenes.txt"
+  info "calibration session initialized: ${session_dir}"
+  info "MCF remains active; no actuator writer was started"
 }
 
 install_grid_map() {
@@ -425,8 +565,9 @@ perception_check() {
 record_bag() {
   local mode="$1"
   local scene="${2:-static}"
-  [[ "${scene}" =~ ^[A-Za-z0-9._-]+$ ]] || die \
-    "SCENE may contain only letters, digits, dot, underscore and dash"
+  local session="${3:-}"
+  local step_height="${4:-}"
+  require_safe_label SCENE "${scene}"
   require_command ros2
   require_command timeout
   require_positive_integer GX_REAL_ROUGH_RECORD_DURATION "${RECORD_DURATION}"
@@ -461,12 +602,19 @@ record_bag() {
       die "internal record mode error: ${mode}"
       ;;
   esac
+  if [[ -n "${session}" ]]; then
+    require_active_motion_mode
+  fi
 
   local stamp
   local output_dir
   local status
   stamp="$(date +%Y%m%d-%H%M%S)"
-  output_dir="${GX_REAL_ROOT}/logs/lidar_calibration/${stamp}_${mode}_${scene}"
+  if [[ -n "${session}" ]]; then
+    output_dir="$(calibration_session_dir "${session}")/captures/${stamp}_${scene}"
+  else
+    output_dir="${CALIBRATION_ROOT}/${stamp}_${mode}_${scene}"
+  fi
   mkdir -p "$(dirname "${output_dir}")"
 
   info "recording ${RECORD_DURATION}s ${mode} perception bag: ${output_dir}"
@@ -480,8 +628,100 @@ record_bag() {
     die "ros2 bag record failed with status ${status}"
   fi
   [[ -f "${output_dir}/metadata.yaml" ]] || die "rosbag metadata was not finalized: ${output_dir}"
+  if [[ -n "${session}" ]]; then
+    {
+      printf 'schema_version: 1\n'
+      printf 'session: %s\n' "${session}"
+      printf 'scene: %s\n' "${scene}"
+      printf 'captured_at: %s\n' "$(date --iso-8601=seconds)"
+      printf 'duration_sec: %s\n' "${RECORD_DURATION}"
+      if [[ -n "${step_height}" ]]; then
+        printf 'measured_step_height_m: %s\n' "${step_height}"
+      else
+        printf 'measured_step_height_m: null\n'
+      fi
+      printf 'mcf_active_precheck: true\n'
+      printf 'mcf_active_postcheck: pending\n'
+      printf 'geometry_review_status: PENDING\n'
+    } >"${output_dir}/gx_real_capture.yaml"
+  fi
   ros2 bag info "${output_dir}"
+  LAST_RECORDED_BAG="${output_dir}"
   info "rosbag=${output_dir}"
+}
+
+calibration_capture() {
+  local session="$1"
+  local scene="$2"
+  local step_height="${3:-}"
+  require_safe_label SESSION "${session}"
+  require_safe_label SCENE "${scene}"
+  is_calibration_scene "${scene}" || die \
+    "unknown calibration scene ${scene}; expected one of: ${CALIBRATION_SCENES[*]}"
+  require_step_height "${scene}" "${step_height}"
+  require_calibration_confirmation
+
+  local session_dir
+  session_dir="$(calibration_session_dir "${session}")"
+  [[ -f "${session_dir}/session.yaml" ]] || die \
+    "calibration session is not initialized: ${session}; run calibration-init first"
+  require_calibration_session_revision "${session_dir}"
+
+  require_perception_environment
+  require_active_motion_mode
+  perception_check
+  record_bag full "${scene}" "${session}" "${step_height}"
+
+  if require_active_motion_mode; then
+    sed -i 's/^mcf_active_postcheck: pending$/mcf_active_postcheck: true/' \
+      "${LAST_RECORDED_BAG}/gx_real_capture.yaml"
+  else
+    sed -i 's/^mcf_active_postcheck: pending$/mcf_active_postcheck: false/' \
+      "${LAST_RECORDED_BAG}/gx_real_capture.yaml"
+    die "MCF was not active after capture; preserve the bag as invalid evidence and secure the robot"
+  fi
+  info "calibration capture finalized: ${LAST_RECORDED_BAG}"
+  info "MCF remained active; geometry review is still PENDING"
+}
+
+calibration_status() {
+  local session="$1"
+  require_safe_label SESSION "${session}"
+  local session_dir
+  local scene
+  local capture
+  local capture_dir
+  local -a captures
+  local missing=0
+  session_dir="$(calibration_session_dir "${session}")"
+  [[ -f "${session_dir}/session.yaml" ]] || die \
+    "calibration session is not initialized: ${session}"
+  require_calibration_session_revision "${session_dir}"
+
+  info "calibration session=${session_dir}"
+  for scene in "${CALIBRATION_SCENES[@]}"; do
+    mapfile -t captures < <(find "${session_dir}/captures" -mindepth 2 -maxdepth 2 \
+      -type f -path "*_${scene}/metadata.yaml" -print 2>/dev/null || true)
+    capture_dir=""
+    for capture in "${captures[@]}"; do
+      if [[ -f "$(dirname "${capture}")/gx_real_capture.yaml" ]] \
+        && grep -Fqx 'mcf_active_postcheck: true' \
+          "$(dirname "${capture}")/gx_real_capture.yaml"; then
+        capture_dir="$(dirname "${capture}")"
+        break
+      fi
+    done
+    if [[ -n "${capture_dir}" ]]; then
+      printf '[captured] %s -> %s\n' "${scene}" "${capture_dir}"
+    else
+      printf '[missing]  %s\n' "${scene}"
+      missing=$((missing + 1))
+    fi
+  done
+  if [[ "${missing}" -ne 0 ]]; then
+    die "calibration capture set is incomplete: ${missing} required scene(s) missing"
+  fi
+  info "all required bags exist; this is capture completeness, not geometry verification"
 }
 
 monitor() {
@@ -556,7 +796,7 @@ Validation terminal:
   export GX_REAL_ROUGH_PERCEPTION_SETUP=${PERCEPTION_SETUP}
   scripts/rough_real_ops.sh validate
 
-Calibration capture terminal, repeat with descriptive scene names:
+Ad-hoc diagnostic full capture (not a formal calibration session):
   cd ${GX_REAL_ROOT}
   export GX_REAL_ROUGH_PERCEPTION_SETUP=${PERCEPTION_SETUP}
   GX_REAL_ROUGH_RECORD_DURATION=30 scripts/rough_real_ops.sh record flat_yaw0
@@ -564,6 +804,15 @@ Calibration capture terminal, repeat with descriptive scene names:
 Raw capture before a reviewed mapper is available:
   cd ${GX_REAL_ROOT}
   GX_REAL_ROUGH_RECORD_DURATION=30 scripts/rough_real_ops.sh record-raw prone_inventory
+
+First full calibration, while MCF remains active and the robot is supported:
+  cd ${GX_REAL_ROOT}
+  export GX_REAL_ROUGH_PERCEPTION_SETUP=${PERCEPTION_SETUP}
+  export GX_REAL_OPERATOR_CONFIRM_CALIBRATION_STAND=YES
+  scripts/rough_real_ops.sh calibration-init first_rough_calibration
+  scripts/rough_real_ops.sh calibration-capture first_rough_calibration flat_yaw0
+  scripts/rough_real_ops.sh calibration-capture first_rough_calibration step_front 0.100
+  scripts/rough_real_ops.sh calibration-status first_rough_calibration
 
 Actuator preflight terminal, only after release contracts are VERIFIED:
   cd ${GX_REAL_ROOT}
@@ -624,6 +873,19 @@ case "${command}" in
   record)
     [[ "$#" -le 1 ]] || die "record accepts at most one SCENE argument"
     record_bag full "$@"
+    ;;
+  calibration-init)
+    [[ "$#" -eq 1 ]] || die "calibration-init requires exactly one SESSION"
+    calibration_init "$1"
+    ;;
+  calibration-capture)
+    [[ "$#" -ge 2 && "$#" -le 3 ]] || die \
+      "calibration-capture requires SESSION SCENE [STEP_HEIGHT_M]"
+    calibration_capture "$@"
+    ;;
+  calibration-status)
+    [[ "$#" -eq 1 ]] || die "calibration-status requires exactly one SESSION"
+    calibration_status "$1"
     ;;
   monitor)
     [[ "$#" -eq 0 ]] || die "monitor accepts no arguments"

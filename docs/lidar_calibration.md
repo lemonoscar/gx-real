@@ -125,6 +125,18 @@ deskew 和 30 ms map/pose skew 检查失去意义。
 
 ## 4. 数据采集
 
+### 4.0 MCF 和执行器边界
+
+正式几何校准在 **MCF 保持活动** 的标准站立姿态下进行。先用 Unitree 官方控制器让
+Go2 站立，再增加独立吊架或防倾倒支撑；X5 必须由机械支撑或经过批准的 commissioning
+流程固定在 `[0, 0.3, 0.5, 0, 0, 0]`。校准期间禁止启动 Go2 LowCmd writer、X5 CAN
+writer，禁止运行 `preflight`、`arm`、`legs` 或手工执行
+`disable_sports_mode_go2.sh`。
+
+`calibration-init` 和 `calibration-capture` 使用 MotionSwitcher `CheckMode` 在采集前后
+确认仍有活动 motion mode，但不会调用 `ReleaseMode`。它们同时拒绝已存在的 WBC/X5
+writer。该检查只能证明采集边界正确，不能替代独立物理支撑。
+
 ### 4.1 建议场景
 
 在 actuator 禁能、机器人可靠固定时，至少记录以下独立片段：
@@ -161,9 +173,56 @@ GX_REAL_ROUGH_RECORD_DURATION=30 \
   scripts/rough_real_ops.sh record flat_yaw0
 ```
 
-把 `flat_yaw0` 换成不含空格的真实场景名；脚本自动附加时间戳、有限时停止并执行
-`ros2 bag info`。若驱动还提供未去畸变原始点云，建议一并记录并写明 topic。需要时再
-执行：
+首次完整校准不要使用散落的普通 `record` 命令，而应建立一个绑定 Git commit、策略、
+checkpoint 和感知合同哈希的校准会话：
+
+```bash
+cd ~/gx-real-rough-candidate
+export GX_REAL_ROUGH_PERCEPTION_SETUP="$HOME/rough_perception_ws/install/setup.bash"
+export GX_REAL_OPERATOR_CONFIRM_CALIBRATION_STAND=YES
+export GX_REAL_ROUGH_RECORD_DURATION=30
+
+scripts/rough_real_ops.sh calibration-init first_rough_calibration
+```
+
+只有在 MCF 正常保持标准站立、机器人有独立支撑、X5 已固定到生产姿态后才设置上面的
+确认变量。每次改变场景布置或机器人 yaw 后，等待机器人、LIO 和地图重新稳定，再采集：
+
+```bash
+scripts/rough_real_ops.sh calibration-capture first_rough_calibration flat_yaw0
+scripts/rough_real_ops.sh calibration-capture first_rough_calibration flat_yaw_p90
+scripts/rough_real_ops.sh calibration-capture first_rough_calibration flat_yaw_m90
+
+scripts/rough_real_ops.sh calibration-capture first_rough_calibration wall_front
+scripts/rough_real_ops.sh calibration-capture first_rough_calibration wall_rear
+scripts/rough_real_ops.sh calibration-capture first_rough_calibration wall_left
+scripts/rough_real_ops.sh calibration-capture first_rough_calibration wall_right
+
+scripts/rough_real_ops.sh calibration-capture first_rough_calibration step_front 0.100
+scripts/rough_real_ops.sh calibration-capture first_rough_calibration step_rear 0.100
+scripts/rough_real_ops.sh calibration-capture first_rough_calibration step_left 0.100
+scripts/rough_real_ops.sh calibration-capture first_rough_calibration step_right 0.100
+
+scripts/rough_real_ops.sh calibration-capture first_rough_calibration x5_self_filter
+scripts/rough_real_ops.sh calibration-capture first_rough_calibration heldout_flat
+scripts/rough_real_ops.sh calibration-capture first_rough_calibration heldout_step 0.100
+```
+
+`0.100` 必须替换为量具测得的真实台阶高度，不能只填写标称值。held-out 场景不能参与
+外参或 mapper 参数求解。完成后检查采集集合：
+
+```bash
+scripts/rough_real_ops.sh calibration-status first_rough_calibration
+```
+
+该命令要求每个场景都存在已正常结束、且采集后 MCF 仍活动的 rosbag。它只报告
+**采集完整性**，不会自动把 `geometry_review_status` 改为通过，也不会修改
+`perception_contract.yaml`。若采集中 MCF 状态丢失，保留该 bag 作为故障证据，但不能
+纳入校准通过集合。
+
+普通 `record` 仅用于临时诊断；正式校准使用上面的 session/capture 命令。脚本自动
+附加时间戳、有限时停止并执行 `ros2 bag info`。若驱动还提供未去畸变原始点云，建议
+一并记录并写明 topic。需要时再执行：
 
 ```bash
 sha256sum path/to/lidar_extrinsic.yaml \

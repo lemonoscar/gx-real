@@ -31,9 +31,17 @@ int CheckMode(
 
 int main(int argc, const char** argv)
 {
-    if (argc != 2)
+    if (argc < 2 || argc > 3)
     {
-        std::cerr << "Usage: " << argv[0] << " networkInterface" << std::endl;
+        std::cerr << "Usage: " << argv[0]
+                  << " networkInterface [--require-active]" << std::endl;
+        return EXIT_FAILURE;
+    }
+
+    const bool requireActive = argc == 3 && std::string(argv[2]) == "--require-active";
+    if (argc == 3 && !requireActive)
+    {
+        std::cerr << "Unknown option: " << argv[2] << std::endl;
         return EXIT_FAILURE;
     }
 
@@ -50,6 +58,23 @@ int main(int argc, const char** argv)
         if (CheckMode(motionSwitcher, robotForm, motionName) != 0)
         {
             return EXIT_FAILURE;
+        }
+        if (requireActive)
+        {
+            if (motionName.empty())
+            {
+                std::cout << "[gx-real] motion-mode check: no active motion mode." << std::endl;
+                if (requireActive)
+                {
+                    std::cerr << "[gx-real] calibration requires an active MCF motion mode; "
+                              << "refusing unsupported standing calibration." << std::endl;
+                    return EXIT_FAILURE;
+                }
+                return EXIT_SUCCESS;
+            }
+            std::cout << "[gx-real] active motion mode verified: " << motionName
+                      << " (robot form " << robotForm << ")." << std::endl;
+            return EXIT_SUCCESS;
         }
         if (motionName.empty())
         {
