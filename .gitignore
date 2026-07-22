@@ -6,3 +6,4 @@ __pycache__/
 *.pyc
 logs/
 run.log
+unitree_sdk2/build-gx-real/

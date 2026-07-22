@@ -53,6 +53,8 @@ export GX_REAL_ROOT
 export GX_REAL_POLICY_PATH="${GX_REAL_POLICY_PATH:-${GX_REAL_ROOT}/policies/policy.onnx}"
 export GX_REAL_PYTHON_BIN="${GX_REAL_PYTHON_BIN:-/usr/bin/python3}"
 export GX_REAL_NETWORK_IFACE="${GX_REAL_NETWORK_IFACE:-eth0}"
+export GX_REAL_REQUIRE_POLICY="${GX_REAL_REQUIRE_POLICY:-1}"
+export GX_REAL_REQUIRE_CRC="${GX_REAL_REQUIRE_CRC:-1}"
 GX_REAL_BAD_UNITREE_PY_PATH="${GX_REAL_ROOT}/unitree_sdk2/python"
 GX_REAL_LOCAL_UNITREE_INSTALL="${GX_REAL_ROOT}/unitree_ros2/cyclonedds_ws/install"
 
@@ -131,17 +133,25 @@ _gx_real_configure_ros_middleware
 
 source_maybe "${GX_REAL_ROOT}/real-wbc/ros2/install/setup.bash"
 
-_gx_real_prepend_pythonpath_if_exists "${GX_REAL_LOCAL_UNITREE_INSTALL}/unitree_hg/lib/python3.8/site-packages"
-_gx_real_prepend_pythonpath_if_exists "${GX_REAL_LOCAL_UNITREE_INSTALL}/unitree_go/lib/python3.8/site-packages"
-_gx_real_prepend_pythonpath_if_exists "${GX_REAL_LOCAL_UNITREE_INSTALL}/unitree_api/lib/python3.8/site-packages"
+_GX_REAL_PYTHON_VERSION="$("${GX_REAL_PYTHON_BIN}" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+for _gx_real_unitree_package in unitree_hg unitree_go unitree_api; do
+  _gx_real_prepend_pythonpath_if_exists \
+    "${GX_REAL_LOCAL_UNITREE_INSTALL}/${_gx_real_unitree_package}/local/lib/python${_GX_REAL_PYTHON_VERSION}/dist-packages"
+  _gx_real_prepend_pythonpath_if_exists \
+    "${GX_REAL_LOCAL_UNITREE_INSTALL}/${_gx_real_unitree_package}/lib/python${_GX_REAL_PYTHON_VERSION}/site-packages"
+  if [[ -d "${GX_REAL_LOCAL_UNITREE_INSTALL}/${_gx_real_unitree_package}/lib" ]]; then
+    export LD_LIBRARY_PATH="${GX_REAL_LOCAL_UNITREE_INSTALL}/${_gx_real_unitree_package}/lib:${LD_LIBRARY_PATH:-}"
+  fi
+done
+unset _GX_REAL_PYTHON_VERSION _gx_real_unitree_package
 
-if [[ ! -f "${GX_REAL_POLICY_PATH}" ]]; then
+if [[ "${GX_REAL_REQUIRE_POLICY}" == "1" && ! -f "${GX_REAL_POLICY_PATH}" ]]; then
   echo "[gx-real] missing policy: ${GX_REAL_POLICY_PATH}" >&2
   _gx_real_restore_shellopts
   return 1 2>/dev/null || exit 1
 fi
 
-if [[ ! -f "${GX_REAL_ROOT}/unitree_sdk2/python/crc_module.so" ]]; then
+if [[ "${GX_REAL_REQUIRE_CRC}" == "1" && ! -f "${GX_REAL_ROOT}/unitree_sdk2/python/crc_module.so" ]]; then
   echo "[gx-real] missing crc_module.so under unitree_sdk2/python" >&2
   _gx_real_restore_shellopts
   return 1 2>/dev/null || exit 1
@@ -155,9 +165,17 @@ fi
 
 echo "[gx-real] environment ready"
 echo "[gx-real] root=${GX_REAL_ROOT}"
-echo "[gx-real] policy=${GX_REAL_POLICY_PATH}"
+if [[ "${GX_REAL_REQUIRE_POLICY}" == "1" ]]; then
+  echo "[gx-real] policy=${GX_REAL_POLICY_PATH}"
+else
+  echo "[gx-real] policy=disabled (pure SportMode/arm-only runtime)"
+fi
 echo "[gx-real] python=${GX_REAL_PYTHON_BIN}"
-echo "[gx-real] crc_module=${GX_REAL_CRC_MODULE_PATH}"
+if [[ "${GX_REAL_REQUIRE_CRC}" == "1" ]]; then
+  echo "[gx-real] crc_module=${GX_REAL_CRC_MODULE_PATH}"
+else
+  echo "[gx-real] crc_module=disabled (no lowcmd writer)"
+fi
 echo "[gx-real] rmw=${RMW_IMPLEMENTATION:-unset}"
 if [[ "${RMW_IMPLEMENTATION:-}" == "rmw_cyclonedds_cpp" ]]; then
   echo "[gx-real] cyclonedds_iface=${GX_REAL_NETWORK_IFACE}"

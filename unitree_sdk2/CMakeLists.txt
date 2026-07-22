@@ -23,6 +23,15 @@ add_executable(test_jsonize example/jsonize/test_jsonize.cpp)
 add_executable(robot_state_client_example example/client/robot_state_client_example.cpp)
 add_executable(sport_client_example example/client/sport_client_example.cpp)
 add_executable(obstacles_avoid_client_example example/client/obstacles_avoid_client_example.cpp)
+add_executable(configure_pure_sportmode_go2 example/client/configure_pure_sportmode_go2.cpp)
+set_target_properties(configure_pure_sportmode_go2 PROPERTIES BUILD_RPATH "\$ORIGIN")
+add_custom_command(TARGET configure_pure_sportmode_go2 POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E create_symlink
+          ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/lib/${CMAKE_HOST_SYSTEM_PROCESSOR}/libddsc.so
+          $<TARGET_FILE_DIR:configure_pure_sportmode_go2>/libddsc.so.0
+  COMMAND ${CMAKE_COMMAND} -E create_symlink
+          ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/lib/${CMAKE_HOST_SYSTEM_PROCESSOR}/libddscxx.so
+          $<TARGET_FILE_DIR:configure_pure_sportmode_go2>/libddscxx.so.0)
 add_executable(video_client_example example/client/video_client_example.cpp)
 add_executable(vui_client_example example/client/vui_client_example.cpp)
 add_executable(h1_arm_sdk_dds_example example/humanoid/high_level/h1_arm_sdk_dds_example.cpp)

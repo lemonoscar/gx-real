@@ -1,44 +1,37 @@
 # gx-real 真机开发文档
 
-这份文档面向第一次接触本仓库的人，目标是把 `real` 目录下分散的上机、网络、硬件和策略替换说明整理成一条完整开发路径。默认部署环境是机器狗机身上的 Jetson Orin NX 开发板，路径按 `~/gx-real` 书写。当前主线不是原始 UMI-on-Legs 的完整末端轨迹控制链，而是 `Go2 + X5/ARX5` 真机上的分离控制链：WBC 主节点只写 Go2 腿部，独立 SpaceMouse Arm 节点独占 X5/ARX5。
+这份文档面向第一次接触本仓库的人。默认部署环境是机器狗机身上的 Jetson Orin NX，路径按 `~/gx-real` 书写。当前推荐主线是纯 SportMode 分离控制：无线手柄摇杆只控制 Go2 的速度和转向，独立 SpaceMouse Arm 节点独占 X5/ARX5。旧的 WBC/ONNX/`lowcmd` 链仍保留用于历史实验，但不会由纯 SportMode 入口启动。
+
+完整操作说明见 [纯 SportMode 上机指南](docs/纯SportMode上机指南.md)。
 
 ## 1. 当前系统做什么
 
 当前仓库用于在真机上运行：
 
 - 运行端：Go2 机身上的 Jetson Orin NX，预期架构是 `aarch64`，默认使用系统 `/usr/bin/python3`。
-- Go2 腿部：读取低层状态，通过 `policy.onnx` 输出 12 维腿部动作。
-- X5/ARX5 机械臂：由 `scripts/run_spacemouse_arm.sh` 启动的独立 SpaceMouse Arm 节点控制；WBC 只订阅 `/arm/state` 和 `/arm/target_state` 填 observation。
-- Go2 通信：ROS2 `lowstate/lowcmd`，并使用 Unitree DDS/ROS2 消息包。
+- Go2 腿部：保持原厂 SportMode，只接收 `Move(vx, 0, yaw)` 和 `StopMove`。
+- X5/ARX5 机械臂：由独立 SpaceMouse Arm 节点控制，与四足控制解耦。
+- Go2 通信：订阅 ROS2 `/wirelesscontroller`，向 Unitree `/api/sport/request` 发命令；不发布 `lowcmd`。
 - X5 通信：SocketCAN `can0` + `arx5_interface`，只允许 SpaceMouse Arm 节点打开写控制。
-- 控制流程：先关闭 Go2 `sport_mode`，再由 `R1` 起身，最后由 `L2` 进入低层 policy rollout。
+- 控制流程：保持 Go2 SportMode；启动时关闭避障并查询确认，然后关闭原厂手柄直通，只解释摇杆轴。
 - SpaceMouse：单独运行 Arm 节点，默认使用 raw SpaceMouse 输入，经显式 axis/sign/scale 参数映射后直接控制 X5，并发布 arm state/target topic。
 
 主入口链路：
 
 ```text
-scripts/run_leg12_real.sh
+scripts/run_sportmode_with_arm.sh eth0 can0
   -> scripts/setup_env.sh
-  -> real-wbc/scripts/run_wbc_leg12.py
-  -> real-wbc/modules/wbc_node_leg12_arm_passthrough.py
-  -> policies/policy.onnx + policies/env.yaml
-
-scripts/run_spacemouse_teleop.sh      # 可选，另开终端
-  -> real-wbc/scripts/run_teleop.py
-  -> /teleop/mode + /teleop/base_cmd + /teleop/eef_delta + /teleop/gripper_cmd
-
-scripts/run_spacemouse_arm.sh         # 推荐 X5 控制入口，另开终端
-  -> real-wbc/scripts/run_spacemouse_arm.py
-  -> /arm/state + /arm/target_state + ARX5 can0 command
+  -> sportmode_wireless_node -> Unitree Sport Move/StopMove
+  -> spacemouse_arm_node      -> ARX5 can0 command
 ```
 
-一句话理解：这个仓库保留了 UMI-on-Legs 的真机通信、状态读取、手柄流程、起身流程和急停框架，但把原来的 18 维 whole-body actor 换成了当前的 12 维腿部 ONNX policy；机械臂写控制已经从 WBC 主节点剥离，WBC 只消费外部 arm state/target。
+一句话理解：四足只走 Unitree 高层 SportMode，机械臂只走独立 X5 节点；运行时没有策略推理，也没有低层腿部写控制。
 
-最近真机部署后的理论修正：
+纯 SportMode 运行约束：
 
-- 当前主线是两个硬件写控制节点，而不是单个 18 维 whole-body 节点：WBC 只写 Go2，SpaceMouse Arm 节点只写 X5。
-- Go2 手柄 `/wirelesscontroller` 的摇杆只生成底盘速度；机械臂动作只来自 SpaceMouse。
-- `scripts/prepare_real_run.sh` 负责证明前置环境可运行；两个 runtime 命令才是调参层。
+- 当前主线是两个硬件写控制节点：SportMode 节点只写 Go2 高层速度，SpaceMouse Arm 节点只写 X5。
+- Go2 手柄按键不映射任何软件功能；`ly` 生成前后速度，`rx` 生成转向，默认关闭侧移。
+- 避障关闭必须收到 Unitree 查询确认，否则节点 fail-closed，不进入运动状态。
 - ROS2/DDS 是真机通信前提，runtime shell 必须显示 `rmw=rmw_cyclonedds_cpp` 和正确的 `cyclonedds_iface`。
 - `can0 UP` 只说明 SocketCAN 存在；`None of the motors are initialized` 说明 ARX5 SDK 没解析到可用电机状态，需继续查当前 CAN 回包、电源/急停/接线或 `--model` 配置。
 
@@ -62,7 +55,9 @@ real/
     prepare_real_run.sh             # 封装真机前置构建、接口检查、CAN 和 sport mode 处理
     setup_arx_can.sh                # 配置 ARX5 SocketCAN can0
     disable_sports_mode_go2.sh      # 编译/调用 Unitree SDK 工具关闭 sport mode
-    run_leg12_real.sh               # 当前推荐 Go2/WBC 启动入口
+    run_sportmode_wireless.sh       # 纯 SportMode 四足入口
+    run_sportmode_with_arm.sh       # 当前推荐：同时启动四足与机械臂
+    run_leg12_real.sh               # legacy Go2/WBC 入口
     run_spacemouse_arm.sh           # 推荐 SpaceMouse + X5 独立控制入口
     run_spacemouse_teleop.sh        # legacy teleop topic 发布节点
     run_arm_spacemouse_test.sh      # 只测 X5 + SpaceMouse，不启动 Go2/policy
@@ -77,6 +72,7 @@ real/
       wbc_node_leg12_arm_passthrough.py
       base_command_provider.py
       arm_observation.py
+      sportmode_wireless.py
       spacemouse_arm_node.py
       common.py
       velocity_estimator.py
@@ -84,6 +80,7 @@ real/
       shared_memory/
     scripts/
       run_wbc_leg12.py
+      run_sportmode_wireless.py
       run_spacemouse_arm.py
       run_teleop.py
     ros2/
@@ -96,7 +93,7 @@ real/
   logs/                             # 每次运行的日志目录
 ```
 
-当前优先维护的是 `scripts/run_leg12_real.sh` 到 `wbc_node_leg12_arm_passthrough.py` 这条 Go2 腿部链，以及 `scripts/run_spacemouse_arm.sh` 到 `spacemouse_arm_node.py` 这条 X5 独立控制链。`run_spacemouse_teleop.sh`、`real-wbc/scripts/run_wbc.py`、`real-wbc/modules/wbc_node.py`、EEF trajectory、iPhone/MoCap 等内容主要属于原 UMI-on-Legs 历史链路或后续扩展。
+当前优先维护的是 `scripts/run_sportmode_with_arm.sh` 启动的纯 SportMode + 独立 X5 链。`run_leg12_real.sh`、`run_wbc*.py`、EEF trajectory、iPhone/MoCap 等内容属于旧的策略实验链路或后续扩展。
 
 ## 3. 硬件和外部依赖
 
@@ -108,7 +105,7 @@ real/
 - USB-CAN 转接器，当前默认接口名是 `can0`。
 - Go2 网络连接，通常是 `192.168.123.xxx` 网段。
 - X5 供电链路，建议通过 DC 降压模块输出稳定 24V。
-- Go2 手柄，用于 `R1/L2/L1/R2/Y` 和可选摇杆底盘速度命令。`A/B/X/↑/↓` 不再控制机械臂。
+- Go2 手柄；纯 SportMode 节点只读取摇杆轴，忽略全部按键。
 
 可选或历史外设：
 
@@ -125,9 +122,9 @@ real/
 核心依赖：
 
 - Jetson Orin NX 上的 Ubuntu + ROS2 Foxy 或 Humble，架构应为 `aarch64`。
-- `/usr/bin/python3` 下可 import 的 `onnxruntime`。不要只装到 conda 环境里。
 - 本仓库内的 `unitree_ros2/cyclonedds_ws/install`。
-- 本仓库内的 `unitree_sdk2/python/crc_module.so`。
+- `/usr/bin/python3` 下可 import 的 `rclpy`、`unitree_api` 和 `unitree_go`。
+- 只有 legacy WBC/`lowcmd` 链才需要 `onnxruntime`、policy 文件和 `crc_module.so`。
 - `arx5_interface` Python 接口。
 - 可选 SpaceMouse 依赖：系统包 `spacenavd`、`libspnav-dev`，Python 包 `spnav`、`atomics`。
 

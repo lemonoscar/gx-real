@@ -1,0 +1,16 @@
+schema_version: 1
+expected_x5_model: X5
+urdf:
+  path: arx5-sdk/models/X5.urdf
+  sha256: b74c5fcf81901767fad33906852ae3400fad739270bd004653110577be11a08d
+shared_libraries:
+  x86_64:
+    - path: arx5-sdk/lib/x86_64/libhardware.so
+      sha256: 34875c929a572efde835fff2d0cbb6d20e8aa484ef5def97a309d769526a86ff
+    - path: arx5-sdk/lib/x86_64/libsolver.so
+      sha256: 5ca9c0f34291823195431eacad348c2cfd030044ee6948492d2752807d67d42c
+  aarch64:
+    - path: arx5-sdk/lib/aarch64/libhardware.so
+      sha256: a388d67559d9195064659f8a082771b629e94e2b14e062e97aefc4944021db71
+    - path: arx5-sdk/lib/aarch64/libsolver.so
+      sha256: d0bb5dd3d061df4a115e959c016e12f52ad5f94d4c06618eb7fab8b67fa456d1

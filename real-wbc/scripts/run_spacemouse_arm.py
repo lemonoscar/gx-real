@@ -4,6 +4,7 @@ import argparse
 import datetime
 import logging
 import os
+import signal
 import sys
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -30,7 +31,10 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--model", choices=["X5"], default="X5")
-    parser.add_argument("--artifact-manifest", default="config/artifact_manifest.yaml")
+    parser.add_argument(
+        "--arm-artifact-manifest",
+        default="config/x5_arm_runtime_manifest.yaml",
+    )
     parser.add_argument("--can-interface", default="can0")
     parser.add_argument("--safety-topic", default="/safety/estop")
     parser.add_argument("--safety-heartbeat-topic", default="/safety/heartbeat")
@@ -94,15 +98,15 @@ def main() -> int:
     configure_logging(args.logging_dir)
 
     from pathlib import Path
-    from modules.artifact_manifest import validate_repository_manifest
+    from modules.arm_runtime_manifest import validate_arm_runtime_manifest
 
-    manifest_path = args.artifact_manifest
+    manifest_path = args.arm_artifact_manifest
     if not os.path.isabs(manifest_path):
         manifest_path = os.path.join(GX_REAL_ROOT, manifest_path)
-    verified_hashes = validate_repository_manifest(
+    verified_hashes = validate_arm_runtime_manifest(
         manifest_path, root=Path(GX_REAL_ROOT), expected_x5_model=args.model
     )
-    logging.info("Verified production artifact hashes: %s", verified_hashes)
+    logging.info("Verified X5 arm runtime artifact hashes: %s", verified_hashes)
 
     import rclpy
 
@@ -134,11 +138,21 @@ def main() -> int:
         require_can=not args.allow_missing_can,
         feedback_timeout_sec=args.feedback_timeout_sec,
     )
+    stop_requested = False
+
+    def request_stop(_signum, _frame) -> None:
+        nonlocal stop_requested
+        stop_requested = True
+
+    previous_sigterm = signal.signal(signal.SIGTERM, request_stop)
     try:
-        rclpy.spin(node.node)
+        while rclpy.ok() and not stop_requested:
+            rclpy.spin_once(node.node, timeout_sec=0.1)
     finally:
         node.shutdown()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
+        signal.signal(signal.SIGTERM, previous_sigterm)
     return 0
 
 
