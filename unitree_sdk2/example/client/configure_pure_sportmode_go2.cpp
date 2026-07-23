@@ -94,6 +94,18 @@ void RecordResult(const std::string& action, int32_t ret, int& failures) {
             << " (SDK code " << ret << ")" << std::endl;
 }
 
+void RecordIdempotentResult(const std::string& action, int32_t ret,
+                            int& failures) {
+  if (ret != -1) {
+    RecordResult(action, ret, failures);
+    return;
+  }
+  std::cerr << "[pure-sportmode] WARNING: " << action
+            << " returned SDK code -1; accepted as an already inactive "
+               "idempotent no-op on this firmware"
+            << std::endl;
+}
+
 int32_t WaitForUtrackInactive(unitree::robot::go2::UtrackClient& utrack,
                               bool& tracking) {
   for (int attempt = 0; attempt < 10; ++attempt) {
@@ -139,7 +151,8 @@ int main(int argc, const char** argv) {
   extended.Init();
 
   int failures = 0;
-  RecordResult("StopMove before configuration", sport.StopMove(), failures);
+  RecordIdempotentResult("StopMove before configuration", sport.StopMove(),
+                         failures);
   RecordResult("light brightness=0 before configuration",
                vui.SetBrightness(0), failures);
 
@@ -174,7 +187,7 @@ int main(int argc, const char** argv) {
 
   RecordResult("firmware joystick arbitration=false",
                sport.SwitchJoystick(false), failures);
-  RecordResult("pose mode=false", sport.Pose(false), failures);
+  RecordIdempotentResult("pose mode=false", sport.Pose(false), failures);
 
   RecordResult("hand stand=false", extended.Disable(kApiHandStand), failures);
   RecordResult("free bound=false", extended.Disable(kApiFreeBound), failures);
@@ -196,7 +209,8 @@ int main(int argc, const char** argv) {
               << std::endl;
   }
 
-  RecordResult("StopMove after configuration", sport.StopMove(), failures);
+  RecordIdempotentResult("StopMove after configuration", sport.StopMove(),
+                         failures);
   RecordResult("light brightness=0 after configuration",
                vui.SetBrightness(0), failures);
   int brightness = -1;
@@ -215,8 +229,8 @@ int main(int argc, const char** argv) {
     return 1;
   }
 
-  std::cout << "[pure-sportmode] all disable calls accepted; readable states "
-               "and light brightness confirmed at 0"
+  std::cout << "[pure-sportmode] required configuration checks passed; "
+               "readable states and light brightness confirmed at 0"
             << std::endl;
   return 0;
 }

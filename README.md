@@ -286,7 +286,7 @@ scripts/run_sportmode_wireless.sh \
 必须看到：
 
 ```text
-[pure-sportmode] all disable calls accepted; readable states confirmed off
+[pure-sportmode] required configuration checks passed; readable states and light brightness confirmed at 0
 Pure SportMode ready (SPORTMODE_ACTIVE)
 ```
 
@@ -381,7 +381,7 @@ scripts/run_sportmode_wireless.sh \
 - [ ] Jetson 为 `aarch64`，运行 Python 为 `/usr/bin/python3`。
 - [ ] `setup_env.sh` 显示 `rmw=rmw_cyclonedds_cpp` 和正确的 `cyclonedds_iface`。
 - [ ] `/wirelesscontroller` 持续有数据，`/lowcmd` 不存在或 publisher count 为 `0`。
-- [ ] 所有直接 SDK 关闭调用成功，避障、UWB 跟随、自动恢复和 VUI 亮度读回值符合预期。
+- [ ] 所有必需 SDK 配置检查通过；允许重复 `StopMove()` 和 `Pose(false)` 显示幂等 `-1` warning，避障、UWB 跟随、自动恢复和 VUI 亮度读回值必须符合预期。
 - [ ] 终端 A 显示 `SPORTMODE_ACTIVE`，速度为零时机器狗不移动。
 - [ ] 无机械臂 dry-run 中，狗退出能让臂节点先退出，再请求 `StandDown`。
 - [ ] X5 上电后 `can0` 有有效反馈，不存在第二个 CAN 写进程。

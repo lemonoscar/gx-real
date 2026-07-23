@@ -14,9 +14,9 @@
 - 启动和无线消息超时后，必须先把所有摇杆回中，节点才会再次接受运动命令。
 - 无线消息超过 `0.25 s` 未更新时，节点持续发送 `StopMove`。
 
-启动脚本先通过仓库内的 Unitree C++ SDK 同步执行以下设置；任一 SDK 返回码非零都会拒绝启动：
+启动脚本先通过仓库内的 Unitree C++ SDK 同步执行以下设置。除重复 `StopMove()` 和 `Pose(false)` 在部分固件上会以 `-1` 表示“已经无动作”的幂等 no-op 外，任一 SDK 返回码非零都会拒绝启动：
 
-1. 前后各执行一次 `StopMove`。
+1. 前后各执行一次 `StopMove`；运行时停止路径还会先发送 `Move(0, 0, 0)` 作为零速度兜底。
 2. `obstacles_avoid=false`，再读回并确认为 `false`。
 3. `Utrack/UWB follow=false`，读回开关并确认 `IsTracking=false`。
 4. `SwitchJoystick(false)` 和 `Pose(false)`。

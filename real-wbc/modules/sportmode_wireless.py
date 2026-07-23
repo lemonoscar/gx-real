@@ -452,6 +452,10 @@ class SportModeWirelessNode:
 
     def _send_stop(self) -> None:
         if self.node.count_subscribers(SPORT_REQUEST_TOPIC) > 0:
+            self._send_sport_request(
+                SPORT_API_ID_MOVE,
+                sport_move_parameter((0.0, 0.0, 0.0)),
+            )
             self._send_sport_request(SPORT_API_ID_STOP_MOVE)
 
     def _advance_preflight(self, now: float) -> None:

@@ -145,6 +145,19 @@ def test_dog_shutdown_waits_for_arm_then_requests_stand_down() -> None:
     assert "self._send_sport_request(SPORT_API_ID_STAND_DOWN)" in source
 
 
+def test_stop_path_sends_zero_move_fallback_before_stop_move() -> None:
+    source = (ROOT / "real-wbc/modules/sportmode_wireless.py").read_text(
+        encoding="utf-8"
+    )
+    stop_method = source[
+        source.index("def _send_stop("):source.index("def _advance_preflight(")
+    ]
+    assert stop_method.index("SPORT_API_ID_MOVE") < stop_method.index(
+        "SPORT_API_ID_STOP_MOVE"
+    )
+    assert "sport_move_parameter((0.0, 0.0, 0.0))" in stop_method
+
+
 def test_separate_entrypoints_keep_ros_alive_during_graceful_signals() -> None:
     for relative_path in (
         "real-wbc/scripts/run_sportmode_wireless.py",
@@ -196,6 +209,8 @@ def test_direct_sdk_preflight_disables_motion_affecting_boolean_features() -> No
     assert "FreeWalk" not in source
     assert "ContinuousGait" not in source
     assert "EconomicGait" not in source
+    assert source.count("RecordIdempotentResult(") == 4
+    assert "if (ret != -1)" in source
 
     launcher = (ROOT / "scripts/configure_pure_sportmode_go2.sh").read_text(
         encoding="utf-8"
