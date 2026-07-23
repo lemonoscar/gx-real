@@ -30,7 +30,7 @@
 
 `StaticWalk`、`TrotRun`、`EconomicGait`、`FreeWalk` 和 `SwitchAvoidMode` 是无 `false` 参数的动作/模式或 toggle API，不能安全地“盲调一次来关闭”；启动前后的 `StopMove` 用于终止正在进行的运动。已在新版 SDK 删除的旧 `ContinuousGait` API 也不会发送。
 
-运行中一旦发现 `/lowcmd` 存在发布者，机器狗节点会立即 fail-closed 并停止 SportMode 运动。机器狗节点正常退出时发布 `STOPPING`，机械臂收到后先回到固定关节位置 `[0, 0.3, 0.5, 0, 0, 0]`，再进入 damping 并退出。机械臂自身异常只会让机械臂阻尼并退出，不会停止机器狗。
+Go2 固件的 SportMode 运动服务本身会以 `_CREATED_BY_BARE_DDS_APP_` 身份发布 `/lowcmd`。运行中只允许这一个固件发布端；一旦出现第二个发布端或 ROS 命名发布端，机器狗节点会立即 fail-closed 并停止 SportMode 运动。机器狗节点正常退出时发布 `STOPPING`，机械臂收到后先回到固定关节位置 `[0, 0.3, 0.5, 0, 0, 0]`，再进入 damping 并退出。机械臂自身异常只会让机械臂阻尼并退出，不会停止机器狗。
 
 ## 启动
 

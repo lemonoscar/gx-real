@@ -35,6 +35,7 @@ VUI_RESPONSE_TOPIC = "/api/vui/response"
 WIRELESS_CONTROLLER_TOPIC = "/wirelesscontroller"
 LOW_COMMAND_TOPIC = "/lowcmd"
 ARM_STATE_TOPIC = "/arm/state"
+BARE_DDS_NODE_NAME = "_CREATED_BY_BARE_DDS_APP_"
 SPORT_HARD_LIMITS = (0.3, 0.2, 0.3)
 LIGHT_GUARD_INTERVAL_SEC = 1.0
 ARM_EXIT_WAIT_SEC = 5.0
@@ -78,6 +79,15 @@ def boolean_parameter(value: bool, *, field: str) -> str:
 
 def zero_brightness_parameter() -> str:
     return json.dumps({"brightness": 0}, sort_keys=True, separators=(",", ":"))
+
+
+def lowcmd_publishers_are_factory_only(
+    endpoints: Iterable[Tuple[str, str]],
+) -> bool:
+    publishers = tuple((str(name), str(namespace)) for name, namespace in endpoints)
+    return not publishers or publishers == (
+        (BARE_DDS_NODE_NAME, BARE_DDS_NODE_NAME),
+    )
 
 
 @dataclass(frozen=True)
@@ -234,6 +244,7 @@ class SportModeWirelessNode:
         self.exit_after = -1.0
         self.stopping = False
         self._shutdown_complete = False
+        self.factory_lowcmd_logged = False
         self.last_command_reason = "startup"
 
         safety_qos = QoSProfile(
@@ -279,7 +290,8 @@ class SportModeWirelessNode:
         self.heartbeat_timer = self.node.create_timer(0.1, self._publish_heartbeat)
 
         self.node.get_logger().info(
-            "Pure SportMode: wireless axes -> Move(vx, vy, yaw); no policy or lowcmd"
+            "Pure SportMode: wireless axes -> Move(vx, vy, yaw); no policy or "
+            "application lowcmd writer"
         )
         self.node.get_logger().info(
             "Wireless buttons are ignored; lateral velocity limit is "
@@ -490,10 +502,23 @@ class SportModeWirelessNode:
 
     def _control_timer_callback(self) -> None:
         now = time.monotonic()
-        if self.fatal_error is None and self.node.count_publishers(LOW_COMMAND_TOPIC) > 0:
+        lowcmd_publishers = tuple(
+            (endpoint.node_name, endpoint.node_namespace)
+            for endpoint in self.node.get_publishers_info_by_topic(LOW_COMMAND_TOPIC)
+        )
+        if self.fatal_error is None and not lowcmd_publishers_are_factory_only(
+            lowcmd_publishers
+        ):
             self._trigger_fatal(
-                "detected a lowcmd publisher; pure SportMode cannot run with low-level control"
+                "detected conflicting lowcmd publisher(s); pure SportMode cannot "
+                f"run with low-level control: {lowcmd_publishers}"
             )
+        elif lowcmd_publishers and not self.factory_lowcmd_logged:
+            self.node.get_logger().info(
+                "Accepted the single bare-DDS /lowcmd publisher as the Unitree "
+                "firmware motion service"
+            )
+            self.factory_lowcmd_logged = True
         if self.fatal_error is not None:
             self._send_stop()
             if now >= self.exit_after:

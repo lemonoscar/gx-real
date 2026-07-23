@@ -259,7 +259,7 @@ timeout 3s ros2 topic echo /wirelesscontroller
 ros2 topic info /lowcmd
 ```
 
-Foxy 的 `ros2 topic echo` 不一定支持 `--once`，因此文档统一使用 `timeout 3s`。确认 `/wirelesscontroller` 有数据，并且 `/lowcmd` 不存在或 publisher count 为 `0`。如果没有数据，先修复网络、CycloneDDS 或 ROS2 消息包，不得继续启动运动。
+Foxy 的 `ros2 topic echo` 不一定支持 `--once`，因此文档统一使用 `timeout 3s`。确认 `/wirelesscontroller` 有数据。`/lowcmd` 允许恰好一个名为 `_CREATED_BY_BARE_DDS_APP_` 的发布端，这是 Go2 固件的 SportMode 运动服务；出现第二个发布端或任何 ROS 命名发布端时不得继续启动运动。
 
 再检查没有互斥的写控制进程：
 
@@ -283,7 +283,7 @@ scripts/run_sportmode_with_arm.sh --dry-run eth0 can0
 Pure SportMode ready (SPORTMODE_ACTIVE)
 ```
 
-同时确认日志没有 `detected a lowcmd publisher`。supervisor 随后会自动显示 `SPORTMODE_ACTIVE; arm pid=... dry_run=1`。在这个终端按一次 `Ctrl-C`，预期顺序是：
+同时确认日志显示固件 bare-DDS `/lowcmd` 发布端已被识别，且没有 `detected conflicting lowcmd publisher(s)`。supervisor 随后会自动显示 `SPORTMODE_ACTIVE; arm pid=... dry_run=1`。在这个终端按一次 `Ctrl-C`，预期顺序是：
 
 1. 机器狗发布 `STOPPING` 并等待机械臂节点。
 2. dry-run 机械臂节点自动退出。
@@ -348,7 +348,7 @@ scripts/run_sportmode_with_arm.sh eth0 can0 0.10 0.00 0.10
 
 - [ ] Jetson 为 `aarch64`，运行 Python 为 `/usr/bin/python3`。
 - [ ] `setup_env.sh` 显示 `rmw=rmw_cyclonedds_cpp` 和正确的 `cyclonedds_iface`。
-- [ ] `/wirelesscontroller` 持续有数据，`/lowcmd` 不存在或 publisher count 为 `0`。
+- [ ] `/wirelesscontroller` 持续有数据；`/lowcmd` 最多只有一个 `_CREATED_BY_BARE_DDS_APP_` 固件发布端。
 - [ ] 所有必需 SDK 配置检查通过；允许重复 `StopMove()` 和 `Pose(false)` 显示幂等 `-1` warning，避障、UWB 跟随、自动恢复和 VUI 亮度读回值必须符合预期。
 - [ ] supervisor 显示 `SPORTMODE_ACTIVE` 后才启动机械臂，速度为零时机器狗不移动。
 - [ ] 无机械臂 dry-run 中，狗退出能让臂节点先退出，再请求 `StandDown`。

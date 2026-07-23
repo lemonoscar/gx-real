@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "real-wbc"))
 
 from modules.sportmode_wireless import (  # noqa: E402
+    BARE_DDS_NODE_NAME,
     JoystickConfig,
     OBSTACLE_AVOID_API_ID_SWITCH_GET,
     OBSTACLE_AVOID_API_ID_SWITCH_SET,
@@ -20,6 +21,7 @@ from modules.sportmode_wireless import (  # noqa: E402
     VUI_API_ID_SET_BRIGHTNESS,
     SportModeCommandSource,
     boolean_parameter,
+    lowcmd_publishers_are_factory_only,
     zero_brightness_parameter,
     sport_move_parameter,
     validate_command_limits,
@@ -72,6 +74,15 @@ def test_request_parameters_match_unitree_json_contracts() -> None:
     assert json.loads(boolean_parameter(False, field="data")) == {"data": False}
     assert json.loads(boolean_parameter(False, field="enable")) == {"enable": False}
     assert json.loads(zero_brightness_parameter()) == {"brightness": 0}
+
+
+def test_only_single_factory_bare_dds_lowcmd_publisher_is_allowed() -> None:
+    factory = (BARE_DDS_NODE_NAME, BARE_DDS_NODE_NAME)
+    assert lowcmd_publishers_are_factory_only(()) is True
+    assert lowcmd_publishers_are_factory_only((factory,)) is True
+    assert lowcmd_publishers_are_factory_only((("/wbc", "/"),)) is False
+    assert lowcmd_publishers_are_factory_only((factory, factory)) is False
+    assert lowcmd_publishers_are_factory_only((factory, ("/wbc", "/"))) is False
 
 
 def test_default_mapping_accepts_only_speed_and_turn_after_centering() -> None:
