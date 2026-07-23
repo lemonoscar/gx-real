@@ -85,6 +85,20 @@ def test_only_single_factory_bare_dds_lowcmd_publisher_is_allowed() -> None:
     assert lowcmd_publishers_are_factory_only((factory, ("/wbc", "/"))) is False
 
 
+def test_vui_light_confirmation_does_not_gate_sportmode_readiness() -> None:
+    source = (ROOT / "real-wbc/modules/sportmode_wireless.py").read_text(
+        encoding="utf-8"
+    )
+    preflight = source[
+        source.index("def _advance_preflight("):source.index(
+            "def _control_timer_callback("
+        )
+    ]
+    assert "not self.obstacle_avoidance_disabled" in preflight
+    assert "self.joystick_disable_count < 3" in preflight
+    assert "not self.vui_brightness_zero" not in preflight
+
+
 def test_default_mapping_accepts_only_speed_and_turn_after_centering() -> None:
     config = JoystickConfig()
     assert (config.max_vx, config.max_vy, config.max_yaw) == (0.30, 0.0, 0.30)
@@ -234,6 +248,8 @@ def test_direct_sdk_preflight_disables_motion_affecting_boolean_features() -> No
     assert "ContinuousGait" not in source
     assert "EconomicGait" not in source
     assert source.count("RecordIdempotentResult(") == 4
+    assert source.count("RecordOptionalResult(") == 4
+    assert "continuing without a light gate" in source
     assert "if (ret != -1)" in source
 
     launcher = (ROOT / "scripts/configure_pure_sportmode_go2.sh").read_text(

@@ -279,7 +279,7 @@ scripts/run_sportmode_with_arm.sh --dry-run eth0 can0
 必须看到：
 
 ```text
-[pure-sportmode] required configuration checks passed; readable states and light brightness confirmed at 0
+[pure-sportmode] required motion configuration checks passed; light control is best-effort and does not gate startup
 Pure SportMode ready (SPORTMODE_ACTIVE)
 ```
 
@@ -349,7 +349,7 @@ scripts/run_sportmode_with_arm.sh eth0 can0 0.10 0.00 0.10
 - [ ] Jetson 为 `aarch64`，运行 Python 为 `/usr/bin/python3`。
 - [ ] `setup_env.sh` 显示 `rmw=rmw_cyclonedds_cpp` 和正确的 `cyclonedds_iface`。
 - [ ] `/wirelesscontroller` 持续有数据；`/lowcmd` 最多只有一个 `_CREATED_BY_BARE_DDS_APP_` 固件发布端。
-- [ ] 所有必需 SDK 配置检查通过；允许重复 `StopMove()` 和 `Pose(false)` 显示幂等 `-1` warning，避障、UWB 跟随、自动恢复和 VUI 亮度读回值必须符合预期。
+- [ ] 所有必需运动 SDK 配置检查通过；允许重复 `StopMove()` 和 `Pose(false)` 显示幂等 `-1` warning。避障、UWB 跟随和自动恢复读回值必须符合预期；VUI 灯光只做 best-effort，不参与启动门控。
 - [ ] supervisor 显示 `SPORTMODE_ACTIVE` 后才启动机械臂，速度为零时机器狗不移动。
 - [ ] 无机械臂 dry-run 中，狗退出能让臂节点先退出，再请求 `StandDown`。
 - [ ] X5 上电后 `can0` 有有效反馈，不存在第二个 CAN 写进程。
@@ -357,7 +357,7 @@ scripts/run_sportmode_with_arm.sh eth0 can0 0.10 0.00 0.10
 - [ ] 机械臂单独正常退出不影响机器狗。
 - [ ] 狗正常退出时，机械臂回位、damping、退出、Go2 `StandDown` 的顺序正确。
 
-关于灯光：软件会将 VUI brightness 设为 `0` 并读回确认，但固件高优先级系统指示灯可能仍亮。`GetBrightness()==0` 不等于物理指示灯必然熄灭，需要在当前 Go2 固件上目视验证。
+关于灯光：软件会尽力将 VUI brightness 设为 `0` 并读回，但失败不会阻止运动链路。固件高优先级系统指示灯可能仍亮；`GetBrightness()==0` 也不等于物理指示灯必然熄灭。
 
 ## 5. Legacy WBC 第一次部署（非纯 SportMode 主线）
 

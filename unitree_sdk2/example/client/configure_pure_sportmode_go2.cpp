@@ -106,6 +106,16 @@ void RecordIdempotentResult(const std::string& action, int32_t ret,
             << std::endl;
 }
 
+void RecordOptionalResult(const std::string& action, int32_t ret) {
+  if (ret == 0) {
+    std::cout << "[pure-sportmode] OK (optional): " << action << std::endl;
+    return;
+  }
+  std::cerr << "[pure-sportmode] WARNING (optional): " << action
+            << " (SDK code " << ret << "); continuing without a light gate"
+            << std::endl;
+}
+
 int32_t WaitForUtrackInactive(unitree::robot::go2::UtrackClient& utrack,
                               bool& tracking) {
   for (int attempt = 0; attempt < 10; ++attempt) {
@@ -153,8 +163,8 @@ int main(int argc, const char** argv) {
   int failures = 0;
   RecordIdempotentResult("StopMove before configuration", sport.StopMove(),
                          failures);
-  RecordResult("light brightness=0 before configuration",
-               vui.SetBrightness(0), failures);
+  RecordOptionalResult("light brightness=0 before configuration",
+                       vui.SetBrightness(0));
 
   RecordResult("obstacle avoidance=false", obstacles.SwitchSet(false), failures);
   bool obstacle_avoidance_enabled = true;
@@ -211,15 +221,15 @@ int main(int argc, const char** argv) {
 
   RecordIdempotentResult("StopMove after configuration", sport.StopMove(),
                          failures);
-  RecordResult("light brightness=0 after configuration",
-               vui.SetBrightness(0), failures);
+  RecordOptionalResult("light brightness=0 after configuration",
+                       vui.SetBrightness(0));
   int brightness = -1;
   const int32_t brightness_get_ret = vui.GetBrightness(brightness);
-  RecordResult("read light brightness", brightness_get_ret, failures);
+  RecordOptionalResult("read light brightness", brightness_get_ret);
   if (brightness_get_ret == 0 && brightness != 0) {
-    ++failures;
-    std::cerr << "[pure-sportmode] FAILED: light brightness remained "
-              << brightness << " instead of 0" << std::endl;
+    std::cerr << "[pure-sportmode] WARNING (optional): light brightness remained "
+              << brightness << " instead of 0; continuing without a light gate"
+              << std::endl;
   }
   unitree::robot::ChannelFactory::Instance()->Release();
 
@@ -229,8 +239,8 @@ int main(int argc, const char** argv) {
     return 1;
   }
 
-  std::cout << "[pure-sportmode] required configuration checks passed; "
-               "readable states and light brightness confirmed at 0"
+  std::cout << "[pure-sportmode] required motion configuration checks passed; "
+               "light control is best-effort and does not gate startup"
             << std::endl;
   return 0;
 }

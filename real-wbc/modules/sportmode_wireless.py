@@ -298,8 +298,8 @@ class SportModeWirelessNode:
             f"{joystick_config.max_vy:.3f}"
         )
         self.node.get_logger().info(
-            "Waiting to confirm obstacles_avoid=false, light brightness=0, and "
-            "disable factory joystick handling"
+            "Waiting to confirm obstacles_avoid=false and disable factory "
+            "joystick handling; light control is best-effort"
         )
 
     def _next_request(self, api_id: int, parameter: str = "", *, noreply: bool):
@@ -352,9 +352,13 @@ class SportModeWirelessNode:
         if enabled:
             self._trigger_fatal("obstacle avoidance remained enabled after disable request")
             return
+        first_confirmation = not self.obstacle_avoidance_disabled
         self.obstacle_avoidance_disabled = True
         self.obstacle_phase = "done"
-        self.node.get_logger().info("Confirmed Unitree obstacle avoidance is disabled")
+        if first_confirmation:
+            self.node.get_logger().info(
+                "Confirmed Unitree obstacle avoidance is disabled"
+            )
 
     def _send_obstacle_request_if_due(self, now: float) -> None:
         if self.obstacle_avoidance_disabled:
@@ -476,8 +480,8 @@ class SportModeWirelessNode:
         if now - self.started_at > self.startup_timeout_sec:
             self._trigger_fatal(
                 "startup timed out before obstacle avoidance was confirmed off, "
-                "light brightness was confirmed at 0, and the SportMode endpoint "
-                "became ready"
+                "factory joystick handling was disabled, and the SportMode "
+                "endpoint became ready"
             )
             return
         if self.node.count_subscribers(SPORT_REQUEST_TOPIC) > 0:
@@ -490,7 +494,6 @@ class SportModeWirelessNode:
                 self.joystick_disable_count += 1
         if (
             not self.obstacle_avoidance_disabled
-            or not self.vui_brightness_zero
             or self.joystick_disable_count < 3
         ):
             return
