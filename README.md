@@ -821,6 +821,7 @@ ros2 topic echo lf/sportmodestate
 - `check_env.sh` 失败在 `onnxruntime`：确认是在 Jetson 的 `/usr/bin/python3` 下安装，而不是 conda。用 `/usr/bin/python3 -c "import onnxruntime"` 复查。
 - `robot_state.msg.Teleop*` 或 `robot_state.msg.Arm*` import 失败：重新编译 `real-wbc/ros2`，然后重新 `source scripts/setup_env.sh`。
 - `Could not import 'rosidl_typesupport_c' for package 'robot_state'`：通常是 Jetson 上 `robot_state` 的生成消息还没按最新代码 clean rebuild，或当前 shell 还在 conda `base`。先 `conda deactivate`，再删除 `real-wbc/ros2/build/robot_state` 和 `real-wbc/ros2/install/robot_state` 后重新 `colcon build --packages-select robot_state`。
+- `unitree_api` 类型支持报缺少 `libpython3.x.so`：Unitree ROS2 消息曾在错误的 Conda Python 下编译。先 `conda deactivate`，清除继承的 ROS/Python 环境，重新 source 系统 ROS，再用 `colcon build --cmake-clean-cache --packages-select unitree_api unitree_go unitree_hg --cmake-args -DPython3_EXECUTABLE=/usr/bin/python3 -DPYTHON_EXECUTABLE=/usr/bin/python3` 重建仓库内的 `unitree_ros2/cyclonedds_ws`。
 - `check_env.sh --spacemouse` 失败在 `spnav` 或 `atomics`：安装 SpaceMouse Python 依赖；失败在 `spacenavd` 或 `libspnav`：安装/启动系统服务。
 - `undefined symbol: PyCObject_AsVoidPtr`：卸载 PyPI 版 `spnav`，安装 README 中固定的 Cheng Chi fork。
 - 单独机械臂测试失败在 `Error document empty` / `Failed to get chain from kdl tree`：ARX5 Python 扩展可能从 pip 安装目录加载，默认找不到仓库里的 URDF。更新到最新代码后，`scripts/run_arm_spacemouse_test.sh` 会显式把 `arx5-sdk/models` 传给示例。

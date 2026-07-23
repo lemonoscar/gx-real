@@ -182,6 +182,15 @@ def test_arm_entrypoint_is_self_contained_for_pure_sportmode() -> None:
     assert 'exec "${GX_REAL_PYTHON_BIN}"' in source
 
 
+def test_dog_entrypoint_checks_ros_type_support_before_sdk_configuration() -> None:
+    source = (ROOT / "scripts/run_sportmode_wireless.sh").read_text(encoding="utf-8")
+    assert "message_type.__class__.__import_type_support__()" in source
+    assert "ROS2 message type support preflight failed" in source
+    assert source.index("__import_type_support__") < source.index(
+        "configure_pure_sportmode_go2.sh"
+    )
+
+
 def test_direct_sdk_preflight_disables_motion_affecting_boolean_features() -> None:
     source = (
         ROOT / "unitree_sdk2/example/client/configure_pure_sportmode_go2.cpp"
