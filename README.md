@@ -1,6 +1,6 @@
 # gx-real 真机开发文档
 
-这份文档面向第一次接触本仓库的人。默认部署环境是机器狗机身上的 Jetson Orin NX，路径按 `~/gx-real` 书写。当前推荐主线是纯 SportMode 分离控制：无线手柄摇杆只控制 Go2 的速度和转向，独立 SpaceMouse Arm 节点独占 X5/ARX5。旧的 WBC/ONNX/`lowcmd` 链仍保留用于历史实验，但不会由纯 SportMode 入口启动。
+这份文档面向第一次接触本仓库的人。默认部署环境是机器狗机身上的 Jetson Orin NX，路径按 `~/gx-real` 书写。当前推荐主线是纯 SportMode 组合启动：无线手柄摇杆只控制 Go2 的速度和转向，独立 SpaceMouse Arm 节点独占 X5/ARX5，两个节点由一个 supervisor 命令按顺序启动。旧的 WBC/ONNX/`lowcmd` 链仍保留用于历史实验，但不会由纯 SportMode 入口启动。
 
 当前推荐的真机部署流程见本 README 第 4 节，更细的控制约定见 [纯 SportMode 上机指南](docs/纯SportMode上机指南.md)。
 
@@ -14,16 +14,15 @@
 - Go2 通信：订阅 ROS2 `/wirelesscontroller`，向 Unitree `/api/sport/request` 发命令；不发布 `lowcmd`。
 - X5 通信：SocketCAN `can0` + `arx5_interface`，只允许 SpaceMouse Arm 节点打开写控制。
 - 控制流程：保持 Go2 SportMode；启动时关闭避障并查询确认，然后关闭原厂手柄直通，只解释摇杆轴。
-- SpaceMouse：单独运行 Arm 节点，默认使用 raw SpaceMouse 输入，经显式 axis/sign/scale 参数映射后直接控制 X5，并发布 arm state/target topic。
+- SpaceMouse：独立 Arm 节点由组合入口自动启动，默认使用 raw SpaceMouse 输入，经显式 axis/sign/scale 参数映射后直接控制 X5，并发布 arm state/target topic。
 
-主入口链路必须由两个终端分别启动：
+主入口只需一个终端；supervisor 会等待狗进入 `SPORTMODE_ACTIVE` 后再启动机械臂：
 
 ```text
-terminal A: scripts/run_sportmode_wireless.sh
+scripts/run_sportmode_with_arm.sh eth0 can0
   -> sportmode_wireless_node -> Unitree Sport Move/StopMove
-
-terminal B: scripts/run_spacemouse_arm.sh --can-interface can0
-  -> spacemouse_arm_node -> ARX5 can0 command
+  -> wait SPORTMODE_ACTIVE
+  -> spacemouse_arm_node      -> ARX5 can0 command
 ```
 
 一句话理解：四足只走 Unitree 高层 SportMode，机械臂只走独立 X5 节点；运行时没有策略推理，也没有低层腿部写控制。
@@ -57,7 +56,7 @@ real/
     setup_arx_can.sh                # 配置 ARX5 SocketCAN can0
     disable_sports_mode_go2.sh      # 编译/调用 Unitree SDK 工具关闭 sport mode
     run_sportmode_wireless.sh       # 纯 SportMode 四足入口
-    run_sportmode_with_arm.sh       # 已停用：提示改用两个终端
+    run_sportmode_with_arm.sh       # 推荐：一个命令按顺序启动狗与机械臂
     run_leg12_real.sh               # legacy Go2/WBC 入口
     run_spacemouse_arm.sh           # 推荐 SpaceMouse + X5 独立控制入口
     run_spacemouse_teleop.sh        # legacy teleop topic 发布节点
@@ -94,7 +93,7 @@ real/
   logs/                             # 每次运行的日志目录
 ```
 
-当前优先维护的是双终端启动的纯 SportMode + 独立 X5 链。`run_leg12_real.sh`、`run_wbc*.py`、EEF trajectory、iPhone/MoCap 等内容属于旧的策略实验链路或后续扩展。
+当前优先维护的是单命令 supervisor 启动的纯 SportMode + 独立 X5 链。`run_leg12_real.sh`、`run_wbc*.py`、EEF trajectory、iPhone/MoCap 等内容属于旧的策略实验链路或后续扩展。
 
 ## 3. 硬件和外部依赖
 
@@ -270,17 +269,11 @@ pgrep -af 'run_wbc|run_leg12_real|disable_sports_mode_go2|spacemouse_teleop' || 
 
 ### 4.5 当前没有机械臂时的联动验证
 
-先把三个速度上限全部设为 `0`，只验证 SportMode 预检、心跳和退出链路，机器狗不会接收非零 `Move` 目标。
-
-终端 A：
+使用组合入口的 `--dry-run`：狗节点真实运行，但机械臂节点不打开 CAN、也不依赖 SpaceMouse。三个速度上限默认全部为 `0`，因此只验证 SportMode 预检、心跳和退出链路：
 
 ```bash
 cd ~/gx-real
-export GX_REAL_NETWORK_IFACE=eth0
-scripts/run_sportmode_wireless.sh \
-  --joy-max-vx 0.0 \
-  --joy-max-vy 0.0 \
-  --joy-max-yaw 0.0
+scripts/run_sportmode_with_arm.sh --dry-run eth0 can0
 ```
 
 必须看到：
@@ -290,15 +283,7 @@ scripts/run_sportmode_wireless.sh \
 Pure SportMode ready (SPORTMODE_ACTIVE)
 ```
 
-同时确认日志没有 `detected a lowcmd publisher`。然后在终端 B 启动不打开 CAN、不依赖 SpaceMouse 的机械臂 dry-run：
-
-```bash
-cd ~/gx-real
-export GX_REAL_NETWORK_IFACE=eth0
-scripts/run_spacemouse_arm.sh --dry-run --allow-missing-can
-```
-
-此时在终端 A 按一次 `Ctrl-C`。预期顺序是：
+同时确认日志没有 `detected a lowcmd publisher`。supervisor 随后会自动显示 `SPORTMODE_ACTIVE; arm pid=... dry_run=1`。在这个终端按一次 `Ctrl-C`，预期顺序是：
 
 1. 机器狗发布 `STOPPING` 并等待机械臂节点。
 2. dry-run 机械臂节点自动退出。
@@ -306,7 +291,7 @@ scripts/run_spacemouse_arm.sh --dry-run --allow-missing-can
 
 这只验证 ROS2 门控和进程联动，不验证 X5 CAN、电机反馈、回位或 damping 的真实硬件动作。
 
-### 4.6 安装 X5 后的正式双终端启动
+### 4.6 安装 X5 后的正式单命令启动
 
 首先上电 X5，松开硬件急停，确认机械臂初始姿态不会与 Go2 或地面碰撞，然后配置 CAN：
 
@@ -319,52 +304,35 @@ timeout 2s candump can0
 
 `can0 UP` 不等于电机已正常反馈；`candump` 完全无数据或 ARX5 报 `None of the motors are initialized` 时，先检查 24V 供电、急停、CAN-H/CAN-L、波特率和型号，不要继续使能。
 
-终端 A 先启动机器狗，首次真机建议仍把速度保持为 `0`：
+首次真机用一个命令启动，并保持狗速度为 `0`：
 
 ```bash
 cd ~/gx-real
-export GX_REAL_NETWORK_IFACE=eth0
-scripts/run_sportmode_wireless.sh \
-  --joy-max-vx 0.0 \
-  --joy-max-vy 0.0 \
-  --joy-max-yaw 0.0
+scripts/run_sportmode_with_arm.sh eth0 can0 0.0 0.0 0.0
 ```
 
-等待终端 A 明确显示 `SPORTMODE_ACTIVE`，再打开终端 B：
-
-```bash
-cd ~/gx-real
-export GX_REAL_NETWORK_IFACE=eth0
-scripts/run_spacemouse_arm.sh \
-  --can-interface can0 \
-  --sm-pos-speed 0.02 \
-  --sm-rot-speed 0.05 \
-  --sm-deadzone 0.12
-```
+supervisor 会先启动狗、等待 `SPORTMODE_ACTIVE`，然后自动启动机械臂。任何时候都不需要第二个终端。组合入口默认速度也是 `0 0 0`；上面的三个显式零值用于提醒首次上机不能直接运动。
 
 机械臂启动后先保持 SpaceMouse 两个按键都松开，再同时按下两键一次执行显式使能。只有收到 `SPORTMODE_ACTIVE` 且安全心跳有效时才会接受使能。第一次只做小幅度、单轴、短时间测试；确认方向后再逐步提高速度。
 
 两个 SpaceMouse 按键松开后再次同时按下，会请求回到固定关节位置 `[0, 0.3, 0.5, 0, 0, 0]`。回位前必须确认整条轨迹没有碰撞风险。
 
-机械臂验证通过后，重启两个节点，再将机器狗速度从低值开始：
+机械臂验证通过后，退出并重新执行组合命令，再将机器狗速度从低值开始：
 
 ```bash
-scripts/run_sportmode_wireless.sh \
-  --joy-max-vx 0.10 \
-  --joy-max-vy 0.00 \
-  --joy-max-yaw 0.10
+scripts/run_sportmode_with_arm.sh eth0 can0 0.10 0.00 0.10
 ```
 
 不得超过程序硬限制：`vx <= 0.30 m/s`、`vy <= 0.20 m/s`、`yaw <= 0.30 rad/s`。
 
 ### 4.7 停机顺序和故障语义
 
-正常联动停机只在终端 A 按一次 `Ctrl-C`，然后等待两个进程自行退出；不要立即再按第二次或使用 `kill -9`。
+正常联动停机只在组合启动终端按一次 `Ctrl-C`，然后等待两个进程自行退出；不要立即再按第二次或使用 `kill -9`。
 
 | 事件 | 机械臂行为 | 机器狗行为 |
 |---|---|---|
-| 终端 A 正常 `Ctrl-C`/`SIGTERM` | 优先回 `[0, 0.3, 0.5, 0, 0, 0]`，然后 damping 并退出 | 等机械臂退出后请求 `StandDown` |
-| 终端 B 单独正常退出 | 优先回固定位置，然后 damping 并退出 | 保持运行 |
+| 组合入口正常 `Ctrl-C`/`SIGTERM` | 优先回 `[0, 0.3, 0.5, 0, 0, 0]`，然后 damping 并退出 | 等机械臂退出后请求 `StandDown` |
+| 机械臂节点自行正常退出 | 优先回固定位置，然后 damping 并退出 | supervisor 保持狗运行 |
 | X5 CAN/反馈/SpaceMouse/门控异常 | 不主动回位，立即 damping 并非零退出 | 保持运行 |
 | 机器狗节点故障或心跳消失 | 不主动回位，立即 damping 并退出 | 停止速度输出；故障路径不保证 `StandDown` |
 
@@ -382,7 +350,7 @@ scripts/run_sportmode_wireless.sh \
 - [ ] `setup_env.sh` 显示 `rmw=rmw_cyclonedds_cpp` 和正确的 `cyclonedds_iface`。
 - [ ] `/wirelesscontroller` 持续有数据，`/lowcmd` 不存在或 publisher count 为 `0`。
 - [ ] 所有必需 SDK 配置检查通过；允许重复 `StopMove()` 和 `Pose(false)` 显示幂等 `-1` warning，避障、UWB 跟随、自动恢复和 VUI 亮度读回值必须符合预期。
-- [ ] 终端 A 显示 `SPORTMODE_ACTIVE`，速度为零时机器狗不移动。
+- [ ] supervisor 显示 `SPORTMODE_ACTIVE` 后才启动机械臂，速度为零时机器狗不移动。
 - [ ] 无机械臂 dry-run 中，狗退出能让臂节点先退出，再请求 `StandDown`。
 - [ ] X5 上电后 `can0` 有有效反馈，不存在第二个 CAN 写进程。
 - [ ] 机械臂只在 `SPORTMODE_ACTIVE` 后能显式使能，小幅单轴方向正确。

@@ -124,14 +124,18 @@ def test_limits_reject_nonfinite_negative_and_above_hard_bound() -> None:
         validate_command_limits((0.31, 0.0, 0.0))
 
 
-def test_combined_entrypoint_requires_two_terminals() -> None:
+def test_combined_entrypoint_starts_dog_then_arm() -> None:
     launcher = (ROOT / "scripts/run_sportmode_with_arm.sh").read_text(encoding="utf-8")
-    assert "combined SportMode + arm startup is disabled" in launcher
     assert "scripts/run_sportmode_wireless.sh" in launcher
     assert "scripts/run_spacemouse_arm.sh" in launcher
-    assert "exit 2" in launcher
-    assert "run_sportmode_wireless.py" not in launcher
-    assert "run_spacemouse_arm.py" not in launcher
+    assert launcher.index("scripts/run_sportmode_wireless.sh") < launcher.index(
+        "scripts/run_spacemouse_arm.sh"
+    )
+    assert "waiting for SPORTMODE_ACTIVE" in launcher
+    assert "ros2 topic echo /safety/heartbeat" in launcher
+    assert "--dry-run" in launcher
+    assert "arm exited with status ${arm_status}; dog remains active" in launcher
+    assert 'kill -TERM "${base_pid}"' in launcher
 
 
 def test_dog_shutdown_waits_for_arm_then_requests_stand_down() -> None:

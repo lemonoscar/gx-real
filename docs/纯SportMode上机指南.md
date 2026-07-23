@@ -1,6 +1,6 @@
 # 纯 SportMode 上机指南
 
-这条链路是当前推荐的 `Go2 + X5` 手动控制模式。它不加载 ONNX 策略、不运行 WBC、不发布 `lowcmd`，四足和机械臂由两个独立节点控制：
+这条链路是当前推荐的 `Go2 + X5` 手动控制模式。它不加载 ONNX 策略、不运行 WBC、不发布 `lowcmd`。四足和机械臂仍由两个独立节点控制，但由一个 supervisor 命令按顺序启动和管理：
 
 - `sportmode_wireless_node`：只读取 `/wirelesscontroller` 的摇杆轴，并向 `/api/sport/request` 发送 `Move(vx, vy, yaw)` 或 `StopMove`。
 - `spacemouse_arm_node`：独占 `can0`，使用 SpaceMouse 控制 X5，并发布 `/arm/state` 与 `/arm/target_state`。
@@ -38,44 +38,40 @@
 
 启动脚本要求 `RMW_IMPLEMENTATION=rmw_cyclonedds_cpp`；如果本机没有安装/构建该 RMW，会直接退出，不会退回到可能无法连接 Go2 的其他 DDS 实现。
 
-必须使用两个终端分别启动，且先启动机器狗：
+只使用一个终端启动。组合入口会先启动机器狗，等待 `SPORTMODE_ACTIVE` 后再启动机械臂：
 
 ```bash
-# 终端 A：机器狗
 cd ~/gx-real
-export GX_REAL_NETWORK_IFACE=eth0
-scripts/run_sportmode_wireless.sh
-
-# 等终端 A 显示 SPORTMODE_ACTIVE 后，打开终端 B：机械臂
-cd ~/gx-real
-export GX_REAL_NETWORK_IFACE=eth0
-scripts/run_spacemouse_arm.sh --can-interface can0
+scripts/run_sportmode_with_arm.sh eth0 can0 0.0 0.0 0.0
 ```
 
-`scripts/run_sportmode_with_arm.sh` 已停用，调用时只会打印双终端指令并退出。机械臂只有在底盘心跳为 `SPORTMODE_ACTIVE` 时才接受 SpaceMouse 双键显式使能；机械臂硬件初始化完成后 5 秒仍未收到首个机器狗心跳时，会进入 damping 并异常退出。
+五个位置参数依次是网络接口、CAN 接口和狗的 `vx/vy/yaw` 三个速度上限。默认速度上限也是 `0/0/0`。机械臂只有在底盘心跳为 `SPORTMODE_ACTIVE` 时才接受 SpaceMouse 双键显式使能。
+
+没有安装机械臂时，用同一个入口验证联动，arm 节点不会打开 CAN 或 SpaceMouse：
+
+```bash
+scripts/run_sportmode_with_arm.sh --dry-run eth0 can0
+```
 
 ## 可调参数
 
 默认只建议调整速度上限、死区和方向符号：
 
 ```bash
-scripts/run_sportmode_wireless.sh \
-  --joy-max-vx 0.30 \
-  --joy-max-yaw 0.30 \
-  --joy-deadzone 0.12
+scripts/run_sportmode_with_arm.sh eth0 can0 0.10 0.00 0.10
 ```
 
-硬限制为 `vx <= 0.30 m/s`、`vy <= 0.20 m/s`、`yaw <= 0.30 rad/s`，超过限制时节点拒绝启动。保持 `--joy-max-vy 0.0` 即为“只前后速度 + 转向”模式。
+硬限制为 `vx <= 0.30 m/s`、`vy <= 0.20 m/s`、`yaw <= 0.30 rad/s`，超过限制时节点拒绝启动。保持速度参数中的 `vy=0.0` 即为“只前后速度 + 转向”模式。
 
 ## 停止与恢复
 
-正常停机时，只需在终端 A 对机器狗节点按 `Ctrl-C`：
+正常停机时，只需在组合启动终端按一次 `Ctrl-C`：
 
 1. 机器狗停止速度命令并发布 `STOPPING`。
 2. 机械臂先回到 `[0, 0.3, 0.5, 0, 0, 0]`，进入 damping 后退出。
 3. 机器狗等待机械臂退出，然后调用 SportMode `StandDown` 进入趴卧姿态；过渡速度由 Go2 固件控制，SDK 接口本身没有速度参数。
 
-单独在终端 B 停止机械臂时，机械臂正常回固定位置后退出，机器狗保持运行。机械臂自身发生 CAN、反馈、SpaceMouse 或安全门控异常时，不执行主动回位，而是立即 damping 并退出；机器狗不受影响。
+机械臂自身发生 CAN、反馈、SpaceMouse 或安全门控异常时，不执行主动回位，而是立即 damping 并退出；supervisor 会记录机械臂退出状态，但机器狗保持运行。
 
 机器狗节点故障或心跳消失时，机械臂会按故障路径立即 damping 并退出，不会在底盘状态不可信时主动回位。
 
