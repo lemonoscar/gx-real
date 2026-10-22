@@ -8,3 +8,8 @@ __pycache__/
 *.pyc
 logs/
 run.log
+
+!policies/height_scan_contract.yaml
+!policies/height_scan_contract.npz
+!policies/unified483_model11494/
+!policies/unified483_model11494/*

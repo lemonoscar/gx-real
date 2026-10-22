@@ -51,6 +51,15 @@ def validate_policy_bundle(
         "policy": Path(policy_path).expanduser().resolve(),
         "env": Path(env_path).expanduser().resolve(),
     }
+    if manifest.get("actor_dim") == 483:
+        for name in ("height_contract", "height_grid"):
+            artifact = artifacts.get(name)
+            if not isinstance(artifact, dict) or not isinstance(artifact.get("path"), str):
+                raise PolicyBundleError(f"483 bundle is missing {name}")
+            path = (manifest_file.parent / artifact["path"]).resolve()
+            if path.parent != manifest_file.parent:
+                raise PolicyBundleError(f"{name} must be inside the policy bundle")
+            requested_paths[name] = path
     verified = {}
     for name, requested_path in requested_paths.items():
         artifact = artifacts.get(name)

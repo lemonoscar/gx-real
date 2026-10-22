@@ -674,3 +674,7 @@ ros2 topic echo lf/sportmodestate
 - [网络与通信配置](real-wbc/docs/network.md)：Go2 网络、ROS2、MCF 和 `can0`。
 - [硬件装配说明](real-wbc/docs/assembly.md)：X5 供电、安装、USB-CAN 和外设。
 - [3D 打印说明](real-wbc/docs/3d_printing.md)：安装板和历史外设打印件。
+
+## Unified 483 维策略
+
+`model_11494` 的独立部署入口、输入契约和离线验证见 [Unified部署说明](UNIFIED483_DEPLOYMENT.zh-CN.md)。默认旧Flat策略保持不变。

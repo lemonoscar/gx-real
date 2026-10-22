@@ -12,6 +12,7 @@ ZERO_HEIGHT_SCAN_FUNC = (
 REAL_HEIGHT_SCAN_FUNCS = frozenset(
     {
         "isaaclab.envs.mdp.observations:height_scan",
+        "robot_lab.tasks.manager_based.locomotion.velocity.mdp.deployment_robust:robust_height_scan",
         "robot_lab.tasks.manager_based.locomotion.velocity.mdp.observations:height_scan",
     }
 )

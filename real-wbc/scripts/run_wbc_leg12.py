@@ -255,6 +255,10 @@ if __name__ == "__main__":
         verified_bundle["artifacts"]["env"]["sha256"],
         verified_bundle["manifest"],
     )
+    if "height_contract" in verified_bundle["artifacts"]:
+        expected = verified_bundle["artifacts"]["height_contract"]["path"]
+        if os.path.realpath(args.height_scan_contract) != expected:
+            parser.error("height scan contract must be the verified file in the 483 bundle")
     del args.policy_bundle
 
     import rclpy
