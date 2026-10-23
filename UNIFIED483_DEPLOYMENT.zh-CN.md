@@ -72,6 +72,22 @@ bash scripts/run_unified483_pointcloud_real.sh --cmd-vx 0 --cmd-vy 0 --cmd-yaw 0
 
 启动日志会打印 `Unified height input mode=zero/pointcloud`。零高度是主动屏蔽输入的对照版本，并不意味着当前权重已另行完成盲走训练；输入0也不等同于所有姿态下的平地高度。当前服务器训练继续保留地形观测，未因增加部署入口而改变。
 
+### Unitree手柄遥控版
+
+上述两个入口默认使用固定速度。手柄入口显式选择 `wireless_joystick`：
+
+```bash
+# 遥控＋默认零高度
+bash scripts/run_unified483_joystick_real.sh
+
+# 遥控＋真实点云
+GX_REAL_UNIFIED_HEIGHT_MODE=pointcloud bash scripts/run_unified483_joystick_real.sh
+```
+
+默认轴映射：左摇杆上下→vx（ly，+1），左摇杆左右→vy（lx，−1），右摇杆左右→wz（rx，−1）；实际手柄符号需与机身方向核对。专用入口将前向上限设为0.75m/s、侧向0.2m/s、转向0.3rad/s，后向由Unified滤波限为−0.5m/s。前向最小映射值为0，由模型的vx±0.1死区处理低速，不额外跳到0.2m/s。组合指令仍经过椭球限幅。
+
+手柄本身保留0.12摇杆死区、0.25s失联看门狗、速度斜坡、回中解锁。`R1`起身，稳定后`L2`进入策略，完成零速交接后使用摇杆；`Y`清零并要求摇杆回中后重新放行。`L1`首次为受控停机、再次为硬急停；`R2`立即停策略，不作为正常下机流程。机械臂仍由独立进程控制。
+
 保留原R1/L2接管流程、MCF检查、低层状态看门狗、关节限位、急停与机械臂单写者限制。启动时机械臂需处于收拢姿态；站稳后由外部臂控制器执行连续轨迹。具体遥控操作沿用主README。
 
 续训完成后，使用实际最终checkpoint与同一次训练的`params/env.yaml`重新导出到新目录：

@@ -129,3 +129,20 @@ def test_launchers_select_mode_without_hardware(tmp_path,entry,mode):
     args=subprocess.check_output(['bash',str(scripts/entry)],env=env,text=True).splitlines()
     assert args[args.index('--unified-height-mode')+1]==mode
     assert ('--enable-height-scan' in args)==(mode=='pointcloud')
+
+
+@pytest.mark.parametrize('mode',['zero','pointcloud'])
+def test_joystick_launcher_routes_both_height_modes(tmp_path,mode):
+    import os,shutil,subprocess
+    scripts=tmp_path/'scripts';scripts.mkdir()
+    for name in ('run_unified483_real.sh','run_unified483_joystick_real.sh'):
+        shutil.copy(ROOT/'scripts'/name,scripts/name)
+    (scripts/'run_leg12_real.sh').write_text('#!/bin/bash\nprintf "%s\\n" "$@"\n')
+    env=os.environ.copy();env['GX_REAL_UNIFIED_HEIGHT_MODE']=mode
+    args=subprocess.check_output(['bash',str(scripts/'run_unified483_joystick_real.sh')],env=env,text=True).splitlines()
+    assert args[args.index('--base-command-source')+1]=='wireless_joystick'
+    assert args[args.index('--unified-height-mode')+1]==mode
+    assert args[args.index('--joy-max-vx')+1]=='0.75'
+    assert args[args.index('--joy-max-vy')+1]=='0.2'
+    assert args[args.index('--joy-max-yaw')+1]=='0.3'
+    assert ('--enable-height-scan' in args)==(mode=='pointcloud')
