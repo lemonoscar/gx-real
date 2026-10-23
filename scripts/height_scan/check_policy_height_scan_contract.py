@@ -24,11 +24,7 @@ from modules.height_scan_core import (  # noqa: E402
 )
 
 
-ALLOWED_HEIGHT_SCAN_FUNCS = {
-    "robot_lab.tasks.manager_based.locomotion.velocity.config.quadruped.go2_x5.train_route_env_cfg:_zero_height_scan",
-    "isaaclab.envs.mdp.observations:height_scan",
-    "robot_lab.tasks.manager_based.locomotion.velocity.mdp.observations:height_scan",
-}
+from modules.height_scan_policy_validation import HEIGHT_SCAN_POLICY_FUNCS as ALLOWED_HEIGHT_SCAN_FUNCS
 
 
 class PolicyConfigLoader(yaml.SafeLoader):
@@ -82,7 +78,7 @@ def main() -> None:
     height_func = env_cfg["observations"]["policy"]["height_scan"].get("func")
     if height_func not in ALLOWED_HEIGHT_SCAN_FUNCS:
         raise RuntimeError(f"unsupported env.yaml height_scan func: {height_func}")
-    if contract.obs_dim != 260 or contract.height_scan_dim != 187:
+    if contract.obs_dim not in (260, 483) or contract.height_scan_dim != 187:
         raise RuntimeError(f"unexpected contract dims: obs={contract.obs_dim}, height={contract.height_scan_dim}")
     if contract.observation_slices["height_scan"] != [66, 253]:
         raise RuntimeError(f"unexpected height_scan slice: {contract.observation_slices['height_scan']}")

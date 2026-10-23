@@ -1,14 +1,1 @@
-obs_dim: 260
-height_scan_dim: 187
-observation_slices:
-  height_scan:
-  - 66
-  - 253
-height_scan:
-  grid_xy_source: height_scan_contract.npz:grid_xy
-  clip:
-  - -1
-  - 1
-  scale: 1.0
-  offset: 0.5
-  frame: base_yaw_aligned
+unified483_model13493/height_scan_contract.yaml

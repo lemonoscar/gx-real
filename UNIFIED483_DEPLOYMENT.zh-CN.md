@@ -1,6 +1,10 @@
 # Go2-X5 Unified 483 维策略部署
 
-本分支提供 `model_11494.pt` 的 Actor ONNX 及独立入口。当前约 2,000 轮续训仍在 lab-server 运行，未把未完成训练的结果当作已验收模型。默认 `run_leg12_real.sh` 仍使用原 Flat 260 维模型；新入口是 `run_unified483_real.sh`（默认零高度版）和 `run_unified483_pointcloud_real.sh`（真实点云版）。两者使用同一套Actor权重，区别仅为187维地形输入及对应扫描检查。
+当前默认使用 robust 续训完成后的 `model_13493.pt`。`policies/policy.onnx`、`env.yaml`、manifest和高度网格均链接到`policies/unified483_model13493/`，通用入口、固定速度入口和手柄入口统一使用该模型，默认187维高度输入全0。
+
+本轮重点是零高度输入的平地部署。真实点云入口仍保留为实验功能：上一轮核验发现的body/yaw坐标及采集时间问题尚未修复，暂不作为正式验收版本。原11494保存在`policies/unified483_model11494/`，旧260维19000保存在`policies/legacy_flat19000/`。
+
+该权重仍来自带地形观测的robust训练，零输入是部署模式，不能称作重新训练完成的盲走网络。
 
 ## 与原部署的区别
 
@@ -53,8 +57,8 @@
 
 ```bash
 python scripts/check_policy_bundle.py \
-  --policy policies/unified483_model11494/policy.onnx \
-  --manifest policies/unified483_model11494/policy_bundle.json
+  --policy policies/policy.onnx \
+  --manifest policies/policy_bundle.json
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q tests
 ```
 
@@ -70,7 +74,7 @@ bash scripts/run_unified483_real.sh --cmd-vx 0 --cmd-vy 0 --cmd-yaw 0
 bash scripts/run_unified483_pointcloud_real.sh --cmd-vx 0 --cmd-vy 0 --cmd-yaw 0
 ```
 
-启动日志会打印 `Unified height input mode=zero/pointcloud`。零高度是主动屏蔽输入的对照版本，并不意味着当前权重已另行完成盲走训练；输入0也不等同于所有姿态下的平地高度。当前服务器训练继续保留地形观测，未因增加部署入口而改变。
+启动日志会打印 `Unified height input mode=zero/pointcloud`。零高度是主动屏蔽输入的对照版本，并不意味着当前权重已另行完成盲走训练；输入0也不等同于所有姿态下的平地高度。已完成的服务器训练保留地形观测，未因增加部署入口而改变。
 
 ### Unitree手柄遥控版
 
@@ -90,29 +94,21 @@ GX_REAL_UNIFIED_HEIGHT_MODE=pointcloud bash scripts/run_unified483_joystick_real
 
 保留原R1/L2接管流程、MCF检查、低层状态看门狗、关节限位、急停与机械臂单写者限制。启动时机械臂需处于收拢姿态；站稳后由外部臂控制器执行连续轨迹。具体遥控操作沿用主README。
 
-续训完成后，使用实际最终checkpoint与同一次训练的`params/env.yaml`重新导出到新目录：
+当前13493已经完成导出。以后更换模型时，使用实际checkpoint与同一次训练的`params/env.yaml`导出到新的版本目录（不得覆盖现有13493）：
 
 ```bash
 python scripts/export_unified_actor.py \
   --checkpoint /path/to/model_13493.pt \
-  --env /same/run/params/env.yaml --output policies/unified483_model13493
-GX_REAL_UNIFIED_BUNDLE="$PWD/policies/unified483_model13493" \
+  --env /same/run/params/env.yaml --output policies/new_version
+GX_REAL_UNIFIED_BUNDLE="$PWD/policies/new_version" \
   bash scripts/run_unified483_real.sh --cmd-vx 0 --cmd-vy 0 --cmd-yaw 0
 ```
-
-真实点云版还要求有效点云与标定后的坐标转换：
-
-```bash
-bash scripts/run_unified483_pointcloud_real.sh --cmd-vx 0 --cmd-vy 0 --cmd-yaw 0
-```
-
-启动日志会打印 `Unified height input mode=zero/pointcloud`。零高度是主动屏蔽输入的对照版本，并不意味着当前权重已另行完成盲走训练；输入0也不等同于所有姿态下的平地高度。当前服务器训练继续保留地形观测，未因增加部署入口而改变。
 
 导出器拒绝覆盖已有目录，生成Actor、配置、高度扫描网格、SHA256清单与CPU等价性记录。先完成仿真回归及实际传感器输入核对，再替换部署版本。
 
 ## 当前验证范围
 
-- 原始Actor与ONNX在batch 1/8/32随机输入上的CPU输出一致至`rtol=2e-5, atol=2e-5`，最大绝对差约3.05e-5（结合相对容差通过）。
+- 原始Actor与ONNX在batch 1/8/32随机输入上的CPU输出一致至`rtol=2e-5, atol=2e-5`，最大绝对差约2.67e-5（结合相对容差通过）。
 - 离线测试覆盖死区、正负轴限幅、收臂迟滞、相位、四帧历史顺序与缩放、锚点坐标变换、失效输入停止、配置函数和文件哈希绑定。
-- 补齐主分支缺失的旧260维高度扫描契约文件，原模型/配置未替换。
-- 尚未在ROS真机链路或实体Go2-X5上验收。原11494在此前YZY两级下楼对照中仅2/3成功，不能宣称已达到真机楼梯通过标准。
+- 126项离线回归测试通过；默认路径及四类入口指向13493，旧19000和11494哈希仍通过。
+- 尚未在ROS真机链路或实体Go2-X5上验收。13493的零高度平地视频仅为仿真样例；不宣称已达到真机平地或楼梯验收标准。

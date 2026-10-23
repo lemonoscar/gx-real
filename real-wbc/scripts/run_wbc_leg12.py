@@ -134,7 +134,7 @@ if __name__ == "__main__":
         "--require-arm-state-for-rl",
         dest="require_arm_state_for_rl",
         action="store_true",
-        default=False,
+        default=True,
     )
     parser.add_argument(
         "--no-require-arm-state-for-rl",

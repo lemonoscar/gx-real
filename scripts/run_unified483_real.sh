@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-bundle="${GX_REAL_UNIFIED_BUNDLE:-${root}/policies/unified483_model11494}"
+bundle="${GX_REAL_UNIFIED_BUNDLE:-${root}/policies/unified483_model13493}"
 export GX_REAL_POLICY_PATH="${bundle}/policy.onnx"
 export GX_REAL_POLICY_BUNDLE_PATH="${bundle}/policy_bundle.json"
 mode="${GX_REAL_UNIFIED_HEIGHT_MODE:-zero}"

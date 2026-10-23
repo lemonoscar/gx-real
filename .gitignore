@@ -13,3 +13,8 @@ run.log
 !policies/height_scan_contract.npz
 !policies/unified483_model11494/
 !policies/unified483_model11494/*
+
+!policies/unified483_model13493/
+!policies/unified483_model13493/*
+!policies/legacy_flat19000/
+!policies/legacy_flat19000/*

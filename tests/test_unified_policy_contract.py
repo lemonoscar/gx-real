@@ -108,7 +108,7 @@ def test_real_bundle_configuration_is_accepted_and_wrong_kind_rejected():
                 MEASUREMENTS=MEASUREMENTS,EXPECTED_POLICY_OBS_FUNCS=ns['EXPECTED_POLICY_OBS_FUNCS'],
                 validate_height_scan_runtime_mode=validate_height_scan_runtime_mode)
     f=extract_node_function('_validate_policy_config',extras)
-    cfg=yaml.safe_load((ROOT/'policies/unified483_model11494/env.yaml').read_text())
+    cfg=yaml.safe_load((ROOT/'policies/unified483_model13493/env.yaml').read_text())
     f(cfg,cfg['dog_joint_names'],cfg['joint_names'],enable_height_scan=True)
     f(cfg,cfg['dog_joint_names'],cfg['joint_names'],enable_height_scan=False,unified_height_mode="zero")
     with pytest.raises(RuntimeError):
@@ -146,3 +146,25 @@ def test_joystick_launcher_routes_both_height_modes(tmp_path,mode):
     assert args[args.index('--joy-max-vy')+1]=='0.2'
     assert args[args.index('--joy-max-yaw')+1]=='0.3'
     assert ('--enable-height-scan' in args)==(mode=='pointcloud')
+
+
+def test_production_parser_default_model_and_arm_feedback_requirement():
+    # Execute only argparse setup; no imports/initialization of ROS or hardware node.
+    import argparse,os
+    tree=ast.parse((ROOT/'real-wbc/scripts/run_wbc_leg12.py').read_text())
+    main=next(n for n in tree.body if isinstance(n,ast.If) and isinstance(n.test,ast.Compare))
+    setup=[]
+    for stmt in main.body:
+        if isinstance(stmt,ast.Assign) and any(getattr(t,'id',None)=='args' for t in stmt.targets): break
+        setup.append(stmt)
+    scope={'argparse':argparse,'np':np,'os':os,'DEFAULT_POLICY_PATH':str(ROOT/'policies/policy.onnx'),
+           'DEFAULT_POLICY_BUNDLE':str(ROOT/'policies/policy_bundle.json'),
+           'DEFAULT_HEIGHT_SCAN_CONTRACT':str(ROOT/'policies/height_scan_contract.yaml'),
+           'DEFAULT_LOG_DIR':str(ROOT/'logs')}
+    exec(compile(ast.Module(body=setup,type_ignores=[]),'<parser-only>','exec'),scope)
+    args=scope['parser'].parse_args([])
+    assert args.require_arm_state_for_rl is True
+    assert args.enable_height_scan is False
+    assert args.unified_height_mode is None  # Unified init selects zero when scan disabled.
+    assert Path(args.policy_path).resolve().parent.name=='unified483_model13493'
+    assert args.base_command_source=='fixed'
