@@ -1,13 +1,13 @@
 # Go2-X5 Unified 483 维策略部署
 
-本分支提供 `model_11494.pt` 的 Actor ONNX 及独立入口。当前约 2,000 轮续训仍在 lab-server 运行，未把未完成训练的结果当作已验收模型。默认 `run_leg12_real.sh` 仍使用原 Flat 260 维模型；新入口是 `run_unified483_real.sh`。
+本分支提供 `model_11494.pt` 的 Actor ONNX 及独立入口。当前约 2,000 轮续训仍在 lab-server 运行，未把未完成训练的结果当作已验收模型。默认 `run_leg12_real.sh` 仍使用原 Flat 260 维模型；新入口是 `run_unified483_real.sh`（默认零高度版）和 `run_unified483_pointcloud_real.sh`（真实点云版）。两者使用同一套Actor权重，区别仅为187维地形输入及对应扫描检查。
 
 ## 与原部署的区别
 
 | 项目 | 原 Flat | 当前 Unified |
 |---|---|---|
 | Actor 输入/输出 | 260 / 12 | 483 / 12 |
-| 地形 | 零高度占位 | 187 点真实高度扫描 |
+| 地形 | 零高度占位 | 默认187点全零；点云入口使用真实扫描 |
 | 附加状态 | 无 | 步态相位、站立标记、站立锚点误差、4 帧历史 |
 | 默认关节角 | 部署偏置 | 训练 `env.yaml` 的默认关节角 |
 | 机械臂 | 固定姿态启动检查 | 保留启动检查；运行时读实测六轴角/速度与六轴目标 |
@@ -45,7 +45,7 @@
 
 站立锚点需要连续的**base原点世界位姿**，默认从 `/utlidar/robot_pose` 读取 `PoseStamped`。必须确认该话题实际是base位姿；若是LiDAR位姿，应先按标定外参转换再发布。不得把LiDAR原点或累计积分漂移替代base原点。时间戳与ROS时钟一致；消息过期、世界frame改变、超过25 cm的定位跳变会阻断或停止策略。默认新鲜度0.25 s。
 
-187点按yaw对齐，x∈[-0.8,0.8]、y∈[-0.5,0.5]、间距0.1 m，`xy` meshgrid顺序。数值语义为`base_z − ground_z − 0.5 m`，遵循现有高度模块及其有效覆盖规则。默认点云 `/unilidar/cloud`；也可使用现有height-map接口。新Actor不接受零回退或旧扫描回退。点云外参、base位姿含义、关节零位及力矩能力仍需在实际设备上核对。
+187点按yaw对齐，x∈[-0.8,0.8]、y∈[-0.5,0.5]、间距0.1 m，`xy` meshgrid顺序。数值语义为`base_z − ground_z − 0.5 m`，遵循现有高度模块及其有效覆盖规则。点云版订阅 `/unilidar/cloud`（PointCloud2），不接受零回退或旧扫描回退。默认零高度版不创建点云订阅，直接将 `obs[66:253]` 全部置零。两版仍要求新鲜的base位姿与机械臂反馈。点云外参、base位姿含义、关节零位及力矩能力仍需在实际设备上核对。
 
 ## 使用
 
@@ -58,11 +58,19 @@ python scripts/check_policy_bundle.py \
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q tests
 ```
 
-实际设备上，在机械臂状态/目标、有效高度扫描、base位姿和原有急停链准备好后，使用新入口（此命令会释放MCF并启动低层控制，本次开发没有执行）：
+实际设备上，在机械臂状态/目标、base位姿和原有急停链准备好后，使用默认零高度入口（此命令会释放MCF并启动低层控制，本次开发没有执行）：
 
 ```bash
 bash scripts/run_unified483_real.sh --cmd-vx 0 --cmd-vy 0 --cmd-yaw 0
 ```
+
+真实点云版还要求有效点云与标定后的坐标转换：
+
+```bash
+bash scripts/run_unified483_pointcloud_real.sh --cmd-vx 0 --cmd-vy 0 --cmd-yaw 0
+```
+
+启动日志会打印 `Unified height input mode=zero/pointcloud`。零高度是主动屏蔽输入的对照版本，并不意味着当前权重已另行完成盲走训练；输入0也不等同于所有姿态下的平地高度。当前服务器训练继续保留地形观测，未因增加部署入口而改变。
 
 保留原R1/L2接管流程、MCF检查、低层状态看门狗、关节限位、急停与机械臂单写者限制。启动时机械臂需处于收拢姿态；站稳后由外部臂控制器执行连续轨迹。具体遥控操作沿用主README。
 
@@ -75,6 +83,14 @@ python scripts/export_unified_actor.py \
 GX_REAL_UNIFIED_BUNDLE="$PWD/policies/unified483_model13493" \
   bash scripts/run_unified483_real.sh --cmd-vx 0 --cmd-vy 0 --cmd-yaw 0
 ```
+
+真实点云版还要求有效点云与标定后的坐标转换：
+
+```bash
+bash scripts/run_unified483_pointcloud_real.sh --cmd-vx 0 --cmd-vy 0 --cmd-yaw 0
+```
+
+启动日志会打印 `Unified height input mode=zero/pointcloud`。零高度是主动屏蔽输入的对照版本，并不意味着当前权重已另行完成盲走训练；输入0也不等同于所有姿态下的平地高度。当前服务器训练继续保留地形观测，未因增加部署入口而改变。
 
 导出器拒绝覆盖已有目录，生成Actor、配置、高度扫描网格、SHA256清单与CPU等价性记录。先完成仿真回归及实际传感器输入核对，再替换部署版本。
 

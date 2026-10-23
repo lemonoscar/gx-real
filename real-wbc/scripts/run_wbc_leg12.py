@@ -141,6 +141,7 @@ if __name__ == "__main__":
         dest="require_arm_state_for_rl",
         action="store_false",
     )
+    parser.add_argument("--unified-height-mode", choices=["zero", "pointcloud"], default=None)
     parser.add_argument("--enable-height-scan", action="store_true")
     parser.add_argument(
         "--height-scan-contract",

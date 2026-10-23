@@ -236,6 +236,7 @@ def _validate_policy_config(
     *,
     enable_height_scan: bool,
     config_path: Optional[str] = None,
+    unified_height_mode: Optional[str] = None,
 ):
     if len(leg_joint_names) != LEG_DOF:
         raise RuntimeError(
@@ -276,6 +277,7 @@ def _validate_policy_config(
                 actual_func,
                 enable_height_scan,
                 config_path=config_path,
+                allow_zero_input=unified and unified_height_mode == "zero",
             )
             continue
         if unified and term_name in MEASUREMENTS:
@@ -375,6 +377,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         estop_repeat_count: int = 5,
         estop_repeat_period_sec: float = 0.02,
         enable_height_scan: bool = False,
+        unified_height_mode: Optional[str] = None,
         height_scan_contract: str = "policies/height_scan_contract.yaml",
         height_scan_source: str = "pointcloud2",
         height_scan_topic: str = "/unilidar/cloud",
@@ -664,6 +667,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.graceful_stop_leg_start = np.zeros(LEG_DOF, dtype=np.float64)
         self.height_scan_diag_log_interval = 0.5
         self.last_height_scan_diag_log_time = -1.0
+        self.unified_height_mode = unified_height_mode
         self.enable_height_scan = bool(enable_height_scan)
         self.height_scan_contract_path = height_scan_contract
         self.height_scan_source = height_scan_source
@@ -3992,10 +3996,13 @@ class WBCNodeLeg12ArmPassthrough(Node):
         if not (arm.state_valid and arm.state_fresh and arm.target_valid and arm.target_fresh):
             raise RuntimeSafetyFault("483 actor requires fresh measured arm and target")
         prefix = self.obs.copy()
-        prefix[66:253] = self.get_height_scan_observation()
-        diag = self.latest_height_scan_diag
-        if not diag.get("height_scan_ok", diag.get("ok", False)) or diag.get("used_fallback", False):
-            raise RuntimeSafetyFault("483 actor requires valid live height scan without fallback")
+        if self.unified_height_mode == "zero":
+            prefix[66:253] = 0.
+        else:
+            prefix[66:253] = self.get_height_scan_observation()
+            diag = self.latest_height_scan_diag
+            if not diag.get("height_scan_ok", diag.get("ok", False)) or diag.get("used_fallback", False):
+                raise RuntimeSafetyFault("483 actor requires valid live height scan without fallback")
         # Re-read action at inference, not at a potentially earlier low-state callback.
         prefix[24:30] = arm.joint_pos-self.default_dof_pos[12:18]
         prefix[42:48] = arm.joint_vel*.05
@@ -4011,12 +4018,28 @@ class WBCNodeLeg12ArmPassthrough(Node):
 
         joint_names = list(config["joint_names"])
         leg_joint_names = list(config["dog_joint_names"])
+        unified = "unified_features" in config["observations"]["policy"]
+        if unified:
+            if self.unified_height_mode is None:
+                self.unified_height_mode = "pointcloud" if self.enable_height_scan else "zero"
+            if self.unified_height_mode not in ("zero", "pointcloud"):
+                raise RuntimeError("unknown Unified height mode")
+            if self.enable_height_scan != (self.unified_height_mode == "pointcloud"):
+                raise RuntimeError("Unified height mode conflicts with --enable-height-scan")
+            if self.unified_height_mode == "pointcloud" and self.height_scan_source != "pointcloud2":
+                raise RuntimeError("Unified pointcloud version requires pointcloud2 source")
+            logging.warning("Unified height input mode=%s | slice=66:253 | source=%s",
+                            self.unified_height_mode,
+                            self.height_scan_topic if self.enable_height_scan else "constant zero (187 values)")
+        elif self.unified_height_mode is not None:
+            raise RuntimeError("--unified-height-mode requires a Unified actor")
         _validate_policy_config(
             config,
             leg_joint_names,
             joint_names,
             enable_height_scan=self.enable_height_scan,
             config_path=config_path,
+            unified_height_mode=self.unified_height_mode,
         )
         self.policy_leg_joint_names = leg_joint_names.copy()
         self.policy_leg_indices_from_interface = np.array(
@@ -4042,9 +4065,9 @@ class WBCNodeLeg12ArmPassthrough(Node):
         )
         unified = "unified_features" in config["observations"]["policy"]
         self.unified_input = UnifiedPolicyInput(self.default_dof_pos[12:18]) if unified else None
-        if unified and (not self.enable_height_scan or self.arm_control_owner != "external_spacemouse"
+        if unified and (self.arm_control_owner != "external_spacemouse"
                         or not self.require_arm_state_for_rl):
-            raise RuntimeError("483 actor requires real scan and fresh external arm state/target")
+            raise RuntimeError("483 actor requires fresh external arm state/target")
         deploy_leg_offset = (self.default_dof_pos[:12].copy() if unified else
                              self.interface_to_policy_leg_order(self.real_deploy_leg_offset))
 

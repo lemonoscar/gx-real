@@ -76,7 +76,7 @@ def test_runtime_requires_live_pose_arm_and_scan():
     f=extract_node_function('build_unified_observation')
     arm=NS(state_valid=True,state_fresh=True,target_valid=True,target_fresh=True,
            joint_pos=HOME,joint_vel=np.zeros(6),joint_target=HOME)
-    node=NS(unified_pose=(np.zeros(3),np.array([1,0,0,0])),unified_pose_time=time.monotonic(),
+    node=NS(unified_height_mode="pointcloud",unified_pose=(np.zeros(3),np.array([1,0,0,0])),unified_pose_time=time.monotonic(),
             height_scan_timeout=.25,arm_observation_cache=NS(get=lambda now:arm),obs=np.zeros(260),
             get_height_scan_observation=lambda:np.zeros(187),latest_height_scan_diag={'height_scan_ok':True,'used_fallback':False},
             default_dof_pos=np.r_[np.zeros(12),HOME],prev_action=np.zeros(18),unified_input=UnifiedPolicyInput(HOME),fixed_commands=np.zeros(3),policy_ctrl_iter=0)
@@ -87,6 +87,14 @@ def test_runtime_requires_live_pose_arm_and_scan():
     with pytest.raises(RuntimeSafetyFault,match='arm'): f(node)
     arm.state_fresh=True;node.latest_height_scan_diag['used_fallback']=True
     with pytest.raises(RuntimeSafetyFault,match='scan'): f(node)
+    node.unified_height_mode="zero"
+    node.obs[66:253]=123.
+    node.unified_input.reset()
+    node.get_height_scan_observation=lambda: (_ for _ in ()).throw(AssertionError("zero mode must not read cloud"))
+    output=f(node)
+    np.testing.assert_array_equal(output[66:253],np.zeros(187))
+    arm.target_fresh=False
+    with pytest.raises(RuntimeSafetyFault,match='arm'): f(node)
 
 
 def test_real_bundle_configuration_is_accepted_and_wrong_kind_rejected():
@@ -102,5 +110,22 @@ def test_real_bundle_configuration_is_accepted_and_wrong_kind_rejected():
     f=extract_node_function('_validate_policy_config',extras)
     cfg=yaml.safe_load((ROOT/'policies/unified483_model11494/env.yaml').read_text())
     f(cfg,cfg['dog_joint_names'],cfg['joint_names'],enable_height_scan=True)
+    f(cfg,cfg['dog_joint_names'],cfg['joint_names'],enable_height_scan=False,unified_height_mode="zero")
+    with pytest.raises(RuntimeError):
+        f(cfg,cfg['dog_joint_names'],cfg['joint_names'],enable_height_scan=False)
     cfg['observations']['policy']['joint_vel']['params']['kind']='q'
     with pytest.raises(RuntimeError): f(cfg,cfg['dog_joint_names'],cfg['joint_names'],enable_height_scan=True)
+
+
+@pytest.mark.parametrize('entry,mode', [('run_unified483_real.sh','zero'),('run_unified483_pointcloud_real.sh','pointcloud')])
+def test_launchers_select_mode_without_hardware(tmp_path,entry,mode):
+    import os,shutil,subprocess
+    scripts=tmp_path/'scripts';scripts.mkdir()
+    for name in ('run_unified483_real.sh','run_unified483_pointcloud_real.sh'):
+        shutil.copy(ROOT/'scripts'/name,scripts/name)
+    # Replace downstream hardware launcher with argument-only output.
+    (scripts/'run_leg12_real.sh').write_text('#!/bin/bash\nprintf "%s\\n" "$@"\n')
+    env=os.environ.copy();env.pop('GX_REAL_UNIFIED_HEIGHT_MODE',None)
+    args=subprocess.check_output(['bash',str(scripts/entry)],env=env,text=True).splitlines()
+    assert args[args.index('--unified-height-mode')+1]==mode
+    assert ('--enable-height-scan' in args)==(mode=='pointcloud')
