@@ -134,13 +134,14 @@ if __name__ == "__main__":
         "--require-arm-state-for-rl",
         dest="require_arm_state_for_rl",
         action="store_true",
-        default=False,
+        default=True,
     )
     parser.add_argument(
         "--no-require-arm-state-for-rl",
         dest="require_arm_state_for_rl",
         action="store_false",
     )
+    parser.add_argument("--unified-height-mode", choices=["zero", "pointcloud"], default=None)
     parser.add_argument("--enable-height-scan", action="store_true")
     parser.add_argument(
         "--height-scan-contract",
@@ -255,6 +256,10 @@ if __name__ == "__main__":
         verified_bundle["artifacts"]["env"]["sha256"],
         verified_bundle["manifest"],
     )
+    if "height_contract" in verified_bundle["artifacts"]:
+        expected = verified_bundle["artifacts"]["height_contract"]["path"]
+        if os.path.realpath(args.height_scan_contract) != expected:
+            parser.error("height scan contract must be the verified file in the 483 bundle")
     del args.policy_bundle
 
     import rclpy

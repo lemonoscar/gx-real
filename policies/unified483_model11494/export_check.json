@@ -1,0 +1,11 @@
+{
+  "torch": "2.7.0+cu128",
+  "onnxruntime": "1.23.2",
+  "batches": [
+    1,
+    8,
+    32
+  ],
+  "max_absolute_error": 3.0517578125e-05,
+  "scope": "CPU synthetic inference equivalence, not hardware acceptance"
+}

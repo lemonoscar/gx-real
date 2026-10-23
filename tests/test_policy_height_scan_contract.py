@@ -19,6 +19,7 @@ from modules.height_scan_core import (  # noqa: E402
 
 
 ALLOWED_HEIGHT_SCAN_FUNCS = {
+    "robot_lab.tasks.manager_based.locomotion.velocity.mdp.deployment_robust:robust_height_scan",
     "robot_lab.tasks.manager_based.locomotion.velocity.config.quadruped.go2_x5.train_route_env_cfg:_zero_height_scan",
     "isaaclab.envs.mdp.observations:height_scan",
     "robot_lab.tasks.manager_based.locomotion.velocity.mdp.observations:height_scan",
@@ -60,12 +61,12 @@ def test_policy_env_and_contract_dimensions():
     contract = load_height_scan_contract(str(ROOT / "policies" / "height_scan_contract.yaml"))
     env_cfg = _load_policy_env()
     assert env_cfg["observations"]["policy"]["height_scan"]["func"] in ALLOWED_HEIGHT_SCAN_FUNCS
-    assert contract.obs_dim == 260
+    assert contract.obs_dim == 483
     assert contract.height_scan_dim == 187
     assert contract.observation_slices["height_scan"] == [66, 253]
 
     session = ort.InferenceSession(str(ROOT / "policies" / "policy.onnx"), providers=["CPUExecutionProvider"])
-    assert session.get_inputs()[0].shape[-1] == 260
+    assert session.get_inputs()[0].shape[-1] == 483
     assert session.get_outputs()[0].shape[-1] == 12
 
     zero_scan = np.zeros((187,), dtype=np.float32)

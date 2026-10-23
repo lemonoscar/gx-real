@@ -12,6 +12,7 @@ ZERO_HEIGHT_SCAN_FUNC = (
 REAL_HEIGHT_SCAN_FUNCS = frozenset(
     {
         "isaaclab.envs.mdp.observations:height_scan",
+        "robot_lab.tasks.manager_based.locomotion.velocity.mdp.deployment_robust:robust_height_scan",
         "robot_lab.tasks.manager_based.locomotion.velocity.mdp.observations:height_scan",
     }
 )
@@ -31,6 +32,7 @@ def validate_height_scan_runtime_mode(
     enable_height_scan: bool,
     *,
     config_path: str | None = None,
+    allow_zero_input: bool = False,
 ) -> None:
     """Reject policies whose height_scan semantics do not match runtime mode."""
 
@@ -38,6 +40,8 @@ def validate_height_scan_runtime_mode(
     config_label = config_path or "env.yaml"
     runtime_label = f"--enable-height-scan={bool(enable_height_scan)}"
 
+    if allow_zero_input and not enable_height_scan and kind == "real":
+        return  # Explicit Unified zero-input deployment experiment; training metadata stays intact.
     if enable_height_scan and kind == "real":
         return
     if not enable_height_scan and kind == "zero":

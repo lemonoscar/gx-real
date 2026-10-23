@@ -73,4 +73,36 @@ def test_repository_policy_bundle_is_exact():
         env_path=str(policy_dir / "env.yaml"),
         manifest_path=str(policy_dir / "policy_bundle.json"),
     )
-    assert result["name"].endswith("model_19000")
+    assert result["name"].endswith("13493")
+
+
+def test_unified_bundle_verifies_scan_grid_and_actor():
+    folder=ROOT/'policies/unified483_model13493'
+    result=validate_policy_bundle(policy_path=str(folder/'policy.onnx'),env_path=str(folder/'env.yaml'),
+                                  manifest_path=str(folder/'policy_bundle.json'))
+    assert set(result['artifacts'])=={'policy','env','height_contract','height_grid'}
+
+
+def test_unified_bundle_rejects_unhashed_scan(tmp_path):
+    policy,env,manifest=_write_bundle(tmp_path)
+    data=json.loads(manifest.read_text());data['actor_dim']=483
+    manifest.write_text(json.dumps(data))
+    with pytest.raises(PolicyBundleError,match='height_contract'):
+        validate_policy_bundle(policy_path=str(policy),env_path=str(env),manifest_path=str(manifest))
+
+
+def test_default_aliases_resolve_to_13493_bundle():
+    folder=ROOT/'policies/unified483_model13493'
+    for name in ('policy.onnx','env.yaml','policy_bundle.json','height_scan_contract.yaml','height_scan_contract.npz'):
+        assert (ROOT/'policies'/name).resolve()==(folder/name).resolve()
+    data=json.loads((folder/'policy_bundle.json').read_text())
+    assert data['iteration']==13493
+    assert data['source_sha256']=='f93ec57e3509c591e2fb34b37233db3d9a670c02f68bf1a27a951c597a6c8aea'
+
+
+@pytest.mark.parametrize('directory,suffix',[('legacy_flat19000','model_19000'),('unified483_model11494','11494')])
+def test_explicit_rollback_bundles_are_intact(directory,suffix):
+    folder=ROOT/'policies'/directory
+    result=validate_policy_bundle(policy_path=str(folder/'policy.onnx'),env_path=str(folder/'env.yaml'),
+                                  manifest_path=str(folder/'policy_bundle.json'))
+    assert result['name'].endswith(suffix)

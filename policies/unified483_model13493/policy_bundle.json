@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "name": "Go2-X5 unified483 iteration 13493",
+  "source_checkpoint": "model_13493.pt",
+  "source_sha256": "f93ec57e3509c591e2fb34b37233db3d9a670c02f68bf1a27a951c597a6c8aea",
+  "iteration": 13493,
+  "actor_dim": 483,
+  "critic_dim": 560,
+  "actions": 12,
+  "artifacts": {
+    "policy": {
+      "path": "policy.onnx",
+      "sha256": "8094409179153a2054420c5426c64e17dd2a2677e828d070f00ed55e508a0988"
+    },
+    "env": {
+      "path": "env.yaml",
+      "sha256": "6c76864a3635dbe4b20d19e60b636bf4c9013d56b0c4351ebe4ab1e9382f49b9"
+    },
+    "height_contract": {
+      "path": "height_scan_contract.yaml",
+      "sha256": "4913883e2306b30accec37e7ebaf245bec95bebbfaf6f951bd35e882710a07f8"
+    },
+    "height_grid": {
+      "path": "height_scan_contract.npz",
+      "sha256": "3a0a3b5ac3c2b2a6792bd463f7557a5ad8d2830232da11e393e5bd8125076188"
+    }
+  }
+}

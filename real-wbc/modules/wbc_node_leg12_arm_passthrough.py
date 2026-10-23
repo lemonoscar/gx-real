@@ -34,6 +34,7 @@ from modules.base_command_provider import (
     handover_allows_motion,
 )
 from modules.can_owner_lock import CanOwnerLock
+from modules.unified_policy_contract import UnifiedPolicyInput, FEATURES, MEASUREMENT, MEASUREMENTS
 from modules.height_scan_provider import HeightScanProvider
 from modules.height_scan_policy_validation import (
     HEIGHT_SCAN_POLICY_FUNCS,
@@ -235,6 +236,7 @@ def _validate_policy_config(
     *,
     enable_height_scan: bool,
     config_path: Optional[str] = None,
+    unified_height_mode: Optional[str] = None,
 ):
     if len(leg_joint_names) != LEG_DOF:
         raise RuntimeError(
@@ -255,6 +257,19 @@ def _validate_policy_config(
     ]
     if missing_terms:
         raise RuntimeError(f"policy observation is missing required terms: {missing_terms}")
+    unified = "unified_features" in policy_obs_cfg
+    if unified:
+        if policy_obs_cfg["unified_features"]["func"] != FEATURES:
+            raise RuntimeError("unsupported unified actor feature function")
+        terms = [k for k, v in policy_obs_cfg.items() if isinstance(v, dict) and "func" in v]
+        if terms != list(EXPECTED_POLICY_OBS_FUNCS) + ["unified_features"]:
+            raise RuntimeError("unified actor term order differs from 483-D contract")
+        if abs(float(config["sim"]["dt"])*int(config["decimation"])-.02) > 1e-9:
+            raise RuntimeError("unified actor requires 50 Hz control")
+        for name, (kind, amplitude, scale) in MEASUREMENTS.items():
+            term = policy_obs_cfg[name]
+            if term.get("params") != {"kind": kind, "amplitude": amplitude} or term.get("scale") != scale:
+                raise RuntimeError(f"unsupported unified measurement parameters: {name}")
     for term_name, expected_func in EXPECTED_POLICY_OBS_FUNCS.items():
         actual_func = policy_obs_cfg[term_name].get("func")
         if term_name == "height_scan":
@@ -262,8 +277,11 @@ def _validate_policy_config(
                 actual_func,
                 enable_height_scan,
                 config_path=config_path,
+                allow_zero_input=unified and unified_height_mode == "zero",
             )
             continue
+        if unified and term_name in MEASUREMENTS:
+            expected_func = MEASUREMENT
         if actual_func != expected_func:
             raise RuntimeError(
                 f"unsupported observation func for {term_name}: expected {expected_func}, got {actual_func}"
@@ -359,6 +377,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         estop_repeat_count: int = 5,
         estop_repeat_period_sec: float = 0.02,
         enable_height_scan: bool = False,
+        unified_height_mode: Optional[str] = None,
         height_scan_contract: str = "policies/height_scan_contract.yaml",
         height_scan_source: str = "pointcloud2",
         height_scan_topic: str = "/unilidar/cloud",
@@ -648,6 +667,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.graceful_stop_leg_start = np.zeros(LEG_DOF, dtype=np.float64)
         self.height_scan_diag_log_interval = 0.5
         self.last_height_scan_diag_log_time = -1.0
+        self.unified_height_mode = unified_height_mode
         self.enable_height_scan = bool(enable_height_scan)
         self.height_scan_contract_path = height_scan_contract
         self.height_scan_source = height_scan_source
@@ -943,6 +963,12 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.device = device
         self.init_policy(policy_path=policy_path)
         self.init_height_scan_provider()
+        self.unified_pose = None
+        self.unified_pose_time = None
+        self.unified_pose_frame = None
+        if self.unified_input is not None:
+            self.unified_pose_subscription = self.create_subscription(
+                PoseStamped, self.height_scan_pose_topic, self.unified_pose_cb, 10)
         self.reset_arm_passthrough_pose()
         self.stand_target_leg_pos = self._build_internal_stand_leg_pos(self.leg_action_offset)
         self.pre_getup_leg_pos = self._build_pre_getup_leg_pos(self.stand_target_leg_pos)
@@ -1116,6 +1142,15 @@ class WBCNodeLeg12ArmPassthrough(Node):
             max_last_valid_age_s=self.height_scan_max_last_valid_age,
         )
         contract = self.height_scan_provider.contract
+        if self.unified_input is not None:
+            if (contract.clip != (-1., 1.) or contract.scale != 1. or contract.offset != .5
+                    or contract.frame != "base_yaw_aligned"):
+                raise RuntimeError("483 height scan scaling/frame differs from training")
+            xs = np.linspace(-.8, .8, 17); ys = np.linspace(-.5, .5, 11)
+            xx, yy = np.meshgrid(xs, ys, indexing="xy")
+            expected = np.column_stack([xx.ravel(), yy.ravel()])
+            if not np.allclose(contract.grid_xy, expected, atol=1e-6):
+                raise RuntimeError("483 height scan grid order differs from training")
         if contract.obs_dim != self.obs_dim:
             raise RuntimeError(f"height-scan contract obs_dim={contract.obs_dim} does not match policy input {self.obs_dim}")
         if contract.height_scan_dim != self.height_scan_default.shape[0]:
@@ -2504,6 +2539,9 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.sim2sim_action_delay_steps = int(self.sim2sim_rng.integers(low, high + 1))
 
     def reset_sim2sim_action_state(self):
+        if getattr(self, "unified_input", None) is not None:
+            self.unified_input.reset()
+            self.prev_action[:] = 0.
         max_delay = max(0, int(max(self.sim2sim_action_delay_range)))
         self.sim2sim_action_buffer = np.zeros((max_delay + 1, LEG_DOF), dtype=np.float64)
         self.sim2sim_action_buffer_idx = 0
@@ -3026,7 +3064,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
             self.trigger_safety_stop("observation contains non-finite values")
             return
         obs = np.clip(obs, -self.clip_obs, self.clip_obs)
-        if obs.shape[0] != self.obs_dim:
+        expected_prefix_dim = 260 if self.unified_input is not None else self.obs_dim
+        if obs.shape[0] != expected_prefix_dim:
             raise RuntimeError(
                 f"Observation dimension mismatch: got {obs.shape[0]}, expected {self.obs_dim}"
             )
@@ -3716,7 +3755,10 @@ class WBCNodeLeg12ArmPassthrough(Node):
             blended_kd = _blend_arrays(base_kd, self.deploy_policy_kd, handover_ratio)
             self.set_gains(kp=blended_kp, kd=blended_kd)
             try:
-                raw_action = self.run_policy(self.obs)
+                inference_obs = self.obs
+                if self.unified_input is not None:
+                    inference_obs = self.build_unified_observation()
+                raw_action = self.run_policy(inference_obs)
                 clipped_action = np.clip(
                     raw_action,
                     self.clip_actions_lower,
@@ -3726,6 +3768,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
                     self.apply_startup_action_limits(clipped_action, policy_elapsed)
                 )
                 timed_action, leg_action = self.apply_sim2sim_action_timing(startup_limited_action)
+                if self.unified_input is not None and self.policy_ctrl_iter < self.unified_startup_steps:
+                    leg_action = np.zeros(LEG_DOF, dtype=np.float64)
                 timed_action = require_finite_vector(
                     timed_action,
                     size=LEG_DOF,
@@ -3737,7 +3781,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
                     name="applied_policy_action",
                 )
                 target_leg_q = self.map_leg_action_to_targets(leg_action)
-            except RuntimeSafetyFault as exc:
+            except (RuntimeSafetyFault, ValueError) as exc:
                 self.trigger_safety_stop(str(exc))
                 return
             wbc_action = np.zeros(18, dtype=np.float64)
@@ -3896,6 +3940,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
                 )
                 self.last_policy_diag_log_time = time.monotonic()
             self.prev_action[:12] = leg_action
+            if self.unified_input is not None:
+                self.prev_action[:12] = (commanded_leg_q-self.leg_action_offset)/self.leg_action_scale
             self.prev_action[12:] = 0.0
             self.set_motor_position(wbc_action, self.gripper_pos_cmd)
             self.prev_policy_time = time.monotonic()
@@ -3905,7 +3951,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
 
             if self.debug_log:
                 action_dict = {
-                    "policy_input": self.obs.reshape(1, -1).copy(),
+                    "policy_input": inference_obs.reshape(1, -1).copy(),
                     "raw_action": raw_action.copy(),
                     "clipped_action": clipped_action.copy(),
                     "startup_limited_action": startup_limited_action.copy(),
@@ -3920,6 +3966,50 @@ class WBCNodeLeg12ArmPassthrough(Node):
                 self.action_history_log.append(action_dict)
             # logging.info(f"Finish policy_timer_callback {time.monotonic() - cb_start_time:.04f}s")
 
+    def unified_pose_cb(self, msg):
+        # Same pose topic as terrain mapping; must be BASE pose, not LiDAR pose.
+        frame = msg.header.frame_id
+        if not frame or (self.unified_pose_frame is not None and frame != self.unified_pose_frame):
+            self.unified_pose = None
+            return
+        stamp = float(msg.header.stamp.sec) + float(msg.header.stamp.nanosec)*1e-9
+        age = self.get_clock().now().nanoseconds*1e-9-stamp
+        if stamp <= 0 or not -.05 <= age <= self.height_scan_timeout:
+            self.unified_pose = None
+            return
+        p, q = msg.pose.position, msg.pose.orientation
+        position = np.array([p.x, p.y, p.z])
+        if self.unified_pose is not None and np.linalg.norm(position-self.unified_pose[0]) > .25:
+            self.unified_pose = None
+            if self.start_policy:
+                self.trigger_safety_stop("base odometry jumped by more than 25 cm")
+            return
+        self.unified_pose = (position, np.array([q.w, q.x, q.y, q.z]))
+        self.unified_pose_time = time.monotonic()
+        self.unified_pose_frame = frame
+
+    def build_unified_observation(self):
+        now = time.monotonic()
+        if self.unified_pose is None or now-self.unified_pose_time > self.height_scan_timeout:
+            raise RuntimeSafetyFault("483 actor requires fresh base odometry")
+        arm = self.arm_observation_cache.get(now)
+        if not (arm.state_valid and arm.state_fresh and arm.target_valid and arm.target_fresh):
+            raise RuntimeSafetyFault("483 actor requires fresh measured arm and target")
+        prefix = self.obs.copy()
+        if self.unified_height_mode == "zero":
+            prefix[66:253] = 0.
+        else:
+            prefix[66:253] = self.get_height_scan_observation()
+            diag = self.latest_height_scan_diag
+            if not diag.get("height_scan_ok", diag.get("ok", False)) or diag.get("used_fallback", False):
+                raise RuntimeSafetyFault("483 actor requires valid live height scan without fallback")
+        # Re-read action at inference, not at a potentially earlier low-state callback.
+        prefix[24:30] = arm.joint_pos-self.default_dof_pos[12:18]
+        prefix[42:48] = arm.joint_vel*.05
+        prefix[48:66] = self.prev_action
+        return self.unified_input.build(prefix, self.fixed_commands, arm.joint_pos, arm.joint_vel,
+                                        arm.joint_target, *self.unified_pose, self.policy_ctrl_iter)
+
     def init_policy(self, policy_path: str):
         logging.info("Preparing policy")
         faulthandler.enable()
@@ -3928,12 +4018,28 @@ class WBCNodeLeg12ArmPassthrough(Node):
 
         joint_names = list(config["joint_names"])
         leg_joint_names = list(config["dog_joint_names"])
+        unified = "unified_features" in config["observations"]["policy"]
+        if unified:
+            if self.unified_height_mode is None:
+                self.unified_height_mode = "pointcloud" if self.enable_height_scan else "zero"
+            if self.unified_height_mode not in ("zero", "pointcloud"):
+                raise RuntimeError("unknown Unified height mode")
+            if self.enable_height_scan != (self.unified_height_mode == "pointcloud"):
+                raise RuntimeError("Unified height mode conflicts with --enable-height-scan")
+            if self.unified_height_mode == "pointcloud" and self.height_scan_source != "pointcloud2":
+                raise RuntimeError("Unified pointcloud version requires pointcloud2 source")
+            logging.warning("Unified height input mode=%s | slice=66:253 | source=%s",
+                            self.unified_height_mode,
+                            self.height_scan_topic if self.enable_height_scan else "constant zero (187 values)")
+        elif self.unified_height_mode is not None:
+            raise RuntimeError("--unified-height-mode requires a Unified actor")
         _validate_policy_config(
             config,
             leg_joint_names,
             joint_names,
             enable_height_scan=self.enable_height_scan,
             config_path=config_path,
+            unified_height_mode=self.unified_height_mode,
         )
         self.policy_leg_joint_names = leg_joint_names.copy()
         self.policy_leg_indices_from_interface = np.array(
@@ -3957,7 +4063,13 @@ class WBCNodeLeg12ArmPassthrough(Node):
             [float(init_joint_pos[joint_name]) for joint_name in joint_names],
             dtype=np.float64,
         )
-        deploy_leg_offset = self.interface_to_policy_leg_order(self.real_deploy_leg_offset)
+        unified = "unified_features" in config["observations"]["policy"]
+        self.unified_input = UnifiedPolicyInput(self.default_dof_pos[12:18]) if unified else None
+        if unified and (self.arm_control_owner != "external_spacemouse"
+                        or not self.require_arm_state_for_rl):
+            raise RuntimeError("483 actor requires fresh external arm state/target")
+        deploy_leg_offset = (self.default_dof_pos[:12].copy() if unified else
+                             self.interface_to_policy_leg_order(self.real_deploy_leg_offset))
 
         policy_obs_cfg = config["observations"]["policy"]
         action_cfg = config["actions"]["joint_pos"]
@@ -3966,8 +4078,9 @@ class WBCNodeLeg12ArmPassthrough(Node):
         actuator_cfg = config["scene"]["robot"]["actuators"]
 
         self.policy_freq = 1.0 / (
-            float(config["sim"]["dt"]) * float(config["sim"]["render_interval"])
+            float(config["sim"]["dt"]) * float(config.get("decimation", config["sim"]["render_interval"]))
         )
+        self.unified_startup_steps = round(float(config.get("startup_hold_seconds", 0.))*self.policy_freq)
         self.obs_history_len = 1
         self.clip_obs = max(
             float(abs(term_cfg["clip"][1]))
@@ -4040,6 +4153,10 @@ class WBCNodeLeg12ArmPassthrough(Node):
             raise RuntimeError(
                 f"sim2sim_obs_delay_steps={self.sim2sim_obs_delay_steps} is unsupported in real deployment"
             )
+        if unified:
+            self.sim2sim_action_delay_range = (0, 0)
+            self.sim2sim_action_hold_prob = 0.
+            self.sim2sim_action_noise_std = 0.
         self.reset_sim2sim_action_state()
 
         self.ort_session = ort.InferenceSession(
@@ -4063,13 +4180,14 @@ class WBCNodeLeg12ArmPassthrough(Node):
                 f"expected policy action_dim={LEG_DOF} for dog-only deployment, got {self.action_dim}"
             )
         known_obs_dim = 3 + 3 + 3 + 3 + 18 + 18 + 18 + 6 + 1
-        height_scan_dim = self.obs_dim - known_obs_dim
+        height_scan_dim = self.obs_dim - known_obs_dim - (223 if unified else 0)
         if height_scan_dim < 0:
             raise RuntimeError(
                 f"invalid observation dimension: {self.obs_dim} < {known_obs_dim}"
             )
-        if self.obs_dim != 260:
-            raise RuntimeError(f"expected DogOnly policy input_dim=260, got {self.obs_dim}")
+        expected_dim = 483 if unified else 260
+        if self.obs_dim != expected_dim:
+            raise RuntimeError(f"expected policy input_dim={expected_dim}, got {self.obs_dim}")
         if height_scan_dim != 187:
             raise RuntimeError(f"expected DogOnly height_scan_dim=187, got {height_scan_dim}")
         self.height_scan_slice = (66, 253)
