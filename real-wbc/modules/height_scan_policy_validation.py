@@ -16,11 +16,12 @@ REAL_HEIGHT_SCAN_FUNCS = frozenset(
         "robot_lab.tasks.manager_based.locomotion.velocity.mdp.observations:height_scan",
     }
 )
-HEIGHT_SCAN_POLICY_FUNCS = frozenset({ZERO_HEIGHT_SCAN_FUNC, *REAL_HEIGHT_SCAN_FUNCS})
+PROPRIO_ZERO_HEIGHT_FUNC = "robot_lab.tasks.manager_based.locomotion.velocity.mdp.proprioceptive_flat:zero_height"
+HEIGHT_SCAN_POLICY_FUNCS = frozenset({ZERO_HEIGHT_SCAN_FUNC, PROPRIO_ZERO_HEIGHT_FUNC, *REAL_HEIGHT_SCAN_FUNCS})
 
 
 def classify_height_scan_func(func: Any) -> str:
-    if func == ZERO_HEIGHT_SCAN_FUNC:
+    if func in (ZERO_HEIGHT_SCAN_FUNC, PROPRIO_ZERO_HEIGHT_FUNC):
         return "zero"
     if func in REAL_HEIGHT_SCAN_FUNCS:
         return "real"

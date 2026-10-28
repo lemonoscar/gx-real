@@ -9,6 +9,10 @@ import numpy as np
 MDP = "robot_lab.tasks.manager_based.locomotion.velocity.mdp."
 MEASUREMENT = MDP + "unified_asymmetric:actor_measurement"
 FEATURES = MDP + "unified_asymmetric:actor_features"
+PROPRIO_PROFILE = "proprioceptive_flat_v1"
+PROPRIO_FEATURES = MDP + "proprioceptive_flat:proprio_features"
+PROPRIO_VELOCITY = MDP + "proprioceptive_flat:estimated_velocity"
+PROPRIO_HEIGHT = MDP + "proprioceptive_flat:zero_height"
 MEASUREMENTS = {"base_lin_vel": ("lin", .1, 2.), "base_ang_vel": ("ang", .02, .25),
                 "projected_gravity": ("gravity", .02, 1.), "joint_pos": ("q", .01, 1.),
                 "joint_vel": ("dq", 1.5, .05)}
@@ -43,7 +47,8 @@ def rotation(quaternion):
 
 
 class UnifiedPolicyInput:
-    def __init__(self, home):
+    def __init__(self, home, use_xy_anchor=True):
+        self.use_xy_anchor = bool(use_xy_anchor)
         self.home = vector(home, 6).copy()
         self.reset()
 
@@ -59,7 +64,7 @@ class UnifiedPolicyInput:
 
     def build(self, prefix, requested, arm_q, arm_dq, arm_target, position, quaternion, step):
         prefix = vector(prefix, 260).copy()
-        position = vector(position, 3)
+        position = vector(position, 3) if self.use_xy_anchor else None
         rot = rotation(quaternion)
         q = vector(arm_q, 6)
         dq = vector(arm_dq, 6)
@@ -78,12 +83,13 @@ class UnifiedPolicyInput:
         standing = not np.any(command)
         yaw = np.arctan2(rot[1, 0], rot[0, 0])
         if standing and not self.was_standing:
-            self.anchor = position.copy()
+            if self.use_xy_anchor:
+                self.anchor = position.copy()
             self.yaw_anchor = yaw
         demand = np.clip(np.linalg.norm(command[:2])/.75 + abs(command[2])/.6, 0, 1)
         self.phase = 0. if standing else (self.phase + .02*(.7+1.3*demand)) % 1
         self.was_standing = standing
-        delta = rot.T @ (self.anchor-position)
+        delta = rot.T @ (self.anchor-position) if self.use_xy_anchor else np.zeros(3)
         dyaw = yaw-self.yaw_anchor
         features = ([0, 0, 1, delta[0], delta[1], np.sin(dyaw), np.cos(dyaw)-1] if standing else
                     [np.sin(2*np.pi*self.phase), np.cos(2*np.pi*self.phase), 0, 0, 0, 0, 0])

@@ -9,7 +9,7 @@ import pytest
 import yaml
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'real-wbc'))
-from modules.unified_policy_contract import UnifiedPolicyInput, filter_command, FEATURES, MEASUREMENT, MEASUREMENTS
+from modules.unified_policy_contract import UnifiedPolicyInput, filter_command, FEATURES, MEASUREMENT, MEASUREMENTS, PROPRIO_PROFILE, PROPRIO_FEATURES, PROPRIO_VELOCITY, PROPRIO_HEIGHT
 from modules.runtime_safety import RuntimeSafetyFault
 from modules.height_scan_policy_validation import ZERO_HEIGHT_SCAN_FUNC, validate_height_scan_runtime_mode
 
@@ -76,7 +76,7 @@ def test_runtime_requires_live_pose_arm_and_scan():
     f=extract_node_function('build_unified_observation')
     arm=NS(state_valid=True,state_fresh=True,target_valid=True,target_fresh=True,
            joint_pos=HOME,joint_vel=np.zeros(6),joint_target=HOME)
-    node=NS(unified_height_mode="pointcloud",unified_pose=(np.zeros(3),np.array([1,0,0,0])),unified_pose_time=time.monotonic(),
+    node=NS(proprioceptive_policy=False,unified_height_mode="pointcloud",unified_pose=(np.zeros(3),np.array([1,0,0,0])),unified_pose_time=time.monotonic(),
             height_scan_timeout=.25,arm_observation_cache=NS(get=lambda now:arm),obs=np.zeros(260),
             get_height_scan_observation=lambda:np.zeros(187),latest_height_scan_diag={'height_scan_ok':True,'used_fallback':False},
             default_dof_pos=np.r_[np.zeros(12),HOME],prev_action=np.zeros(18),unified_input=UnifiedPolicyInput(HOME),fixed_commands=np.zeros(3),policy_ctrl_iter=0)
@@ -105,7 +105,7 @@ def test_real_bundle_configuration_is_accepted_and_wrong_kind_rejected():
     from modules.leg_joint_limits import INTERFACE_LEG_JOINT_NAMES
     extras=dict(Dict=dict,List=list,Optional=__import__('typing').Optional,LEG_DOF=12,
                 INTERFACE_LEG_JOINT_NAMES=INTERFACE_LEG_JOINT_NAMES,FEATURES=FEATURES,MEASUREMENT=MEASUREMENT,
-                MEASUREMENTS=MEASUREMENTS,EXPECTED_POLICY_OBS_FUNCS=ns['EXPECTED_POLICY_OBS_FUNCS'],
+                MEASUREMENTS=MEASUREMENTS,PROPRIO_PROFILE=PROPRIO_PROFILE,PROPRIO_FEATURES=PROPRIO_FEATURES,PROPRIO_VELOCITY=PROPRIO_VELOCITY,PROPRIO_HEIGHT=PROPRIO_HEIGHT,EXPECTED_POLICY_OBS_FUNCS=ns['EXPECTED_POLICY_OBS_FUNCS'],
                 validate_height_scan_runtime_mode=validate_height_scan_runtime_mode)
     f=extract_node_function('_validate_policy_config',extras)
     cfg=yaml.safe_load((ROOT/'policies/unified483_model13493/env.yaml').read_text())
@@ -113,6 +113,17 @@ def test_real_bundle_configuration_is_accepted_and_wrong_kind_rejected():
     f(cfg,cfg['dog_joint_names'],cfg['joint_names'],enable_height_scan=False,unified_height_mode="zero")
     with pytest.raises(RuntimeError):
         f(cfg,cfg['dog_joint_names'],cfg['joint_names'],enable_height_scan=False)
+    import copy
+    proprio=copy.deepcopy(cfg)
+    proprio['deployment_observation_profile']=PROPRIO_PROFILE
+    obs=proprio['observations']['policy']
+    obs['base_lin_vel'].update(func=PROPRIO_VELOCITY,params={})
+    obs['joint_vel']['params']['amplitude']=.1
+    obs['height_scan']['func']=PROPRIO_HEIGHT
+    obs['unified_features']['func']=PROPRIO_FEATURES
+    f(proprio,proprio['dog_joint_names'],proprio['joint_names'],enable_height_scan=False,unified_height_mode="zero")
+    with pytest.raises(RuntimeError):
+        f(proprio,proprio['dog_joint_names'],proprio['joint_names'],enable_height_scan=True)
     cfg['observations']['policy']['joint_vel']['params']['kind']='q'
     with pytest.raises(RuntimeError): f(cfg,cfg['dog_joint_names'],cfg['joint_names'],enable_height_scan=True)
 
