@@ -172,8 +172,8 @@ def test_controlled_stop_has_separate_arm_home_and_hard_estop_topics() -> None:
     assert 'self.graceful_stop_phase = "hard_stop"' in runtime_stop
 
 
-def test_operator_docs_match_fixed_speed_pd_and_l1_baseline() -> None:
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+def test_legacy_operator_docs_match_fixed_speed_pd_and_l1_baseline() -> None:
+    readme = (ROOT / "docs/legacy_flat19000_README.md").read_text(encoding="utf-8")
     guide = (ROOT / "docs/上机使用指南.md").read_text(encoding="utf-8")
 
     for document in (readme, guide):

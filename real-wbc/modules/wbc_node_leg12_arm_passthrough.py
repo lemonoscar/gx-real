@@ -34,7 +34,9 @@ from modules.base_command_provider import (
     handover_allows_motion,
 )
 from modules.can_owner_lock import CanOwnerLock
-from modules.unified_policy_contract import UnifiedPolicyInput, FEATURES, MEASUREMENT, MEASUREMENTS
+from modules.unified_policy_contract import (UnifiedPolicyInput, FEATURES, MEASUREMENT, MEASUREMENTS,
+    PROPRIO_PROFILE, PROPRIO_FEATURES, PROPRIO_VELOCITY, PROPRIO_HEIGHT)
+from modules.proprioceptive_math import contact_velocity
 from modules.height_scan_provider import HeightScanProvider
 from modules.height_scan_policy_validation import (
     HEIGHT_SCAN_POLICY_FUNCS,
@@ -258,8 +260,13 @@ def _validate_policy_config(
     if missing_terms:
         raise RuntimeError(f"policy observation is missing required terms: {missing_terms}")
     unified = "unified_features" in policy_obs_cfg
+    proprio = config.get("deployment_observation_profile") == PROPRIO_PROFILE
+    if proprio and leg_joint_names != INTERFACE_LEG_JOINT_NAMES:
+        raise RuntimeError("proprioceptive kinematics requires FR/FL/RR/RL order")
+    if proprio and (not unified or enable_height_scan):
+        raise RuntimeError("proprioceptive profile requires Unified zero-height input")
     if unified:
-        if policy_obs_cfg["unified_features"]["func"] != FEATURES:
+        if policy_obs_cfg["unified_features"]["func"] != (PROPRIO_FEATURES if proprio else FEATURES):
             raise RuntimeError("unsupported unified actor feature function")
         terms = [k for k, v in policy_obs_cfg.items() if isinstance(v, dict) and "func" in v]
         if terms != list(EXPECTED_POLICY_OBS_FUNCS) + ["unified_features"]:
@@ -268,11 +275,19 @@ def _validate_policy_config(
             raise RuntimeError("unified actor requires 50 Hz control")
         for name, (kind, amplitude, scale) in MEASUREMENTS.items():
             term = policy_obs_cfg[name]
+            if proprio and name == "base_lin_vel":
+                if term.get("params") != {} or term.get("scale") != 2.:
+                    raise RuntimeError("unsupported proprioceptive velocity parameters")
+                continue
+            if proprio and name == "joint_vel":
+                amplitude = .1
             if term.get("params") != {"kind": kind, "amplitude": amplitude} or term.get("scale") != scale:
                 raise RuntimeError(f"unsupported unified measurement parameters: {name}")
     for term_name, expected_func in EXPECTED_POLICY_OBS_FUNCS.items():
         actual_func = policy_obs_cfg[term_name].get("func")
         if term_name == "height_scan":
+            if proprio and actual_func != PROPRIO_HEIGHT:
+                raise RuntimeError("proprioceptive actor requires trained zero height function")
             validate_height_scan_runtime_mode(
                 actual_func,
                 enable_height_scan,
@@ -281,7 +296,7 @@ def _validate_policy_config(
             )
             continue
         if unified and term_name in MEASUREMENTS:
-            expected_func = MEASUREMENT
+            expected_func = PROPRIO_VELOCITY if proprio and term_name == "base_lin_vel" else MEASUREMENT
         if actual_func != expected_func:
             raise RuntimeError(
                 f"unsupported observation func for {term_name}: expected {expected_func}, got {actual_func}"
@@ -966,7 +981,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
         self.unified_pose = None
         self.unified_pose_time = None
         self.unified_pose_frame = None
-        if self.unified_input is not None:
+        if self.unified_input is not None and not self.proprioceptive_policy:
             self.unified_pose_subscription = self.create_subscription(
                 PoseStamped, self.height_scan_pose_topic, self.unified_pose_cb, 10)
         self.reset_arm_passthrough_pose()
@@ -1031,6 +1046,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
             default_control_dt=0.005,
         )
         self.estimated_linear_velocity = np.zeros(3, dtype=np.float64)
+        self.latest_imu_quaternion = None
         self.foot_contact_thres = 20.0
 
         self.quadruped_dq = np.zeros(LEG_DOF)
@@ -2541,6 +2557,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
     def reset_sim2sim_action_state(self):
         if getattr(self, "unified_input", None) is not None:
             self.unified_input.reset()
+            self.proprio_velocity = np.zeros(3)
+            self.proprio_no_contact_seconds = 0.
             self.prev_action[:] = 0.
         max_delay = max(0, int(max(self.sim2sim_action_delay_range)))
         self.sim2sim_action_buffer = np.zeros((max_delay + 1, LEG_DOF), dtype=np.float64)
@@ -2975,6 +2993,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
             self.trigger_safety_stop(str(exc))
             return
         self.last_lowstate_time = now
+        self.latest_imu_quaternion = quaternion.copy()
         self.latest_foot_force = foot_force.copy()
         foot_contact = np.array(foot_force > self.foot_contact_thres, dtype=np.float64)
 
@@ -3990,7 +4009,8 @@ class WBCNodeLeg12ArmPassthrough(Node):
 
     def build_unified_observation(self):
         now = time.monotonic()
-        if self.unified_pose is None or now-self.unified_pose_time > self.height_scan_timeout:
+        proprio = self.proprioceptive_policy
+        if not proprio and (self.unified_pose is None or now-self.unified_pose_time > self.height_scan_timeout):
             raise RuntimeSafetyFault("483 actor requires fresh base odometry")
         arm = self.arm_observation_cache.get(now)
         if not (arm.state_valid and arm.state_fresh and arm.target_valid and arm.target_fresh):
@@ -4007,15 +4027,35 @@ class WBCNodeLeg12ArmPassthrough(Node):
         prefix[24:30] = arm.joint_pos-self.default_dof_pos[12:18]
         prefix[42:48] = arm.joint_vel*.05
         prefix[48:66] = self.prev_action
+        if proprio:
+            if self.latest_imu_quaternion is None:
+                raise RuntimeSafetyFault("proprioceptive actor requires IMU orientation")
+            q = self.interface_to_policy_leg_order(self.quadruped_q).reshape(4,3)
+            dq = self.interface_to_policy_leg_order(self.quadruped_dq).reshape(4,3)
+            omega = prefix[3:6]/.25
+            contacts = self.latest_foot_force > self.foot_contact_thres
+            self.proprio_velocity, count = contact_velocity(q,dq,omega,contacts,self.proprio_velocity,.02,np)
+            self.proprio_no_contact_seconds = 0. if count else self.proprio_no_contact_seconds+.02
+            if self.proprio_no_contact_seconds > .25:
+                raise RuntimeSafetyFault("proprioceptive velocity lost support contacts")
+            self.estimated_linear_velocity = self.proprio_velocity.copy()
+            prefix[0:3] = self.proprio_velocity*2.
+            pose = (None,self.latest_imu_quaternion)
+        else:
+            pose = self.unified_pose
         return self.unified_input.build(prefix, self.fixed_commands, arm.joint_pos, arm.joint_vel,
-                                        arm.joint_target, *self.unified_pose, self.policy_ctrl_iter)
+                                        arm.joint_target, *pose, self.policy_ctrl_iter)
 
     def init_policy(self, policy_path: str):
         logging.info("Preparing policy")
         faulthandler.enable()
         config_path = self.policy_config_path
         config = self.policy_config
+        self.proprioceptive_policy = config.get("deployment_observation_profile") == PROPRIO_PROFILE
 
+        logging.info("Observation profile=%s | external_xy=%s",
+                     config.get("deployment_observation_profile", "unified_external_xy_v1"),
+                     not self.proprioceptive_policy)
         joint_names = list(config["joint_names"])
         leg_joint_names = list(config["dog_joint_names"])
         unified = "unified_features" in config["observations"]["policy"]
@@ -4064,7 +4104,7 @@ class WBCNodeLeg12ArmPassthrough(Node):
             dtype=np.float64,
         )
         unified = "unified_features" in config["observations"]["policy"]
-        self.unified_input = UnifiedPolicyInput(self.default_dof_pos[12:18]) if unified else None
+        self.unified_input = UnifiedPolicyInput(self.default_dof_pos[12:18], use_xy_anchor=not self.proprioceptive_policy) if unified else None
         if unified and (self.arm_control_owner != "external_spacemouse"
                         or not self.require_arm_state_for_rl):
             raise RuntimeError("483 actor requires fresh external arm state/target")

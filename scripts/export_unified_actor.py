@@ -23,10 +23,14 @@ def main():
     p.add_argument('--output', type=Path, required=True)
     args=p.parse_args()
     cfg=yaml.load(args.env.read_text(), Loader=Loader)
-    assert cfg['observations']['policy']['unified_features']['func'].endswith('unified_asymmetric:actor_features')
+    profile=cfg.get('deployment_observation_profile','unified_external_xy_v1')
+    expected='proprioceptive_flat:proprio_features' if profile=='proprioceptive_flat_v1' else 'unified_asymmetric:actor_features'
+    assert cfg['observations']['policy']['unified_features']['func'].endswith(expected)
     assert abs(cfg['sim']['dt']*cfg['decimation']-.02)<1e-9
     ckpt=torch.load(args.checkpoint, map_location='cpu', weights_only=True)
     assert not any('normalizer' in k for k in ckpt), 'inspect observation normalization first'
+    if profile=='proprioceptive_flat_v1':
+        assert ckpt.get('iter',0)>13493, 'Do not relabel the unadapted 13493 checkpoint as proprioceptive'
     state=ckpt['model_state_dict']
     assert state['actor.0.weight'].shape==(512,483)
     assert state['critic.0.weight'].shape==(512,560)
@@ -63,7 +67,7 @@ def main():
     sha=lambda path:hashlib.sha256(path.read_bytes()).hexdigest()
     manifest={'schema_version':1,'name':f'Go2-X5 unified483 iteration {ckpt.get("iter")}',
               'source_checkpoint':args.checkpoint.name,'source_sha256':sha(args.checkpoint),
-              'iteration':ckpt.get('iter'),'actor_dim':483,'critic_dim':560,'actions':12,
+              'observation_profile':profile,'iteration':ckpt.get('iter'),'actor_dim':483,'critic_dim':560,'actions':12,
               'artifacts':{name:{'path':file,'sha256':sha(args.output/file)} for name,file in
                            [('policy','policy.onnx'),('env','env.yaml'),('height_contract','height_scan_contract.yaml'),('height_grid','height_scan_contract.npz')]}}
     (args.output/'policy_bundle.json').write_text(json.dumps(manifest,indent=2)+'\n')

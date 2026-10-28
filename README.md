@@ -83,3 +83,7 @@ GX_REAL_UNIFIED_BUNDLE="$PWD/policies/unified483_model11494" \
 旧19000保存在`policies/legacy_flat19000/`，不会被默认加载；若确需旧Flat链路，需显式设置`GX_REAL_POLICY_PATH`与`GX_REAL_POLICY_BUNDLE_PATH`到该目录，并使用`run_leg12_real.sh`。旧模型契约是260维，不能替换进483维入口。
 
 硬件安装、网络与历史控制说明见[历史Flat文档](docs/legacy_flat19000_README.md)；其中旧模型、旧观测和旧放行结论只适用于旧版本。[上机使用指南](docs/上机使用指南.md)保留硬件操作资料。
+
+## 独立续训：无外部XY定位
+
+新增`proprioceptive_flat_v1`训练/部署契约：高度与XY误差固定为0，使用IMU相对航向及接触辅助腿部运动学速度估计。新入口拒绝旧13493包，需显式指定续训后导出的模型；现有默认版本保持不变。详见[无外部定位平地版本](PROPRIOCEPTIVE_FLAT.zh-CN.md)。

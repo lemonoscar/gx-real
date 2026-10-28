@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import json
+import yaml
 from pathlib import Path
 import sys
 
@@ -17,6 +19,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--policy", required=True)
     parser.add_argument("--manifest", required=True)
+    parser.add_argument("--expected-profile")
     args = parser.parse_args()
 
     policy_path = Path(args.policy).expanduser().resolve()
@@ -25,6 +28,11 @@ def main() -> int:
         env_path=str(policy_path.parent / "env.yaml"),
         manifest_path=args.manifest,
     )
+    if args.expected_profile:
+        manifest=json.loads(Path(args.manifest).read_text())
+        cfg=yaml.safe_load((policy_path.parent/"env.yaml").read_text())
+        if manifest.get("observation_profile") != args.expected_profile or cfg.get("deployment_observation_profile") != args.expected_profile:
+            raise RuntimeError("model bundle was not exported for the requested observation profile")
     print(
         "[gx-real] policy bundle verified: "
         f"{result['name']} "
